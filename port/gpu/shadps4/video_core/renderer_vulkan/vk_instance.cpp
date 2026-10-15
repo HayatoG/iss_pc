@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <string_view>
 #include <cstdio>
 #include <cstdlib>
 #include <boost/container/static_vector.hpp>
@@ -901,7 +902,11 @@ void Instance::CollectDeviceParameters() {
 
     // tlg: see video_core/amdgpu/tlg_bc_tiny.h. Set before any image or shader exists.
     const char* bc_tiny_env = std::getenv("TLG_BC_TINY");
-    const bool bc_tiny = bc_tiny_env && *bc_tiny_env
+    // TLG_BC_TINY=auto: also decode on any driver that refuses BC 1D and is not given the 2D
+    // promotion (NVIDIA), so the driver never sees a block-compressed 1D image (test branch).
+    const bool bc_tiny_auto = bc_tiny_env && std::string_view{bc_tiny_env} == "auto";
+    const bool bc_tiny = bc_tiny_auto ? (bc1d_refused && !block1d_as_2d)
+                         : bc_tiny_env && *bc_tiny_env
                              ? *bc_tiny_env == '1'
                              : driver_id == vk::DriverId::eAmdProprietary;
     AmdGpu::bc_tiny_decode.store(bc_tiny, std::memory_order_relaxed);
