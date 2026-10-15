@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstdio>
@@ -497,7 +498,13 @@ void PipelineCache::StartDriverCacheSaver() {
         auto* saver = driver_saver;
         std::unique_lock lock{saver->mutex};
         while (!saver->stop) {
-            if (saver->cv.wait_for(lock, std::chrono::seconds(180), [&] { return saver->stop; })) {
+            // tlg: TLG_DRIVER_CACHE_SAVE_S (default 60, was 180): a crash loses at most this much of what
+            // the driver learned.
+            static const int save_seconds = [] {
+                const char* v = std::getenv("TLG_DRIVER_CACHE_SAVE_S");
+                return v && *v ? std::clamp(std::atoi(v), 10, 3600) : 60;
+            }();
+            if (saver->cv.wait_for(lock, std::chrono::seconds(save_seconds), [&] { return saver->stop; })) {
                 break;
             }
             lock.unlock();
@@ -1080,6 +1087,62 @@ void Bp07Tally(bool compiled_now) {
 }
 } // namespace
 
+// tlg: TLG_ASYNC_WAIT_MS=N (default 0 = off), TLG_ASYNC_WAIT_FRAME_MS=M (default 8). A draw whose
+// pipeline is still compiling in the background is skipped. With N > 0 it first waits for the
+// compile up to N ms, and the waits of one GPU frame add up to at most M ms: a short compile
+// then costs a few milliseconds instead of a missing ground or effect, a long one is skipped as
+// before, so the frame time stays bounded. The log shows the tally every 5 s.
+namespace {
+struct AsyncWaitBudget {
+    std::chrono::microseconds per_draw{0}, per_frame{8000};
+    u64 frame = ~0ull;
+    std::chrono::nanoseconds used{0};
+    u64 waited = 0, ready = 0, timed_out = 0;
+    std::chrono::nanoseconds total{0};
+    std::chrono::steady_clock::time_point last_log = std::chrono::steady_clock::now();
+
+    AsyncWaitBudget() {
+        if (const char* v = std::getenv("TLG_ASYNC_WAIT_MS"); v && *v) {
+            per_draw = std::chrono::milliseconds(std::clamp(std::atoi(v), 0, 100));
+        }
+        if (const char* v = std::getenv("TLG_ASYNC_WAIT_FRAME_MS"); v && *v) {
+            per_frame = std::chrono::milliseconds(std::clamp(std::atoi(v), 0, 100));
+        }
+    }
+    bool Enabled() const { return per_draw.count() > 0 && per_frame.count() > 0; }
+
+    /// How long this draw may wait now (zero: none left in this frame).
+    std::chrono::nanoseconds Allowance() {
+        const u64 now_frame = TlgStats::gpu_frames.load(std::memory_order_relaxed);
+        if (now_frame != frame) {
+            frame = now_frame;
+            used = std::chrono::nanoseconds{0};
+        }
+        const auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(per_frame) - used;
+        return left.count() <= 0 ? std::chrono::nanoseconds{0}
+                                 : std::min<std::chrono::nanoseconds>(left, per_draw);
+    }
+
+    void Tally(std::chrono::nanoseconds spent, bool finished) {
+        used += spent;
+        total += spent;
+        ++waited;
+        ++(finished ? ready : timed_out);
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_log < std::chrono::seconds(5)) {
+            return;
+        }
+        last_log = now;
+        LOG_INFO(Render_Vulkan,
+                 "Async wait (total): {} draws waited {:.1f} ms in all, {} had the pipeline in time, "
+                 "{} were skipped after the limit ({} ms per draw, {} ms per frame)",
+                 waited, double(total.count()) / 1e6, ready, timed_out,
+                 per_draw.count() / 1000, per_frame.count() / 1000);
+    }
+};
+AsyncWaitBudget async_wait; // GPU thread only (pipeline selection)
+} // namespace
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared) {
     SeedWorkerCaches();
@@ -1159,6 +1222,24 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             });
             if (queued) {
                 pending_graphics.emplace(sel.graphics_key, std::move(build));
+            }
+        }
+        // tlg: TLG_ASYNC_WAIT_MS: give the background compile a few milliseconds before the draw goes.
+        if (async_wait.Enabled()) {
+            if (const auto building = pending_graphics.find(sel.graphics_key);
+                building != pending_graphics.end()) {
+                if (const auto allowance = async_wait.Allowance(); allowance.count() > 0) {
+                    const auto t0 = std::chrono::steady_clock::now();
+                    const bool finished = building.value()->job.WaitFor(allowance);
+                    async_wait.Tally(std::chrono::steady_clock::now() - t0, finished);
+                    if (finished) {
+                        PublishGraphics();
+                        if (const auto done = graphics_pipelines.find(sel.graphics_key);
+                            done != graphics_pipelines.end()) {
+                            return done->second.get();
+                        }
+                    }
+                }
             }
         }
         ++g_tlg_pending_draws;
