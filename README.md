@@ -182,7 +182,7 @@ A tela **Correções** do launcher (e o botão **Correções experimentais…** 
 
 ## Luzes e oclusão
 
-Nas cenas de noite, os faróis dos carros piscavam e o brilho das luzes aparecia **através** dos personagens. A causa: o contador de oclusão (`ZPASS_DONE`) que o jogo lê para saber quanto de cada luz está visível era um número falso, que só crescia. Com o modo **3** (contagem zero, o padrão desta versão) o problema **foi corrigido, confirmado no Windows e no Linux**.
+Os faróis piscavam e o brilho das luzes aparecia **através** dos personagens. A causa: o contador de oclusão (`ZPASS_DONE`) que o jogo lê para saber quanto de cada luz está visível era um número falso, que só crescia. Com o modo **3** (contagem zero, o padrão desta versão) o problema **foi corrigido, confirmado no Windows e no Linux**.
 
 | `ISS_OCCLUSION_MODE` | Efeito |
 |---|---|
@@ -543,7 +543,7 @@ The launcher's **Fixes** screen (and the **Experimental fixes…** button of the
 
 ## Lights and occlusion
 
-In night scenes, car headlights flickered and the glare of lights showed up **through** characters. The cause: the occlusion counter (`ZPASS_DONE`) that the game reads to know how much of each light is visible was a fake number that only grew. With mode **3** (zero counts, the default of this version) the problem **was fixed, confirmed on Windows and on Linux**.
+Headlights flickered and the glare of lights showed up **through** characters. The cause: the occlusion counter (`ZPASS_DONE`) that the game reads to know how much of each light is visible was a fake number that only grew. With mode **3** (zero counts, the default of this version) the problem **was fixed, confirmed on Windows and on Linux**.
 
 | `ISS_OCCLUSION_MODE` | Effect |
 |---|---|
