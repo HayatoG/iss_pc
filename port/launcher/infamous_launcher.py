@@ -364,8 +364,9 @@ class Launcher:
             self.game_language_now.config(text='')
         else:
             name = GAME_LANGUAGE_NAMES[tlg_run.resolve_game_language(self.settings)]
-            self.game_language_now.config(text=self.t('game_language_now').format(name=name))
-        self.refresh_status()
+            self.game_language_now.config(text=self.t('game_language_now', name=name))
+        if hasattr(self, 'play_button'):   # called while the window is still being built: the button comes later
+            self.refresh_status()
 
     def check(self, parent, row, key):
         var = tk.BooleanVar(value=bool(self.settings[key]))
