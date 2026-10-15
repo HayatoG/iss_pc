@@ -143,7 +143,22 @@ GPU1:
         text = 'N: Name="Sony Interactive Entertainment DualSense Wireless Controller"\nN: Name="DualSense Touchpad"\n'
         self.assertEqual('DualSense', logic.detect_pad(text))
         self.assertEqual('Xbox', logic.detect_pad('N: Name="Microsoft Xbox Series pad"\n'))
+        for name, label in (('XInput Controller #1', 'Xbox'), ('Controller (Xbox One For Windows)', 'Xbox'),
+                            ('8BitDo Ultimate 2 Wireless Controller', '8BitDo'),
+                            ('Nintendo Switch Pro Controller', 'Switch Pro'), ('Wireless Controller', 'DualShock 4')):
+            self.assertEqual(label, logic.detect_pad(f'N: Name="{name}"\n'), name)
         self.assertIsNone(logic.detect_pad('N: Name="Logitech USB Keyboard"\nN: Name="Power Button"\n'))
+
+    def test_guide_for_detected_pads(self):
+        for name, kind in (('Xbox', 'xbox'), ('8BitDo', '8bitdo'), ('Switch Pro', 'switch'), ('DualSense', 'xbox')):
+            self.assertEqual(kind, logic.guide_kind(name))
+
+    def test_controller_from_the_probe(self):
+        from unittest import mock
+        class R:
+            stdout = 'Gamepad: type=standard south=a east=b west=x north=y name=XInput Controller #1\n'
+        with mock.patch.object(logic.subprocess, 'run', return_value=R()):
+            self.assertEqual('Xbox', logic.detect_pad())
 
 
 class NewsTests(unittest.TestCase):

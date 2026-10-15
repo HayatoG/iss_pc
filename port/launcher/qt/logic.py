@@ -161,28 +161,54 @@ def detect_gpu(timeout=6):
     return parse_vulkaninfo(out)
 
 
-_PAD_WORDS = (('DualSense', 'DualSense'), ('Wireless Controller', 'DualShock 4'), ('Xbox', 'Xbox'),
-              ('Pro Controller', 'Switch Pro'), ('8BitDo', '8BitDo'), ('Controller', None), ('Gamepad', None))
+_PAD_WORDS = (('8BitDo', '8BitDo'), ('DualSense', 'DualSense'), ('Wireless Controller', 'DualShock 4'),
+              ('DualShock', 'DualShock 4'), ('Xbox', 'Xbox'), ('XInput', 'Xbox'), ('Microsoft', 'Xbox'),
+              ('Pro Controller', 'Switch Pro'), ('Switch', 'Switch Pro'), ('Nintendo', 'Switch Pro'),
+              ('Controller', None), ('Gamepad', None))
+
+
+def _pad_from_name(name):
+    low = name.lower()
+    if 'touchpad' in low or 'motion sensors' in low or 'keyboard' in low or 'mouse' in low:
+        return None
+    for word, label in _PAD_WORDS:
+        if word.lower() in low:
+            return label or name
+    return None
+
+
+def _probe_pad_name():
+    """Controller name from `tlg-probe --gamepad` (SDL3, works on Windows too); None when it is
+    missing, fails or finds nothing."""
+    try:
+        out = subprocess.run([str(tlg_run.PROBE), '--gamepad'], stdin=subprocess.DEVNULL, capture_output=True,
+                             text=True, timeout=10, creationflags=tlg_run.NO_WINDOW,
+                             env=tlg_run.probe_env()).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        if line.startswith('Gamepad:') and 'name=' in line:
+            return line.split('name=', 1)[1].strip() or None
+    return None
 
 
 def detect_pad(devices_text=None):
-    """Name of a connected game controller (Linux: /proc/bus/input/devices, free); None if none
-    is found or the platform has no cheap way to ask."""
+    """Name of a connected game controller. With devices_text (the format of Linux's
+    /proc/bus/input/devices) only that text is read; otherwise the game's probe is asked first
+    (the only way on Windows) and Linux's /proc is the fallback. None if none is found."""
     if devices_text is None:
+        name = _probe_pad_name()
+        if name:
+            return _pad_from_name(name) or name
         try:
             devices_text = Path('/proc/bus/input/devices').read_text(errors='replace')
         except OSError:
             return None
     for line in devices_text.splitlines():
-        if not line.startswith('N: Name='):
-            continue
-        name = line.split('=', 1)[1].strip().strip('"')
-        low = name.lower()
-        if 'touchpad' in low or 'motion sensors' in low or 'keyboard' in low or 'mouse' in low:
-            continue
-        for word, label in _PAD_WORDS:
-            if word.lower() in low:
-                return label or name
+        if line.startswith('N: Name='):
+            found = _pad_from_name(line.split('=', 1)[1].strip().strip('"'))
+            if found:
+                return found
     return None
 
 
