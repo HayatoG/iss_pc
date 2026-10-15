@@ -92,14 +92,12 @@ static vk::FormatFeatureFlags2 FormatFeatureFlags(const vk::ImageUsageFlags usag
 
 UniqueImage::~UniqueImage() {
     if (image) {
-        TLG_IMG_TRACE("destroy image %p\n", (void*)VkImage(image));
         vmaDestroyImage(allocator, image, allocation);
     }
 }
 
 void UniqueImage::Destroy() {
     if (image) {
-        TLG_IMG_TRACE("destroy image %p\n", (void*)VkImage(image));
         vmaDestroyImage(allocator, image, allocation);
         image = vk::Image{};
         allocation = {};

@@ -108,14 +108,6 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
 }
 
-
-namespace {
-// tlg: TLG_IMG_TRACE (video_core/amdgpu/tlg_amd_1d.h): every runtime step touching a 1D image.
-bool TraceIs1D(const VideoCore::Image* image) {
-    return AmdGpu::ImgTrace() && image && !image->info.props.is_host_2d && image->info.size.height == 1;
-}
-} // namespace
-
 void Runtime::TickFrame() {
     staging_pool.TickFrame();
 }
@@ -204,9 +196,6 @@ void Runtime::InlineData(VideoCore::Buffer* dst, u64 offset, u32 value) {
 bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                       vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
                       std::optional<VideoCore::SubresourceRange> subres_range) {
-    if (TraceIs1D(image)) {
-        TLG_IMG_TRACE("Transit %p\n", (void*)VkImage(image->GetImage()));
-    }
     BeforeImageAccess();
     if (scene_targets) scene_targets->NativeAccess(*image, dst_access);
     const size_t prev_num_barriers = static_cast<size_t>(image_barriers.size());
@@ -290,9 +279,6 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
 
 void Runtime::CopyAliasImage(VideoCore::Image* src, VideoCore::Image* dst,
                              const vk::Extent3D& extent) {
-    if (TraceIs1D(src) || TraceIs1D(dst)) {
-        TLG_IMG_TRACE("CopyAliasImage %p -> %p\n", (void*)VkImage(src->GetImage()), (void*)VkImage(dst->GetImage()));
-    }
     SetBackingSamples(src, src->info.num_samples);
     SetBackingSamples(dst, dst->info.num_samples);
     scheduler.EndRendering();
@@ -320,9 +306,6 @@ void Runtime::CopyAliasImage(VideoCore::Image* src, VideoCore::Image* dst,
 
 void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
                             std::span<const vk::BufferImageCopy> download_copies) {
-    if (TraceIs1D(src)) {
-        TLG_IMG_TRACE("DownloadImage %p\n", (void*)VkImage(src->GetImage()));
-    }
     SetBackingSamples(src, src->info.num_samples);
     scheduler.EndRendering();
     const TransferMark mark{*this, "image download", *src};
@@ -352,9 +335,6 @@ void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
 }
 
 void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
-    if (TraceIs1D(src) || TraceIs1D(dst)) {
-        TLG_IMG_TRACE("CopyImage %p -> %p\n", (void*)VkImage(src->GetImage()), (void*)VkImage(dst->GetImage()));
-    }
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
 
     // Format mismatch warning (safe but useful)
@@ -456,9 +436,6 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
 
 void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
                                   const VideoCore::Buffer* buffer, u64 offset) {
-    if (TraceIs1D(src) || TraceIs1D(dst)) {
-        TLG_IMG_TRACE("CopyImageWithBuffer %p -> %p\n", (void*)VkImage(src->GetImage()), (void*)VkImage(dst->GetImage()));
-    }
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
     const u32 num_layers = std::min(src->info.resources.layers, dst->info.resources.layers);
     ASSERT(src->info.resources.layers == dst->info.resources.layers && num_mips == 1);
@@ -520,9 +497,6 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
 }
 
 void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32 slice) {
-    if (TraceIs1D(src) || TraceIs1D(dst)) {
-        TLG_IMG_TRACE("CopyMip %p -> %p\n", (void*)VkImage(src->GetImage()), (void*)VkImage(dst->GetImage()));
-    }
     const auto dst_dim = dst->info.props.is_block ? 2 : 0;
     const auto mip_block_w = std::max(dst->info.size.width >> (mip + dst_dim), 1u);
     const auto mip_block_h = std::max(dst->info.size.height >> (mip + dst_dim), 1u);
@@ -591,9 +565,6 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
 }
 
 void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
-    if (TraceIs1D(src) || TraceIs1D(dst)) {
-        TLG_IMG_TRACE("CopyColorAndDepth %p -> %p\n", (void*)VkImage(src->GetImage()), (void*)VkImage(dst->GetImage()));
-    }
     // tlg: with TLG_NO_MSAA a guest multisampled depth target is single-sampled on the host; a
     // colour image aliasing it still holds the samples as channels, so sample 0 is channel 0.
     const bool guest_ms_depth = dst->info.props.is_depth && dst->info.guest_samples > 1;
@@ -676,9 +647,6 @@ void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
 void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                            const VideoCore::SubresourceRange& src_range,
                            const VideoCore::SubresourceRange& dst_range) {
-    if (TraceIs1D(src) || TraceIs1D(dst)) {
-        TLG_IMG_TRACE("ResolveImage %p -> %p\n", (void*)VkImage(src->GetImage()), (void*)VkImage(dst->GetImage()));
-    }
     SetBackingSamples(dst, 1, false);
     scheduler.EndRendering();
 
@@ -749,9 +717,6 @@ void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
 
 void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
                          const vk::ClearValue& clear_value) {
-    if (TraceIs1D(dst)) {
-        TLG_IMG_TRACE("ClearImage %p\n", (void*)VkImage(dst->GetImage()));
-    }
     scheduler.EndRendering();
 
     const bool needs_flush =
@@ -778,9 +743,6 @@ void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRang
 }
 
 void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool copy_backing) {
-    if (TraceIs1D(image)) {
-        TLG_IMG_TRACE("SetBackingSamples %p\n", (void*)VkImage(image->GetImage()));
-    }
     BeforeImageAccess();
     auto& backing = image->backing;
     auto& backing_images = image->backing_images;

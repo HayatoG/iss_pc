@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
-# The commit the probe logs on its first line (CI: GITHUB_SHA; local: git, plus "+dirty").
-if [[ -z ${TLG_BUILD_COMMIT:-} ]]; then
-    TLG_BUILD_COMMIT=${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}
-    TLG_BUILD_COMMIT=${TLG_BUILD_COMMIT:0:12}
-    [[ -z ${GITHUB_SHA:-} ]] && ! git diff --quiet HEAD -- . 2>/dev/null && TLG_BUILD_COMMIT+="+dirty"
-fi
-export TLG_BUILD_COMMIT
 mkdir -p out
 # Windows: MSYS2 CLANG64 (packages in packaging/windows/README.md). The GPU library is static
 # there and CMake links tlg-probe.exe as well; no PGO (GCC-only flags), LTO off by default.
@@ -100,7 +93,7 @@ if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/l
 fi
 # isa_emulate runs inside guest code: no XMM/YMM.
 "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -mgeneral-regs-only -c src/isa_emulate.c -o out/isa_emulate.o
-"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -no-pie -DTLG_BUILD_COMMIT="\"$TLG_BUILD_COMMIT\"" "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/cpu_check.c src/vulkan_smoke.c out/isa_emulate.o src/isa_rewrite.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/tlg-probe
+"$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -no-pie "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/cpu_check.c src/vulkan_smoke.c out/isa_emulate.o src/isa_rewrite.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/tlg-probe
 echo "Built $PWD/out/tlg-probe"
 # GPU check for run.sh (live_resolution=auto): links only the Vulkan loader.
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror -Igpu/shadps4 tools/gpu_capabilities.c "${libraries[@]}" -o out/tlg-gpu-capabilities

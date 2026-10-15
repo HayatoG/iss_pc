@@ -824,9 +824,6 @@ static void alias_port_environment(void) {
     free(copy);
 }
 
-#ifndef TLG_BUILD_COMMIT
-#define TLG_BUILD_COMMIT "unknown"
-#endif
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     alias_port_environment();
@@ -880,16 +877,6 @@ int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--isa-rewrite file] [--mount guest=host]... [--timeout seconds] | --vulkan-only | --cpu-features | --gamepad\n", argv[0]);
         return 1;
-    }
-    {
-        /* The first log line says which build and which game this is (players often can't tell
-         * which zip they ran, or which dump: only CUSA00223 1.07 is supported). */
-        char path[4096], serial[32] = "?", version[32] = "?";
-        snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
-        sfo_value(path, "TITLE_ID", serial, sizeof(serial), NULL);
-        sfo_value(path, "APP_VER", version, sizeof(version), NULL);
-        printf("Build: %s (built %s %s); game %s %s; threads inherit the creator's MXCSR/x87 control\n",
-               TLG_BUILD_COMMIT, __DATE__, __TIME__, serial, version);
     }
     if (!cpu_supported(missing, sizeof missing)) return 20;
     if (cpu_missing_sets) printf("CPU: missing %s\n", missing);

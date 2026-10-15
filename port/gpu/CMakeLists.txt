@@ -236,9 +236,6 @@ if (WIN32)
         ../src/isa_rewrite.c ../src/isa_emulate.c
         ../packaging/windows/tlg-probe.rc)
     set_target_properties(tlg-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    if (DEFINED ENV{TLG_BUILD_COMMIT})
-        target_compile_definitions(tlg-probe PRIVATE TLG_BUILD_COMMIT="$ENV{TLG_BUILD_COMMIT}")
-    endif()
     target_compile_options(tlg-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
     target_include_directories(tlg-probe PRIVATE .. ../src)
     # tlg: libSceFont (runtime_gr2_font.c) renders glyphs with FreeType.
