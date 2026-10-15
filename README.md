@@ -30,6 +30,12 @@ Por **HayatoG** · YouTube [@hayatog-dev](https://www.youtube.com/@hayatog-dev) 
 
 ## Novidades
 
+- **Launcher novo (Qt Quick), agora o padrão:** com 8 telas (Jogar, Gráficos, Controles, Correções, Saves e dados, Guias de controle, Suporte, Atualizações), interface em português e inglês e o idioma do jogo seguindo o do sistema por padrão. O launcher antigo (Tk) continua no pacote como **inFAMOUS Second Son (classic)**, de reserva. Veja [O launcher](#o-launcher).
+- **Saves e dados:** pasta de dados configurável, backup antes de cada partida, exportar/importar `.zip`, duplicar e excluir saves, e a busca de saves de outras instalações. Resolve o "perdi meu save depois de atualizar". Veja [Saves e dados](#saves-e-dados).
+- **Faróis piscando e brilho que atravessava personagens: corrigido.** O contador de oclusão que o jogo lê para saber quanto de uma luz está visível era falso; o novo modo 3 (o padrão) devolve contagem zero, e isso corrigiu o problema, **confirmado no Windows e no Linux**. Veja [Luzes e oclusão](#luzes-e-oclusão).
+- **Correções experimentais BP01–BP12:** doze correções trazidas de outros ports de PS4 e do shadPS4, com chave individual, perfil Recomendado e o "Como a release anterior" para comparar. Veja [Correções experimentais](#correções-experimentais).
+- **Logs mais úteis:** todo log começa com um bloco `Config:` (suas opções, sem caminhos) e mostra as linhas `Backports:`; a tela **Suporte** monta o relatório sem dados pessoais. Veja [Logs e relatórios](#logs-e-relatórios).
+- **Guias de controle:** imagens prontas (Xbox, Switch Pro e 8BitDo, em português e inglês) do modo sensor e do touchpad, na seção [Sensor de movimento e touchpad](#sensor-de-movimento-e-touchpad) e na tela **Guias de controle** do launcher.
 - **Processadores sem F16C (Sandy Bridge, #51):** as 13 conversões de meia precisão do jogo (`VCVTPH2PS`/`VCVTPS2PH`) passam a ser emuladas na partida, com o mesmo resultado bit a bit do processador (arredondamento, denormais, Inf e NaN). Antes o jogo parava com "13 sites use encodings the rewrite cannot emulate".
 - **Mouse:** o mouse gira a câmera (analógico direito) e também faz o papel do **touchpad**. Esquerdo = R2, direito = L2, do meio = R3. **Segure Ctrl esquerdo (ou o botão lateral X1)** e o mouse vira um dedo no touchpad: esquerdo toca/clica (segurar = absorver poder), arrastar com o esquerdo desliza (porta "Open Door", scanner), direito = dois dedos (levantar o carro do Reggie). A janela prende o mouse; Esc solta e um clique prende de novo. Veja [Mouse](#mouse).
 - **Explicação do grafite na tela:** na primeira vez que o modo sensor liga, uma tela no meio mostra os passos (sacudir, pintar, mirar, sair) com os botões do seu controle; fecha com "Entendi". O menu Insert ganhou a aba **Controle**, que mostra essa tela de novo e ajusta a **velocidade da mira do grafite** (25–200%, também `ISS_SENSOR_AIM`).
@@ -67,9 +73,14 @@ Por **HayatoG** · YouTube [@hayatog-dev](https://www.youtube.com/@hayatog-dev) 
 | Controle | ✅ DualSense, DualShock 4, Xbox e 8BitDo via SDL3 |
 | Desempenho | 🔧 20–30 FPS típicos numa RTX 2060, instável; otimização em andamento |
 | Engasgos | 🔧 Na primeira vez que cada shader é compilado (cutscenes e áreas novas) |
-| Imagem | 🔧 Alguns efeitos de névoa, água e luz piscam |
+| Luzes (faróis piscando, brilho atravessando personagens) | ✅ Corrigido pelo modo de oclusão 3 (padrão), confirmado no Windows e no Linux; se o brilho das luzes ficar fraco, use o modo 0 |
+| Imagem | 🔧 Alguns efeitos de névoa, água e fogo ainda piscam |
+| Launcher | ✅ Qt Quick (padrão) com o Tk de reserva; português e inglês |
+| Saves e dados | ✅ Pasta configurável, backup, exportar/importar |
+| Mouse (câmera e touchpad) | 🧪 Implementado, ainda pouco testado em jogo |
+| Correções experimentais (BP01–BP12) | 🧪 As de padrão ligado vêm no perfil Recomendado; BP06–BP09 (desligadas) são experimentais |
 | Linux | ✅ Testado (Nobara/Fedora 44) |
-| Windows | 🧪 Build automático, ainda sem teste em jogo |
+| Windows | 🧪 Testado por jogadores (a correção de luzes foi confirmada); crash conhecido em RX 580/Polaris, veja [Problemas conhecidos](#problemas-conhecidos) |
 
 ![Desempenho de uma sessão de 7 minutos andando pela cidade](docs/screenshots/desempenho.png)
 
@@ -80,7 +91,9 @@ Por **HayatoG** · YouTube [@hayatog-dev](https://www.youtube.com/@hayatog-dev) 
 A [**última versão**](https://github.com/HayatoG/iss_pc/releases/latest) é gerada pelo GitHub Actions a cada mudança; as anteriores ficam em [Releases](https://github.com/HayatoG/iss_pc/releases) como histórico:
 
 - **Linux x86-64** (glibc 2.39+: Ubuntu 24.04, Fedora 40, SteamOS 3.6 ou mais novos): `infamous-linux-x86_64.tar.gz`
-- **Windows 10/11 64 bits**: `infamous-windows-x86_64.zip`
+- **Windows 10 (1903 ou mais novo) / 11, 64 bits**: `infamous-windows-x86_64.zip`
+
+Os pacotes abrem o launcher Qt por padrão; ele soma cerca de 55 MB ao download (valor medido no Linux; no Windows é uma estimativa). Se o launcher novo não abrir na sua máquina, use o **inFAMOUS Second Son (classic)**, na mesma pasta.
 
 ## Arquivos do jogo necessários
 
@@ -98,18 +111,87 @@ Tudo vem do **seu** PS4 (GoldHEN + Itemzflow). Nada disso vai no download. Use *
 
 A lista completa e o passo a passo, que também vão nas notas de cada Release, estão em [`docs/ARQUIVOS_NECESSARIOS.md`](docs/ARQUIVOS_NECESSARIOS.md).
 
-**PC:** placa de vídeo com Vulkan 1.3 (6 GB de VRAM recomendados) e ~33 GB livres.
+**PC:** Windows 10 (1903+)/11 64 bits ou Linux x86-64 (glibc 2.39+), placa de vídeo com Vulkan 1.3 (6 GB de VRAM recomendados) e ~33 GB livres.
 
 ## Como jogar
 
 1. Extraia o pacote.
-2. Abra o **inFAMOUS Second Son**, escolha a pasta do jogo e o idioma e clique em **Jogar**. Se a imagem engasgar demais, a opção "Precisão da GPU" tem um modo rápido (sem as partículas da GPU).
+2. Abra o **inFAMOUS Second Son** (no Windows, se aparecer "O Windows protegeu o computador", clique em *Mais informações* e *Executar assim mesmo*: o programa não é assinado digitalmente). Escolha a pasta do jogo e clique em **Jogar**. O idioma do jogo é o do seu sistema por padrão; dá para trocar na mesma tela. Se a imagem engasgar demais, a opção "Precisão da GPU" (tela **Gráficos**) tem um modo rápido (sem as partículas da GPU).
 3. No jogo, **F10** liga o contador de FPS, e **Insert** (ou R3 + L2 no controle) abre o menu do port.
 4. Quando o jogo pedir para virar ou sacudir o controle e o seu não tiver sensor: toque em L3+R3 (ou Share no Xbox Series). O controle já fica de lado; X/A sacode, R2 pinta e o analógico esquerdo mira. Toque de novo para sair. No teclado: T/G (com as setas para mirar) e Y. Veja [Sensor de movimento e touchpad](#sensor-de-movimento-e-touchpad).
 
 O passo a passo completo está em [`README-player.md`](port/packaging/README-player.md), que também vem dentro do pacote.
 
-**Correções experimentais:** o botão **Correções experimentais…** do launcher liga e desliga as 12 correções `TLG_BP01` a `TLG_BP12` (de outros ports de PS4 e do shadPS4), as chaves de diagnóstico (`TLG_WQM`, `TLG_LDS_*`, `TLG_BC_TINY`...) e as opções do menu Insert, com etiqueta de "no jogo" ou "reinicia o jogo". Sem mexer em nada valem os padrões. Lista completa: [`docs/EXPERIMENTAL_FIXES.md`](docs/EXPERIMENTAL_FIXES.md).
+## O launcher
+
+O launcher é o programa que abre ao executar **inFAMOUS Second Son**. O novo (Qt Quick) é o padrão; o antigo (Tk) fica ao lado, como **inFAMOUS Second Son (classic)**, para o caso de o novo não abrir. Os dois usam as mesmas configurações e os mesmos saves, e aceitam `--play`, `--script` e `--clear-shader-cache`.
+
+| Tela | Para que serve |
+|---|---|
+| **Jogar** | pasta do jogo, idioma do jogo, GPU e versão detectadas, perfil de correções, seletor de oclusão (luzes), botão Continuar/Jogar |
+| **Gráficos** | modo de janela, VSync, limite de FPS, FSR 1 e nitidez, precisão da GPU, orçamento de VRAM, cache de shaders, overlay e predefinições (Desempenho, Equilibrado, Qualidade, Fiel ao PS4) |
+| **Controles** | zona morta dos analógicos, velocidade da mira do grafite, mouse (câmera e modo touchpad), mapa do teclado e remapeamento |
+| **Correções** | BP01–BP12, chaves de diagnóstico (A/B) e opções do menu Insert; perfil Recomendado e "Como a release anterior" |
+| **Saves e dados** | pasta de dados, lista de saves, backups, exportar/importar `.zip`; veja [Saves e dados](#saves-e-dados) |
+| **Guias de controle** | imagens Xbox, Switch Pro e 8BitDo (português e inglês): salvar, copiar, abrir a pasta |
+| **Suporte** | problemas conhecidos para a sua GPU, links e o relatório de problema; veja [Logs e relatórios](#logs-e-relatórios) |
+| **Atualizações** | mostra a versão instalada e verifica a última release (veja abaixo) |
+
+**Idioma da interface:** português (Brasil) ou inglês (EUA), que o launcher escolhe pelo idioma do sistema e dá para trocar. Quando você escolhe um, o launcher passa a escolha ao jogo (`ISS_UI_LANG`) para o overlay.
+
+**Idioma do jogo:** a primeira opção é **Automático (idioma do sistema)**, o padrão, e depois vêm 6 idiomas: English (1), Português (Brasil) (17), Español (Latinoamérica) (20), Français (Canada) (22), Türkçe (19) e Русский (8). Português vira pt-BR, espanhol vira es-LA, francês vira fr-CA, turco e russo ficam como são, e o resto vira inglês. A escolha vale na próxima partida e vira `ISS_LANGUAGE` (um `ISS_LANGUAGE` definido por você vence). **Só funciona se os arquivos do seu jogo tiverem o idioma:** turco e russo, por exemplo, só aparecem se o seu dump tiver esses idiomas. É separado do idioma da interface.
+
+**Atualizações:** a tela **Atualizações** faz uma única consulta HTTPS à última release no GitHub (nada seu é enviado), mostra as notas no idioma da interface e o botão **Baixar** só abre a página da release. **Ela não baixa nem instala nada: um atualizador automático de verdade ainda não existe.** "Verificar ao abrir" vem desligado.
+
+**Rodar do código-fonte:** precisa de Python 3 com PySide6 (>= 6.7):
+
+```bash
+python3 -m venv .venv-qt
+.venv-qt/bin/pip install -r port/launcher/qt/requirements.txt
+./infamous_launcher_qt.sh      # o launcher antigo: ./infamous_launcher.sh
+```
+
+No Windows: `py -m venv .venv-qt`, `.venv-qt\Scripts\pip install -r port\launcher\qt\requirements.txt` e `.venv-qt\Scripts\python port\launcher\infamous_launcher_qt.py`. Sem o PySide6 o ponto de entrada diz como instalar. O pacote já leva tudo congelado, sem Python.
+
+**Autoteste:** `"inFAMOUS Second Son" --selftest` abre o launcher fora da tela, confere QML, fontes, ícone e traduções, visita todas as telas e imprime `selftest ok` (não lê suas configurações nem saves e não inicia o jogo). O CI roda isso em cada pacote. Detalhes: [`docs/LAUNCHER_QT.md`](docs/LAUNCHER_QT.md) e [`docs/QT_PACKAGING.md`](docs/QT_PACKAGING.md).
+
+## Correções experimentais
+
+A tela **Correções** do launcher (e o botão **Correções experimentais…** do launcher Tk) liga e desliga, uma a uma, as 12 correções `BP01` a `BP12`, trazidas de outros ports de PS4 e do shadPS4. Cada uma tem a chave `ISS_BPnn` (ou `TLG_BPnn`) e a linha `bpnn` no `tlg.ini`; sem mexer em nada valem os padrões, que formam o perfil **Recomendado**. "No jogo" quer dizer que também muda pelo menu Insert, na hora; "reinicia" vale na próxima partida (as que mudam shader recompilam os shaders na primeira partida, e a imagem pode piscar ou ficar verde por um tempo).
+
+| Id | O que faz | Origem | Padrão | Vale |
+|---|---|---|---|---|
+| BP01 | libera os buffers de comando aninhados | shadPS4 #5258 | ligado | no jogo |
+| BP02 | busca de texturas mais rápida (só a primeira página) | shadPS4 #5240 | ligado | no jogo |
+| BP03 | mantém o EXEC depois de um desvio divergente vazio | shadPS4 c34ca21f | ligado | reinicia, recompila shaders |
+| BP04 | recíproco/raiz/log sem clamp, como o hardware | shadPS4 #5346 | ligado | reinicia, recompila shaders |
+| BP05 | saturate trata NaN como a GPU (vira 0) | shadPS4 #5257 | ligado | reinicia, recompila shaders |
+| BP06 | reconvergência máxima nos shaders de compute | port nativo de Shadow of the Colossus | **desligado** (experimental) | reinicia, recompila shaders |
+| BP07 | compilação assíncrona sem pular draws pequenos ou indiretos | bbport (bloodborne_pc) | **desligado** (experimental) | no jogo |
+| BP08 | guarda o cache de pipelines do driver entre partidas | Mrsuss, 0xCydral (bloodborne_pc) | **desligado** (experimental) | reinicia |
+| BP09 | toda imagem 1D vira 2D de altura 1 | CTR | **desligado** (experimental) | reinicia, recompila shaders |
+| BP10 | barreiras para buffers de vértice, índice e indiretos | shadPS4 #5262 | ligado | no jogo |
+| BP11 | `firstInstance` contado uma vez nos draws indiretos | shadPS4 #5348 | ligado | reinicia, recompila shaders |
+| BP12 | `EarlyFragmentTests` quando o jogo pede depth antes do shader | shadPS4 #5264 | ligado | reinicia, recompila shaders |
+
+- **Como a release anterior:** `TLG_BACKPORTS=0` (ou o botão do launcher) desliga todas as BP que vêm ligadas, para comparar com a versão sem elas; um `TLG_BPnn` individual ainda vence. Na primeira abertura depois de atualizar, uma mensagem única explica isso. Se uma cena piorar, teste primeiro assim e depois ligue uma a uma.
+- **Voltar ao recomendado** apaga todas as suas escolhas. Só o que difere do padrão é gravado.
+- **Chaves de diagnóstico (A/B):** `ISS_WQM`, `ISS_LDS_SMALL`, `ISS_LDS_MULTI`, `ISS_LDS_READLANE`, `ISS_LANE_DIVERGENCE`, `ISS_RFL_ALL`, `ISS_BLOCK1D`, `ISS_BC_TINY`, `ISS_NO_MSAA`, `ISS_BACKGROUND_WARMUP`, `ISS_PIPELINE_BINARIES` (ainda derruba o jogo no driver NVIDIA 595) e o seletor de oclusão (`ISS_OCCLUSION_MODE`); `0` desliga, `1` liga. Servem para descobrir qual mudança causa um problema.
+- O BP08 (cache de pipelines do driver em disco) é experimental e vem desligado; o cache de pipelines em disco "de verdade" contra os engasgos ainda está no [roadmap](docs/ROADMAP.md).
+- Tabela completa, com as chaves do `tlg.ini` e as opções do menu Insert: [`docs/EXPERIMENTAL_FIXES.md`](docs/EXPERIMENTAL_FIXES.md).
+
+## Luzes e oclusão
+
+Nas cenas de noite, os faróis dos carros piscavam e o brilho das luzes aparecia **através** dos personagens. A causa: o contador de oclusão (`ZPASS_DONE`) que o jogo lê para saber quanto de cada luz está visível era um número falso, que só crescia. Com o modo **3** (contagem zero, o padrão desta versão) o problema **foi corrigido, confirmado no Windows e no Linux**.
+
+| `ISS_OCCLUSION_MODE` | Efeito |
+|---|---|
+| `0` | comportamento antigo (contador falso; o brilho pode atravessar) |
+| `1` | teste: as luzes contam como tapadas |
+| `2` | teste: as luzes contam como totalmente visíveis |
+| `3` | contagem zero: **padrão** |
+
+O seletor **Brilho das luzes (oclusão)** está na tela **Jogar** do launcher (e entre as chaves de diagnóstico); a variável também aceita o prefixo `TLG_`. **Risco:** em algumas cenas o brilho das luzes pode ficar mais fraco com o modo 3; se isso incomodar, use o modo 0. Esta é uma solução por aproximação; a oclusão real, medida pelo Vulkan, ainda não existe (veja o [roadmap](docs/ROADMAP.md)). Se você achar uma cena pior, mande o log e uma captura de cada modo.
 
 ## Mouse
 
@@ -157,15 +239,46 @@ O dedo começa no meio do touchpad e fica onde você o deixou. Os atalhos do tec
 | `ISS_KEY_MAP` | — | remapeia teclas e mouse: `"r2=Mouse Left\|F,l2=Mouse Right\|R,r1=Mouse X2,l1=Wheel Down"`; vários por botão com `\|`, `none` tira todos |
 | `ISS_MOUSE_LOG` | `0` | `1` mostra no log o que o jogo recebe do mouse |
 
-O menu Insert, aba **Controle**, tem os ajustes da câmera do mouse.
+O menu Insert, aba **Controle**, tem os ajustes da câmera do mouse, e a tela **Controles** do launcher tem os mesmos ajustes, o modo touchpad e o mapa do teclado. **O mouse é novo e ainda foi pouco testado em jogo por outros jogadores**: se algo se comportar mal, `ISS_MOUSE=0` o desliga e o relato ajuda.
 
-### Onde ficam seus saves e como atualizar sem perdê-los
+**Teclado (mapa padrão):** funciona com ou sem controle (as teclas somam aos botões do controle).
 
-Por padrão os saves e configurações ficam em `user/`, ao lado do jogo. **A atualização não apaga nada**, mas se você extrair o zip novo em outra pasta (ou apagar a antiga), o jogo abre sem saves: eles continuam na pasta antiga, em `user/savedata`. Para nunca mais passar por isso, abra o launcher Qt, vá em **Saves e dados** e escolha uma pasta fixa fora do jogo (sugestão: `Documentos\inFAMOUS-PC` no Windows, `~/.local/share/infamous-pc` no Linux); o launcher copia seus saves para lá e guarda a escolha num arquivo do seu usuário (`%APPDATA%\inFAMOUS-PC\launcher.json` / `~/.config/infamous-pc/launcher.json`), que sobrevive a reinstalações. A mesma tela acha saves de outras pastas do port, importa e exporta `.zip`, e faz backups (também antes de cada partida). Variável `ISS_USER_DIR` tem prioridade sobre tudo.
+| Tecla | Botão do PS4 | Tecla | Botão do PS4 |
+|---|---|---|---|
+| W / S (A / D) | analógico esquerdo | setas | analógico direito |
+| Espaço | X | Shift esquerdo | O (círculo) |
+| E | quadrado | Q | triângulo |
+| 1 | L1 | 3 | R1 |
+| R | L2 | F | R2 |
+| Z | L3 | C | R3 |
+| Enter | Options | Tab / Backspace | clique do touchpad (esquerdo / direito) |
+| I / K / J / L | direcional (cima / baixo / esquerda / direita) | T / G / Y | modo sensor simulado (veja abaixo) |
+
+**Remapear:** `ISS_KEY_MAP` (ou o campo avançado da tela **Controles**) troca teclas e botões do mouse: `"cross=Q,r2=Mouse Left|F"`. Os botões são `cross`, `circle`, `square`, `triangle`, `l1`, `r1`, `l2`, `r2`, `l3`, `r3`, `options`, `up`, `down`, `left`, `right`, `touchpad_left`, `touchpad_right`.
+
+## Saves e dados
+
+Por padrão os saves e as configurações ficam em `user/`, ao lado do jogo. **A atualização não apaga nada** (o zip não traz `user/`), mas se você extrair o zip novo em **outra pasta**, ou apagar a pasta antiga, o jogo abre sem saves: eles continuam na pasta antiga, em `user/savedata`. É por isso que parece que "a atualização apagou o save".
+
+**Receita para atualizar sem perder saves:**
+1. Abra o launcher, vá em **Saves e dados** e clique em **Fazer backup agora** (e, se quiser, **exportar tudo** para um `.zip`).
+2. Escolha uma pasta de dados fixa fora do jogo (sugestão: `Documentos\inFAMOUS-PC` no Windows, `~/.local/share/infamous-pc` no Linux). O launcher pergunta se copia seus saves e configurações para lá (copia, nunca move).
+3. Baixe e extraia a versão nova onde quiser: ela encontra os saves pela escolha, que fica num arquivo do seu usuário e sobrevive a reinstalações.
+4. Se você já extraiu a versão nova e o save sumiu, a tela acha as outras instalações (Downloads, Área de Trabalho, Documentos, pastas vizinhas...) e oferece **Importar**.
+
+**Onde fica a pasta de dados**, nesta ordem: a variável `ISS_USER_DIR`; o arquivo-ponteiro do usuário (`%APPDATA%\inFAMOUS-PC\launcher.json` no Windows, `~/.config/infamous-pc/launcher.json` no Linux); e, sem nenhum dos dois, `user/` ao lado do jogo (modo portátil). A mesma pasta guarda `tlg.ini`, saves, backups e o cache de shaders.
+
+**Na tela Saves e dados:** um cartão por slot (título, capítulo, karma, data, tamanho e a miniatura do próprio save) com exportar `.zip`, duplicar e excluir; importar `.zip`; backups com **Restaurar**, manter os últimos N (padrão 10) e uma pasta extra de backup (outro disco). **Um backup é feito antes de cada partida** (pulado se nada mudou). Toda operação que escreve num save exige o jogo fechado e faz um backup de segurança antes; um `.zip` inválido ou perigoso (caminhos com `..`, absolutos, links) é recusado sem escrever nada.
 
 ## Sensor de movimento e touchpad
 
 O jogo pede o sensor de movimento e o touchpad em várias cenas: grafite, absorver poderes (fumaça, neon...), abrir portas e outras interações. No **DualShock 4 e no DualSense** o giroscópio e o touchpad funcionam direto, sem ligar nada. Nos outros controles e no teclado, o port simula os dois.
+
+**Guias de controle** (as mesmas imagens estão na tela **Guias de controle** do launcher, com botões para salvar e copiar):
+
+| Xbox / Xbox Series | Nintendo Switch Pro | 8BitDo |
+|---|---|---|
+| ![Guia para Xbox, em português](port/launcher/qt/assets/controller_guides/inFAMOUS-controle-xbox-pt-BR.png) | ![Guia para Switch Pro, em português](port/launcher/qt/assets/controller_guides/inFAMOUS-controle-switch-pt-BR.png) | ![Guia para 8BitDo, em português](port/launcher/qt/assets/controller_guides/inFAMOUS-controle-8bitdo-pt-BR.png) |
 
 **Modo sensor (ligar e desligar):**
 - **Um toque em L3+R3 juntos** liga o modo sensor; outro toque desliga. Funciona em qualquer controle. Também serve o botão extra do controle: **Share** no Xbox Series, **Capture** no Switch Pro e **microfone** no DualSense. No DualShock 4 e no DualSense, o Share/Create **não** liga o modo sensor: ele é o clique do touchpad.
@@ -203,12 +316,34 @@ O jogo pede o sensor de movimento e o touchpad em várias cenas: grafite, absorv
 
 **Placas AMD no Windows (RX 580): texturas BC minúsculas.** O driver da AMD no Windows (`amdvlk64.dll`) quebra logo depois dos logos (`Fault: write access to 0 at amdvlk64.dll+0xebbbb`, #16/#31/#49) na primeira textura comprimida BC 1D do jogo (512x1), seja ela criada 1D ou 2D. No driver da AMD o port decodifica na CPU as texturas BC1–BC5 que são 1D ou menores que um bloco de 4x4 e manda ao driver imagens comuns (RGBA8, R8 ou RG8, mantendo sRGB e snorm); o log mostra `GPU: tiny block-compressed textures ...` dizendo o modo. `ISS_BC_TINY=0` desliga e `ISS_BC_TINY=1` liga em qualquer placa (teste).
 
+## Logs e relatórios
+
+Cada partida grava um log em `out/logs/run-AAAAMMDD-HHMMSS.log` (os mais recentes ficam; `out/last_run.log` aponta para o último). O log começa com a linha `Build:` e um bloco **`Config:`** com as chaves do seu `tlg.ini` e as variáveis `TLG_`/`ISS_` definidas (valores que parecem caminhos ficam de fora), e traz as linhas `Backports:` (cada BP com o estado ligado/desligado e o modo de oclusão) e, junto das estatísticas de quadros, `Backport hits (total): ...` (quantas vezes cada correção realmente rodou). Com isso um relato diz quais correções estavam ligadas.
+
+**Como reportar um problema:** abra a tela **Suporte** do launcher e use **Relatar um problema**: ela coleta GPU, driver, VRAM, sistema, CPU, versão do port e do jogo, deixa escolher o log, **tira dos textos os caminhos pessoais** (nome de usuário e pasta) e oferece **Copiar relatório**, **Salvar .zip** (relatório e log sem caminhos) e **Abrir issue no GitHub**. Nada é enviado sem o seu clique. Para reportar à mão, anexe o log em uma [issue](https://github.com/HayatoG/iss_pc/issues) ou mande no [Discord](https://discord.gg/UMkdMYZh9g).
+
+**Log grande:** o GitHub recusa arquivos grandes. Compacte o log em `.zip` (a tela Suporte já faz isso) antes de anexar.
+
+## Problemas conhecidos
+
+A tela **Suporte** do launcher mostra os que casam com a sua GPU (uma tabela local, sem consulta à internet). Os conhecidos hoje:
+
+| Situação | O que acontece | O que fazer |
+|---|---|---|
+| **AMD RX 580 / Polaris no Windows** (#31, #49, #59, #65, #67, #81) | crash logo depois dos logos em `amdvlk64.dll+0xebbbb` | **causa ainda em investigação.** Atualize o driver da AMD e teste `ISS_BP09=1` (BP09, imagens 1D como 2D); mande o log |
+| **GPU com 4 GB de VRAM** (#72, #75) | a memória de textura estoura; FPS muito baixo | baixe a resolução (tela Gráficos) e mantenha o orçamento de VRAM abaixo da memória da placa. Atenção: **"Precisão da GPU: Rápido" escurece a imagem** |
+| **NVIDIA Quadro / Maxwell** (#70) | pode estar abaixo do mínimo do port; tela preta ou jogo que não abre | conte o que você viu; ainda sem solução |
+| **CPU sem SSE4A ou F16C** (Intel, Sandy Bridge...) | o port emula essas instruções na partida | é automático; veja [Processadores Intel](#sensor-de-movimento-e-touchpad) |
+| **Versão do jogo** | testado com **CUSA00223 1.00 + 1.07**; o CUSA00004 também inicia | use o CUSA00223 com o update 1.07 |
+
+Placas NVIDIA RTX 30 no Windows já relataram luzes e fumaça piscando; use o perfil Recomendado e jogue duas partidas seguidas (a primeira recompila os shaders). Para os demais problemas abertos, veja as [issues](https://github.com/HayatoG/iss_pc/issues).
+
 ## Compilar do código-fonte
 
 ```bash
 git clone --recursive https://github.com/HayatoG/iss_pc.git && cd iss_pc
 cd port && ISS_LTO=OFF bash build.sh   # Linux: SDL3, Vulkan, FFmpeg, FreeType, Boost, fmt, Zydis, glslang
-cd .. && ./infamous_launcher.sh        # ou ./run_infamous.sh pelo terminal
+cd .. && ./infamous_launcher_qt.sh     # launcher Qt (precisa do PySide6); ./infamous_launcher.sh é o Tk; ./run_infamous.sh pelo terminal
 ```
 
 No Windows, o build roda no MSYS2 CLANG64 ([`port/packaging/windows/README.md`](port/packaging/windows/README.md)). O workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) mostra o processo completo nas duas plataformas.
@@ -223,11 +358,18 @@ No Windows, o build roda no MSYS2 CLANG64 ([`port/packaging/windows/README.md`](
 
 ## Próximos passos
 
-O que falta está em [`docs/ROADMAP.md`](docs/ROADMAP.md): desempenho (esperas por leituras da GPU), cache de pipelines em disco contra os engasgos, os efeitos que piscam, o brilho do dreno de drones e os idiomas do jogo no launcher.
+O que falta está em [`docs/ROADMAP.md`](docs/ROADMAP.md): desempenho (esperas por leituras da GPU), cache de pipelines em disco contra os engasgos (o BP08 é só o primeiro passo), oclusão real pelo Vulkan, os efeitos de névoa, água e fogo que ainda piscam, o brilho do dreno de drones, o crash da RX 580 no Windows, um atualizador automático e a validação do mouse.
 
 ## Créditos e aviso legal
 
 Base de código: [tlg_pc](https://github.com/HayatoG/tlg_pc), [gr2_pc](https://github.com/HayatoG/gr2_pc), [gow3_pc](https://github.com/FelipePrado0/gow3_pc) (FelipePrado0), [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) e [shadPS4](https://github.com/shadps4-emu/shadPS4) o fork [shadPS4-Infamous-FixBuild](https://github.com/rayhlancaner-png/shadPS4-Infamous-FixBuild) (Eye Of The Ruins/rayhlancaner-png, TOXIC-KID, 0xDeftones) e o port nativo [ShadowOfTheColossus-PC](https://github.com/AjncSystem/ShadowOfTheColossus-PC) (AjncSystem; com partes do Pink-shadPS4 de luizgustavs), todos GPL-2.0, assim como este projeto ([LICENSE](port/LICENSE)). Áudio ATRAC9 via [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9); fontes via [FreeType](https://freetype.org).
+
+**Origem das correções experimentais (BP01–BP12):** as correções do tradutor de shaders e do vídeo vêm do [shadPS4](https://github.com/shadps4-emu/shadPS4) (BP01–BP05, BP10–BP12), do port nativo de [Shadow of the Colossus](https://github.com/AjncSystem/ShadowOfTheColossus-PC) (BP06), do bbport, o [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (BP07), do [bloodborne_pc_windows_port](https://github.com/Mrsuss60/bloodborne_pc_windows_port) de Mrsuss e do [bloodborne_pc](https://github.com/0xCydral/bloodborne_pc) de 0xCydral (BP08) e do CTR ([T3CHNOLOG1C/CTR](https://github.com/T3CHNOLOG1C/CTR)) (BP09). Os commits exatos estão em [`docs/EXPERIMENTAL_FIXES.md`](docs/EXPERIMENTAL_FIXES.md) e em `port/gpu/VENDOR.txt`. Fontes do launcher: Big Shoulders Stencil Display e Barlow (licença OFL, em `port/launcher/qt/fonts/`).
+
+### Agradecimentos
+
+- **Kazu**, pelos logs, capturas de tela e testes, no Windows e no Linux, que levaram à correção dos faróis que piscavam e do brilho que atravessava os personagens (o modo de oclusão 3).
+- Aos jogadores que reportaram problemas nas [issues](https://github.com/HayatoG/iss_pc/issues), com logs que mudaram o rumo do port: jacckkss (#50, luzes e fumaça piscando), heyzerr (#51, #65, #67, CPUs sem F16C e RX 580), Andrade2244 (#29), MrRobot11214 (#31), fghacksr (#49), AngelHomura (#59) e aledieb93-svg (#81) (crashes na RX 580 e no Windows), ViniSnapeS (#72) e kudetgaming-art (#75) (memória de vídeo), summer882 (#71), manymanyyyd-afk (#63) e Kpopping (#73) (idiomas turco e russo), mahmoudmahran2112-crypto (#70, Quadro/Maxwell), Milicksp (#16), gsev3333 (#41) e todos os outros que abriram uma issue ou testaram uma versão.
 
 Este projeto não tem vínculo com a Sony Interactive Entertainment ou a Sucker Punch Productions. inFAMOUS é marca da Sony Interactive Entertainment. Nenhum código, arquivo ou arte do jogo é distribuído aqui. O ícone é uma arte original do projeto.
 
@@ -249,6 +391,12 @@ The screenshots are at the top of this page.
 
 ## What's new
 
+- **New launcher (Qt Quick), now the default:** 8 screens (Play, Graphics, Controls, Fixes, Saves & data, Controller guides, Support, Updates), the interface in Portuguese and English, and the game language following the system's by default. The old launcher (Tk) stays in the package as **inFAMOUS Second Son (classic)**, as a fallback. See [The launcher](#the-launcher).
+- **Saves and data:** a configurable data folder, a backup before every play session, `.zip` export/import, duplicate and delete saves, and a search for saves from other installs. It fixes the "I lost my save after updating" problem. See [Saves and data](#saves-and-data).
+- **Flickering headlights and glare that showed through characters: fixed.** The occlusion counter the game reads to know how much of a light is visible was a fake; the new mode 3 (the default) answers with zero counts, and that fixed the problem, **confirmed on Windows and on Linux**. See [Lights and occlusion](#lights-and-occlusion).
+- **Experimental fixes BP01–BP12:** twelve fixes brought from other PS4 ports and from shadPS4, each with its own switch, a Recommended profile and a "Like the previous release" button to compare. See [Experimental fixes](#experimental-fixes).
+- **More useful logs:** every log starts with a `Config:` block (your options, no paths) and shows the `Backports:` lines; the **Support** screen builds the report without personal data. See [Logs and reports](#logs-and-reports).
+- **Controller guides:** ready-made images (Xbox, Switch Pro and 8BitDo, in Portuguese and English) of sensor mode and the touchpad, in [Motion sensor and touchpad](#motion-sensor-and-touchpad) and in the launcher's **Controller guides** screen.
 - **CPUs without F16C (Sandy Bridge, #51):** the game's 13 half-precision conversions (`VCVTPH2PS`/`VCVTPS2PH`) are now emulated at start, bit-exact with the CPU (rounding, denormals, Inf and NaN). The game used to stop with "13 sites use encodings the rewrite cannot emulate".
 - **Mouse:** the mouse turns the camera (right stick) and also plays the **touchpad**. Left = R2, right = L2, middle = R3. **Hold Left Ctrl (or the X1 side button)** and the mouse becomes a finger on the touchpad: left touches/clicks (hold = absorb a power), dragging with the left slides (the "Open Door" swipe, the scanner), right = two fingers (lift the car off Reggie). The window captures the mouse; Esc releases it and a click captures it again. See [Mouse](#mouse-1).
 - **Graffiti steps on screen:** the first time sensor mode turns on, a screen in the middle shows the steps (shake, spray, aim, leave) with your controller's buttons; "Got it" closes it. The Insert menu has a new **Controls** tab that shows it again and sets the **graffiti aiming speed** (25–200%, also `ISS_SENSOR_AIM`).
@@ -286,9 +434,14 @@ The screenshots are at the top of this page.
 | Controller | ✅ DualSense, DualShock 4, Xbox and 8BitDo via SDL3 |
 | Performance | 🔧 20–30 FPS typical on an RTX 2060, unstable; optimization ongoing |
 | Stutter | 🔧 The first time each shader is compiled (cutscenes and new areas) |
-| Graphics | 🔧 Some fog, water and light effects flicker |
+| Lights (flickering headlights, glare showing through characters) | ✅ Fixed by occlusion mode 3 (default), confirmed on Windows and on Linux; if light glare looks weak, use mode 0 |
+| Graphics | 🔧 Some fog, water and fire effects still flicker |
+| Launcher | ✅ Qt Quick (default) with the Tk one as a fallback; Portuguese and English |
+| Saves and data | ✅ Configurable folder, backup, export/import |
+| Mouse (camera and touchpad) | 🧪 Implemented, not yet tested much in game |
+| Experimental fixes (BP01–BP12) | 🧪 The ones on by default come in the Recommended profile; BP06–BP09 (off) are experimental |
 | Linux | ✅ Tested (Nobara/Fedora 44) |
-| Windows | 🧪 Automatic build, not yet tested in game |
+| Windows | 🧪 Tested by players (the lights fix was confirmed); known crash on RX 580/Polaris, see [Known problems](#known-problems) |
 
 ![Performance over a 7-minute session walking through the city](docs/screenshots/desempenho.png)
 
@@ -299,7 +452,9 @@ The screenshots are at the top of this page.
 The [**latest release**](https://github.com/HayatoG/iss_pc/releases/latest) is built by GitHub Actions on every change; older ones stay under [Releases](https://github.com/HayatoG/iss_pc/releases) as history:
 
 - **Linux x86-64** (glibc 2.39+: Ubuntu 24.04, Fedora 40, SteamOS 3.6 or newer): `infamous-linux-x86_64.tar.gz`
-- **Windows 10/11 64-bit**: `infamous-windows-x86_64.zip`
+- **Windows 10 (1903 or newer) / 11, 64-bit**: `infamous-windows-x86_64.zip`
+
+The packages open the Qt launcher by default; it adds about 55 MB to the download (measured on Linux; an estimate on Windows). If the new launcher does not open on your machine, use **inFAMOUS Second Son (classic)**, in the same folder.
 
 ## Required game files
 
@@ -317,18 +472,87 @@ Everything comes from **your own** PS4 (GoldHEN + Itemzflow). None of it is in t
 
 The full list and the step-by-step guide, which also go in the notes of every Release, are in [`docs/ARQUIVOS_NECESSARIOS.md`](docs/ARQUIVOS_NECESSARIOS.md).
 
-**PC:** a graphics card with Vulkan 1.3 (6 GB of VRAM recommended) and ~33 GB free.
+**PC:** 64-bit Windows 10 (1903+)/11 or x86-64 Linux (glibc 2.39+), a graphics card with Vulkan 1.3 (6 GB of VRAM recommended) and ~33 GB free.
 
 ## How to play
 
 1. Extract the package.
-2. Open **inFAMOUS Second Son**, pick the game folder and the language, and click **Play**. If it stutters too much, the "GPU accuracy" option has a fast mode (without GPU particles).
+2. Open **inFAMOUS Second Son** (on Windows, if "Windows protected your PC" appears, click *More info*, then *Run anyway*: the program is not digitally signed). Pick the game folder and click **Play**. The game language follows your system by default; you can change it on the same screen. If it stutters too much, the "GPU accuracy" option (**Graphics** screen) has a fast mode (without GPU particles).
 3. In game, **F10** toggles the FPS counter, and **Insert** (or R3 + L2 on a controller) opens the port's menu.
 4. When the game asks you to turn or shake the controller and yours has no sensor: tap L3+R3 (or Share on an Xbox Series). The controller is then on its side; cross/A shakes, R2 sprays and the left stick aims. Tap again to leave. On the keyboard: T/G (with the arrow keys to aim) and Y. See [Motion sensor and touchpad](#motion-sensor-and-touchpad).
 
 The full guide is in [`README-player.md`](port/packaging/README-player.md), which also ships inside the package.
 
-**Experimental fixes:** the launcher's **Experimental fixes…** button turns the 12 fixes `TLG_BP01` to `TLG_BP12` (from other PS4 ports and shadPS4), the diagnostic switches (`TLG_WQM`, `TLG_LDS_*`, `TLG_BC_TINY`...) and the Insert menu options on and off, tagged "in game" or "restarts the game". Untouched, the defaults hold. Full list: [`docs/EXPERIMENTAL_FIXES.md`](docs/EXPERIMENTAL_FIXES.md).
+## The launcher
+
+The launcher is the program that opens when you run **inFAMOUS Second Son**. The new one (Qt Quick) is the default; the old one (Tk) sits next to it as **inFAMOUS Second Son (classic)**, in case the new one does not open. Both use the same settings and the same saves, and accept `--play`, `--script` and `--clear-shader-cache`.
+
+| Screen | What it is for |
+|---|---|
+| **Play** | game folder, game language, detected GPU and version, fixes profile, the occlusion (lights) selector, the Continue/Play button |
+| **Graphics** | window mode, VSync, FPS limit, FSR 1 and sharpening, GPU accuracy, VRAM budget, shader cache, overlay and presets (Performance, Balanced, Quality, Faithful to PS4) |
+| **Controls** | stick dead zone, graffiti aiming speed, mouse (camera and touchpad mode), keyboard map and remapping |
+| **Fixes** | BP01–BP12, diagnostic (A/B) switches and Insert menu options; Recommended profile and "Like the previous release" |
+| **Saves & data** | data folder, list of saves, backups, `.zip` export/import; see [Saves and data](#saves-and-data) |
+| **Controller guides** | Xbox, Switch Pro and 8BitDo images (Portuguese and English): save, copy, open the folder |
+| **Support** | known problems for your GPU, links and the problem report; see [Logs and reports](#logs-and-reports) |
+| **Updates** | shows the installed version and checks the latest release (see below) |
+
+**Interface language:** Portuguese (Brazil) or English (US), which the launcher picks from the system language and you can change. When you pick one, the launcher passes it to the game (`ISS_UI_LANG`) for the overlay.
+
+**Game language:** the first option is **Automatic (system language)**, the default, followed by 6 languages: English (1), Português (Brasil) (17), Español (Latinoamérica) (20), Français (Canada) (22), Türkçe (19) and Русский (8). Portuguese becomes pt-BR, Spanish becomes es-LA, French becomes fr-CA, Turkish and Russian stay as they are, and anything else becomes English. The choice applies on the next start and becomes `ISS_LANGUAGE` (an `ISS_LANGUAGE` you set yourself wins). **It only works if your game files have that language:** Turkish and Russian, for example, only show up if your dump has them. It is separate from the interface language.
+
+**Updates:** the **Updates** screen makes a single HTTPS query for the latest release on GitHub (nothing of yours is sent), shows the notes in the interface language, and the **Download** button only opens the release page. **It does not download or install anything: a real automatic updater does not exist yet.** "Check on open" is off by default.
+
+**Running from source:** needs Python 3 with PySide6 (>= 6.7):
+
+```bash
+python3 -m venv .venv-qt
+.venv-qt/bin/pip install -r port/launcher/qt/requirements.txt
+./infamous_launcher_qt.sh      # the old launcher: ./infamous_launcher.sh
+```
+
+On Windows: `py -m venv .venv-qt`, `.venv-qt\Scripts\pip install -r port\launcher\qt\requirements.txt` and `.venv-qt\Scripts\python port\launcher\infamous_launcher_qt.py`. Without PySide6 the entry point says how to install it. The package already ships everything frozen, no Python needed.
+
+**Self-test:** `"inFAMOUS Second Son" --selftest` opens the launcher off screen, checks QML, fonts, icon and translations, visits every screen and prints `selftest ok` (it does not read your settings or saves and does not start the game). The CI runs it on every package. Details: [`docs/LAUNCHER_QT.md`](docs/LAUNCHER_QT.md) and [`docs/QT_PACKAGING.md`](docs/QT_PACKAGING.md).
+
+## Experimental fixes
+
+The launcher's **Fixes** screen (and the **Experimental fixes…** button of the Tk launcher) turns the 12 fixes `BP01` to `BP12`, brought from other PS4 ports and from shadPS4, on and off one by one. Each has the `ISS_BPnn` (or `TLG_BPnn`) switch and a `bpnn` line in `tlg.ini`; if you touch nothing the defaults hold, and they make up the **Recommended** profile. "In game" means it can also be changed from the Insert menu, on the spot; "restarts" applies on the next start (the ones that change shaders recompile the shaders on the first game, and the image may flicker or look green for a while).
+
+| Id | What it does | Source | Default | Applies |
+|---|---|---|---|---|
+| BP01 | frees the frame of nested command buffers | shadPS4 #5258 | on | in game |
+| BP02 | faster texture lookup (first page only) | shadPS4 #5240 | on | in game |
+| BP03 | keeps EXEC after an empty divergent branch | shadPS4 c34ca21f | on | restarts, recompiles shaders |
+| BP04 | reciprocal/root/log without clamp, like the hardware | shadPS4 #5346 | on | restarts, recompiles shaders |
+| BP05 | saturate treats NaN like the GPU (becomes 0) | shadPS4 #5257 | on | restarts, recompiles shaders |
+| BP06 | maximal reconvergence in compute shaders | native Shadow of the Colossus port | **off** (experimental) | restarts, recompiles shaders |
+| BP07 | async compile never skips small or indirect draws | bbport (bloodborne_pc) | **off** (experimental) | in game |
+| BP08 | keeps the driver pipeline cache between sessions | Mrsuss, 0xCydral (bloodborne_pc) | **off** (experimental) | restarts |
+| BP09 | every 1D image becomes 2D with height 1 | CTR | **off** (experimental) | restarts, recompiles shaders |
+| BP10 | barriers for vertex, index and indirect buffers | shadPS4 #5262 | on | in game |
+| BP11 | `firstInstance` counted once in indirect draws | shadPS4 #5348 | on | restarts, recompiles shaders |
+| BP12 | `EarlyFragmentTests` when the game asks for depth before the shader | shadPS4 #5264 | on | restarts, recompiles shaders |
+
+- **Like the previous release:** `TLG_BACKPORTS=0` (or the launcher button) turns off every BP that is on by default, to compare with the version without them; an individual `TLG_BPnn` still wins. On the first start after updating, a one-time message explains this. If a scene gets worse, test this way first, then turn them back on one by one.
+- **Back to recommended** clears all your choices. Only what differs from the default is written.
+- **Diagnostic (A/B) switches:** `ISS_WQM`, `ISS_LDS_SMALL`, `ISS_LDS_MULTI`, `ISS_LDS_READLANE`, `ISS_LANE_DIVERGENCE`, `ISS_RFL_ALL`, `ISS_BLOCK1D`, `ISS_BC_TINY`, `ISS_NO_MSAA`, `ISS_BACKGROUND_WARMUP`, `ISS_PIPELINE_BINARIES` (still crashes the game on the NVIDIA 595 driver) and the occlusion selector (`ISS_OCCLUSION_MODE`); `0` turns off, `1` turns on. They exist to find which change causes a problem.
+- BP08 (the on-disk driver pipeline cache) is experimental and off; a "real" on-disk pipeline cache against stutter is still on the [roadmap](docs/ROADMAP.md).
+- Full table, with the `tlg.ini` keys and the Insert menu options: [`docs/EXPERIMENTAL_FIXES.md`](docs/EXPERIMENTAL_FIXES.md).
+
+## Lights and occlusion
+
+In night scenes, car headlights flickered and the glare of lights showed up **through** characters. The cause: the occlusion counter (`ZPASS_DONE`) that the game reads to know how much of each light is visible was a fake number that only grew. With mode **3** (zero counts, the default of this version) the problem **was fixed, confirmed on Windows and on Linux**.
+
+| `ISS_OCCLUSION_MODE` | Effect |
+|---|---|
+| `0` | old behavior (fake counter; glare may show through) |
+| `1` | test: lights count as hidden |
+| `2` | test: lights count as fully visible |
+| `3` | zero counts: **default** |
+
+The **Light glare (occlusion)** selector is on the launcher's **Play** screen (and among the diagnostic switches); the variable also takes the `TLG_` prefix. **Risk:** in some scenes the glare of lights may look weaker with mode 3; if that bothers you, use mode 0. This is an approximation; real occlusion, measured through Vulkan, does not exist yet (see the [roadmap](docs/ROADMAP.md)). If you find a scene that looks worse, send the log and a screenshot of each mode.
 
 ## Mouse
 
@@ -376,15 +600,46 @@ The finger starts in the middle of the touchpad and stays where you leave it. Th
 | `ISS_KEY_MAP` | — | remaps keys and mouse: `"r2=Mouse Left\|F,l2=Mouse Right\|R,r1=Mouse X2,l1=Wheel Down"`; several per button with `\|`, `none` removes all |
 | `ISS_MOUSE_LOG` | `0` | `1` logs what the game gets from the mouse |
 
-The Insert menu's **Controls** tab has the mouse camera settings.
+The Insert menu's **Controls** tab has the mouse camera settings, and the launcher's **Controls** screen has the same ones, the touchpad mode and the keyboard map. **The mouse is new and has not been tested much in game by other players yet**: if something misbehaves, `ISS_MOUSE=0` turns it off and a report helps.
 
-### Where your saves live and how to update without losing them
+**Keyboard (default map):** works with or without a controller (the keys add to the controller's buttons).
 
-By default saves and settings live in `user/`, next to the game. **Updating deletes nothing**, but if you extract the new zip somewhere else (or delete the old folder) the game opens without saves: they are still in the old folder, under `user/savedata`. To never go through that again, open the Qt launcher, go to **Saves & data** and pick a fixed folder outside the game (suggestion: `Documents\inFAMOUS-PC` on Windows, `~/.local/share/infamous-pc` on Linux); the launcher copies your saves there and keeps the choice in a per-user file (`%APPDATA%\inFAMOUS-PC\launcher.json` / `~/.config/infamous-pc/launcher.json`) that survives reinstalls. The same screen finds saves in other port folders, imports and exports `.zip`, and makes backups (also before every play session). The `ISS_USER_DIR` variable overrides everything.
+| Key | PS4 button | Key | PS4 button |
+|---|---|---|---|
+| W / S (A / D) | left stick | arrow keys | right stick |
+| Space | cross | Left Shift | circle |
+| E | square | Q | triangle |
+| 1 | L1 | 3 | R1 |
+| R | L2 | F | R2 |
+| Z | L3 | C | R3 |
+| Enter | Options | Tab / Backspace | touchpad click (left / right) |
+| I / K / J / L | d-pad (up / down / left / right) | T / G / Y | simulated sensor mode (see below) |
+
+**Remapping:** `ISS_KEY_MAP` (or the advanced field of the launcher's **Controls** screen) changes keys and mouse buttons: `"cross=Q,r2=Mouse Left|F"`. The buttons are `cross`, `circle`, `square`, `triangle`, `l1`, `r1`, `l2`, `r2`, `l3`, `r3`, `options`, `up`, `down`, `left`, `right`, `touchpad_left`, `touchpad_right`.
+
+## Saves and data
+
+By default saves and settings live in `user/`, next to the game. **Updating deletes nothing** (the zip does not carry `user/`), but if you extract the new zip into **another folder**, or delete the old one, the game opens without saves: they are still in the old folder, under `user/savedata`. That is why it looks like "the update deleted my save".
+
+**Recipe to update without losing saves:**
+1. Open the launcher, go to **Saves & data** and click **Back up now** (and, if you like, **export all** to a `.zip`).
+2. Pick a fixed data folder outside the game (suggestion: `Documents\inFAMOUS-PC` on Windows, `~/.local/share/infamous-pc` on Linux). The launcher asks whether to copy your saves and settings there (it copies, never moves).
+3. Download and extract the new version anywhere: it finds the saves through that choice, which is kept in a per-user file and survives reinstalls.
+4. If you already extracted the new version and the save is gone, the screen finds the other installs (Downloads, Desktop, Documents, neighbor folders...) and offers **Import**.
+
+**Where the data folder is**, in this order: the `ISS_USER_DIR` variable; the per-user pointer file (`%APPDATA%\inFAMOUS-PC\launcher.json` on Windows, `~/.config/infamous-pc/launcher.json` on Linux); and, with neither, `user/` next to the game (portable mode). The same folder holds `tlg.ini`, saves, backups and the shader cache.
+
+**On the Saves & data screen:** one card per slot (title, chapter, karma, date, size and the save's own thumbnail) with `.zip` export, duplicate and delete; `.zip` import; backups with **Restore**, keeping the last N (default 10) and an extra backup folder (another disk). **A backup is made before every play session** (skipped if nothing changed). Every operation that writes to a save needs the game closed and makes a safety backup first; an invalid or dangerous `.zip` (paths with `..`, absolute paths, links) is refused without writing anything.
 
 ## Motion sensor and touchpad
 
 The game asks for the motion sensor and the touchpad in many scenes: graffiti, absorbing powers (smoke, neon...), opening doors and other interactions. On a **DualShock 4 or DualSense** the gyro and the touchpad work as is, with nothing to turn on. On other controllers and on the keyboard, the port simulates both.
+
+**Controller guides** (the same images are on the launcher's **Controller guides** screen, with buttons to save and copy):
+
+| Xbox / Xbox Series | Nintendo Switch Pro | 8BitDo |
+|---|---|---|
+| ![Guide for Xbox, in English](port/launcher/qt/assets/controller_guides/inFAMOUS-controle-xbox-en-US.png) | ![Guide for Switch Pro, in English](port/launcher/qt/assets/controller_guides/inFAMOUS-controle-switch-en-US.png) | ![Guide for 8BitDo, in English](port/launcher/qt/assets/controller_guides/inFAMOUS-controle-8bitdo-en-US.png) |
 
 **Sensor mode (turning it on and off):**
 - **One tap on L3+R3 together** turns sensor mode on; another tap turns it off. It works on any controller. The controller's extra button works too: **Share** on an Xbox Series, **Capture** on a Switch Pro and the **microphone** button on a DualSense. On a DualShock 4 or DualSense, Share/Create does **not** toggle sensor mode: it is the touchpad click.
@@ -422,12 +677,34 @@ The game asks for the motion sensor and the touchpad in many scenes: graffiti, a
 
 **AMD cards on Windows (RX 580): tiny BC textures.** AMD's Windows driver (`amdvlk64.dll`) crashes right after the logos (`Fault: write access to 0 at amdvlk64.dll+0xebbbb`, #16/#31/#49) on the game's first BC-compressed 1D texture (512x1), whether it is created 1D or 2D. On AMD's driver the port decodes BC1–BC5 textures that are 1D or smaller than a 4x4 block on the CPU and gives the driver plain images (RGBA8, R8 or RG8, sRGB and snorm kept); the log line `GPU: tiny block-compressed textures ...` says which mode is on. `ISS_BC_TINY=0` turns it off and `ISS_BC_TINY=1` turns it on on any GPU (testing).
 
+## Logs and reports
+
+Every game writes a log to `out/logs/run-YYYYMMDD-HHMMSS.log` (the most recent ones are kept; `out/last_run.log` points to the latest). The log starts with the `Build:` line and a **`Config:`** block with the keys of your `tlg.ini` and the `TLG_`/`ISS_` variables that are set (values that look like paths are left out), and has the `Backports:` lines (each BP with its on/off state, and the occlusion mode) and, with the frame statistics, `Backport hits (total): ...` (how many times each fix actually ran). With that, a report says which fixes were on.
+
+**How to report a problem:** open the launcher's **Support** screen and use **Report a problem**: it collects GPU, driver, VRAM, system, CPU, port and game versions, lets you pick the log, **strips personal paths from the text** (user name and folder) and offers **Copy report**, **Save .zip** (report and log without paths) and **Open issue on GitHub**. Nothing is sent without your click. To report by hand, attach the log to an [issue](https://github.com/HayatoG/iss_pc/issues) or send it on [Discord](https://discord.gg/UMkdMYZh9g).
+
+**Big log:** GitHub refuses big files. Compress the log into a `.zip` (the Support screen already does) before attaching it.
+
+## Known problems
+
+The launcher's **Support** screen shows the ones that match your GPU (a local table, no internet query). The ones known today:
+
+| Situation | What happens | What to do |
+|---|---|---|
+| **AMD RX 580 / Polaris on Windows** (#31, #49, #59, #65, #67, #81) | crash right after the logos in `amdvlk64.dll+0xebbbb` | **cause still under investigation.** Update the AMD driver and try `ISS_BP09=1` (BP09, 1D images as 2D); send the log |
+| **GPU with 4 GB of VRAM** (#72, #75) | texture memory runs out; very low FPS | lower the resolution (Graphics screen) and keep the VRAM budget below your card's memory. Note: **"GPU accuracy: Fast" darkens the image** |
+| **NVIDIA Quadro / Maxwell** (#70) | may be below the port's minimum; black screen or the game does not open | tell us what you saw; no fix yet |
+| **CPU without SSE4A or F16C** (Intel, Sandy Bridge...) | the port emulates those instructions at start | automatic; see [Intel CPUs](#motion-sensor-and-touchpad) |
+| **Game version** | tested with **CUSA00223 1.00 + 1.07**; CUSA00004 also boots | use CUSA00223 with the 1.07 update |
+
+NVIDIA RTX 30 cards on Windows have reported flickering lights and smoke; use the Recommended profile and play two sessions in a row (the first one recompiles the shaders). For the other open problems, see the [issues](https://github.com/HayatoG/iss_pc/issues).
+
 ## Building from source
 
 ```bash
 git clone --recursive https://github.com/HayatoG/iss_pc.git && cd iss_pc
 cd port && ISS_LTO=OFF bash build.sh   # Linux: SDL3, Vulkan, FFmpeg, FreeType, Boost, fmt, Zydis, glslang
-cd .. && ./infamous_launcher.sh        # or ./run_infamous.sh from a terminal
+cd .. && ./infamous_launcher_qt.sh     # Qt launcher (needs PySide6); ./infamous_launcher.sh is the Tk one; ./run_infamous.sh from a terminal
 ```
 
 On Windows, the build runs in MSYS2 CLANG64 ([`port/packaging/windows/README.md`](port/packaging/windows/README.md)). The workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) shows the full process on both platforms.
@@ -442,10 +719,17 @@ On Windows, the build runs in MSYS2 CLANG64 ([`port/packaging/windows/README.md`
 
 ## Next steps
 
-What is left is in [`docs/ROADMAP.md`](docs/ROADMAP.md): performance (waits on GPU readbacks), an on-disk pipeline cache against the stutter, the flickering effects, the drone-drain glow and the game languages in the launcher.
+What is left is in [`docs/ROADMAP.md`](docs/ROADMAP.md): performance (waits on GPU readbacks), an on-disk pipeline cache against the stutter (BP08 is only the first step), real occlusion through Vulkan, the fog, water and fire effects that still flicker, the drone-drain glow, the RX 580 crash on Windows, an automatic updater and validating the mouse.
 
 ## Credits and legal notice
 
 Code base: [tlg_pc](https://github.com/HayatoG/tlg_pc), [gr2_pc](https://github.com/HayatoG/gr2_pc), [gow3_pc](https://github.com/FelipePrado0/gow3_pc) (FelipePrado0), [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) and [shadPS4](https://github.com/shadps4-emu/shadPS4) the [shadPS4-Infamous-FixBuild](https://github.com/rayhlancaner-png/shadPS4-Infamous-FixBuild) fork (Eye Of The Ruins/rayhlancaner-png, TOXIC-KID, 0xDeftones) and the native [ShadowOfTheColossus-PC](https://github.com/AjncSystem/ShadowOfTheColossus-PC) port (AjncSystem; with parts of Pink-shadPS4 by luizgustavs), all GPL-2.0, as is this project ([LICENSE](port/LICENSE)). ATRAC9 audio via [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9); fonts via [FreeType](https://freetype.org).
+
+**Origin of the experimental fixes (BP01–BP12):** the recompiler and video fixes come from [shadPS4](https://github.com/shadps4-emu/shadPS4) (BP01–BP05, BP10–BP12), the native [Shadow of the Colossus](https://github.com/AjncSystem/ShadowOfTheColossus-PC) port (BP06), bbport, i.e. [bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) (BP07), Mrsuss's [bloodborne_pc_windows_port](https://github.com/Mrsuss60/bloodborne_pc_windows_port) and 0xCydral's [bloodborne_pc](https://github.com/0xCydral/bloodborne_pc) (BP08) and CTR ([T3CHNOLOG1C/CTR](https://github.com/T3CHNOLOG1C/CTR)) (BP09). The exact commits are in [`docs/EXPERIMENTAL_FIXES.md`](docs/EXPERIMENTAL_FIXES.md) and `port/gpu/VENDOR.txt`. Launcher fonts: Big Shoulders Stencil Display and Barlow (OFL license, in `port/launcher/qt/fonts/`).
+
+### Acknowledgements
+
+- **Kazu**, for the logs, screenshots and tests, on Windows and on Linux, that led to the fix for the flickering headlights and the glare showing through characters (occlusion mode 3).
+- The players who reported problems in the [issues](https://github.com/HayatoG/iss_pc/issues), with logs that changed the port's course: jacckkss (#50, flickering lights and smoke), heyzerr (#51, #65, #67, CPUs without F16C and the RX 580), Andrade2244 (#29), MrRobot11214 (#31), fghacksr (#49), AngelHomura (#59) and aledieb93-svg (#81) (crashes on the RX 580 and on Windows), ViniSnapeS (#72) and kudetgaming-art (#75) (video memory), summer882 (#71), manymanyyyd-afk (#63) and Kpopping (#73) (Turkish and Russian), mahmoudmahran2112-crypto (#70, Quadro/Maxwell), Milicksp (#16), gsev3333 (#41) and everyone else who opened an issue or tested a build.
 
 This project is not affiliated with Sony Interactive Entertainment or Sucker Punch Productions. inFAMOUS is a trademark of Sony Interactive Entertainment. No game code, files or art are distributed here. The icon is original artwork made for this project.
