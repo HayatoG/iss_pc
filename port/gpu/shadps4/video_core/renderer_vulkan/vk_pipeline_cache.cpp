@@ -1089,10 +1089,12 @@ void Bp07Tally(bool compiled_now) {
 } // namespace
 
 // tlg: TLG_ASYNC_WAIT_MS=N (default 0 = off), TLG_ASYNC_WAIT_FRAME_MS=M (default 8). A draw whose
-// pipeline is still compiling in the background is skipped. With N > 0 it first waits for the
-// compile up to N ms, and the waits of one GPU frame add up to at most M ms: a short compile
-// then costs a few milliseconds instead of a missing ground or effect, a long one is skipped as
-// before, so the frame time stays bounded. The log shows the tally every 5 s.
+// shader or pipeline is still compiling in the background is skipped. With N > 0 it first waits
+// for the compile up to N ms, and the waits of one GPU frame add up to at most M ms: a short
+// compile then costs a few milliseconds instead of a missing ground or effect, a long one is
+// skipped as before, so the frame time stays bounded. The log shows the tally every 5 s.
+// A new shader is the usual reason for a skipped draw (the pipeline is only queued once the
+// shader is translated), so GetProgram waits too, not only GetGraphicsPipeline.
 namespace {
 struct AsyncWaitBudget {
     std::chrono::microseconds per_draw{0}, per_frame{8000};
@@ -1135,8 +1137,8 @@ struct AsyncWaitBudget {
         }
         last_log = now;
         LOG_INFO(Render_Vulkan,
-                 "Async wait (total): {} draws waited {:.1f} ms in all, {} had the pipeline in time, "
-                 "{} were skipped after the limit ({} ms per draw, {} ms per frame)",
+                 "Async wait (total): {} waits for a compiling shader or pipeline, {:.1f} ms in all, {} finished in "
+                 "time, {} gave up at the limit and the draw was skipped ({} ms per wait, {} ms per frame)",
                  waited, double(total.count()) / 1e6, ready, timed_out,
                  per_draw.count() / 1000, per_frame.count() / 1000);
     }
@@ -1791,6 +1793,26 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                HashCombine(params.hash, perm_idx));
     }
 
+    // tlg: TLG_ASYNC_WAIT_MS: before the draw goes for lack of its shader, give the background
+    // translation a few milliseconds. True when the shader is ready and the lookup should run again.
+    const auto wait_for_shader = [this](const Program& program) {
+        if (!async_wait.Enabled() || !program.pending) {
+            return false;
+        }
+        const auto allowance = async_wait.Allowance();
+        if (allowance.count() <= 0) {
+            return false;
+        }
+        const auto started = std::chrono::steady_clock::now();
+        const bool finished = program.pending->job.WaitFor(allowance);
+        async_wait.Tally(std::chrono::steady_clock::now() - started, finished);
+        if (!finished) {
+            return false;
+        }
+        PublishShaders();
+        return !program.pending; // published; else the lookup would find it pending again
+    };
+
     auto it_pgm = program_cache.find(params.hash); // this thread is the only writer
     const bool compile_async = AsyncCompilation() && hw_stage != HwStage::Compute &&
                                !sel.regs->stage_enable.hs_en &&
@@ -1813,8 +1835,14 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         auto new_program = std::make_unique<Program>(hw_stage, sw_stage, params);
         if (compile_async) {
             QueueShader(*new_program, hw_stage, sw_stage, params, runtime_info, binding, 0, true);
-            std::unique_lock lock{programs_mutex};
-            program_cache.emplace(params.hash, std::move(new_program));
+            const Program* queued = new_program.get();
+            {
+                std::unique_lock lock{programs_mutex};
+                program_cache.emplace(params.hash, std::move(new_program));
+            }
+            if (wait_for_shader(*queued)) {
+                return GetProgram(sel, hw_stage, sw_stage, params, binding);
+            }
             return {};
         }
         auto start = binding;
@@ -1838,10 +1866,16 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
 
     auto& program = it_pgm.value();
     if (program->compilation_failed || (program->modules.empty() && program->pending)) {
+        if (!program->compilation_failed && wait_for_shader(*program)) {
+            return GetProgram(sel, hw_stage, sw_stage, params, binding);
+        }
         return {};
     }
     if (program->modules.empty() && compile_async) {
         QueueShader(*program, hw_stage, sw_stage, params, runtime_info, binding, 0, true);
+        if (wait_for_shader(*program)) {
+            return GetProgram(sel, hw_stage, sw_stage, params, binding);
+        }
         return {};
     }
     if (!program->info_template) {
