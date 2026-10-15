@@ -14,6 +14,10 @@ Tudo vem do **seu** PS4 (GoldHEN + Itemzflow). Nada disso vai no download. Use *
 | `art/` (`cache/`, `movies/`, `ui/`) | base + update | conteúdo do jogo (o update substitui parte de `art/cache` e `art/movies`) |
 | `playgo.pgm`, `sce_discmap.plt`, `sce_discmap_patch.plt` | base + update | mapa de arquivos e instalação |
 
+**Versões do jogo:** testado com **CUSA00223 (1.00 + update 1.07)**; o launcher só aceita a pasta com o update 1.07. Há relato de que o CUSA00004 também inicia (ainda não testado a fundo). Idiomas: o launcher oferece 6 (inglês, português do Brasil, espanhol latino, francês do Canadá, turco e russo), mas turco e russo só funcionam se os arquivos do seu dump tiverem esses idiomas.
+
+**Requisitos do PC:** Windows 10 (1903+)/11 64 bits ou Linux x86-64 (glibc 2.39+), placa de vídeo com Vulkan 1.3 (6 GB de VRAM recomendados) e ~33 GB livres para o jogo. O `sce_sys/pic1.png` do seu dump aparece como fundo do launcher (lido da sua pasta, nunca distribuído).
+
 **Do firmware do console:** nada. Este jogo não usa nenhum módulo do sistema do PS4 (`libSceNgs2`, `libSceSecure` e `libSceJobManager` não são importados). A pasta `system_lib/` do pacote fica vazia.
 
 **Como montar a pasta:**
@@ -33,6 +37,10 @@ Everything comes from **your own** PS4 (GoldHEN + Itemzflow). None of it is in t
 | `sce_sys/` (`param.sfo`, `playgo-chunk.dat`, `icon0.png`, `pic1.png`) | base game (+ the update's `param.sfo`) | metadata, install info and the launcher art |
 | `art/` (`cache/`, `movies/`, `ui/`) | base + update | game content (the update replaces part of `art/cache` and `art/movies`) |
 | `playgo.pgm`, `sce_discmap.plt`, `sce_discmap_patch.plt` | base + update | file map and install info |
+
+**Game versions:** tested with **CUSA00223 (1.00 + update 1.07)**; the launcher only accepts the folder with the 1.07 update. There is a report that CUSA00004 also boots (not tested in depth yet). Languages: the launcher offers 6 (English, Brazilian Portuguese, Latin American Spanish, Canadian French, Turkish and Russian), but Turkish and Russian only work if your dump's files have those languages.
+
+**PC requirements:** 64-bit Windows 10 (1903+)/11 or x86-64 Linux (glibc 2.39+), a graphics card with Vulkan 1.3 (6 GB of VRAM recommended) and ~33 GB free for the game. The `sce_sys/pic1.png` from your dump is used as the launcher's background (read from your folder, never distributed).
 
 **From the console firmware:** nothing. This game uses no PS4 system module (`libSceNgs2`, `libSceSecure` and `libSceJobManager` are not imported). The package's `system_lib/` folder stays empty.
 
