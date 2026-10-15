@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls.Basic
 import Launcher
 
 Item {
@@ -53,6 +54,27 @@ Item {
             accent: row.accent
             checked: d.on === true
             onToggled: (v) => Backend.setFix(d.id, v ? "1" : "0")
+        }
+        Row {
+            visible: d.control === "number"
+            anchors.right: parent.right; anchors.rightMargin: 20; anchors.verticalCenter: parent.verticalCenter
+            spacing: 8
+            TextField {
+                id: num
+                width: 96; height: 34
+                text: d.value === undefined ? "" : d.value
+                placeholderText: d.placeholder === undefined ? "" : d.placeholder
+                inputMethodHints: Qt.ImhDigitsOnly
+                validator: IntValidator { bottom: d.lo || 0; top: d.hi || 0 }
+                color: Theme.text; placeholderTextColor: Theme.textMuted
+                font.family: Theme.fontText; font.pixelSize: 14
+                horizontalAlignment: Text.AlignRight
+                background: Rectangle { radius: 8; color: Theme.chip; border.width: 1
+                                        border.color: num.activeFocus ? row.accent : Theme.cardLine }
+                onEditingFinished: Backend.setFix(d.id, text === "" ? "auto" : text)
+            }
+            Text { visible: !!d.unit; text: d.unit || ""; color: Theme.textDim; font.family: Theme.fontText
+                   font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
         }
         Select {
             visible: d.control === "combo"

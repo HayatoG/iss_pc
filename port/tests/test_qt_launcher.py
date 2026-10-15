@@ -57,7 +57,7 @@ class TranslationTests(unittest.TestCase):
         for path in list(QT.rglob('*.qml')) + [QT / 'backend.py', QT / 'logic.py']:
             text = path.read_text(encoding='utf-8')
             used |= set(re.findall(r'(?:tr\(|t_\(|\bt\()["\'](\w+)["\']', text))
-        used |= {'nav_' + n for n in ('play', 'graphics', 'controls', 'fixes', 'saves', 'guides', 'support', 'updates')}
+        used |= {'nav_' + n for n in ('play', 'graphics', 'controls', 'fixes', 'saves', 'guides', 'support', 'updates', 'advanced')}
         for key in (k for k in used if not k.endswith('_')):
             self.assertTrue(key in STRINGS or key in tk, key)
 
