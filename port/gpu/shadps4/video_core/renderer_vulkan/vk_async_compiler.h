@@ -125,6 +125,11 @@ public:
             future.wait();
         }
     }
+    /// True when the job has finished (or there is none) within `timeout`.
+    template <typename Rep, typename Period>
+    bool WaitFor(std::chrono::duration<Rep, Period> timeout) const {
+        return !future.valid() || future.wait_for(timeout) == std::future_status::ready;
+    }
     std::optional<T> Poll() {
         if (!future.valid() || future.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
             return std::nullopt;
