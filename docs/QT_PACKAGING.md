@@ -20,6 +20,7 @@ caminho de início do jogo (`infamous_run`). `--play`, `--script` e `--clear-sha
 - Dados do Qt (QML, `fonts/`, `i18n/`, e qualquer pasta nova de arquivos que não sejam código em `launcher/qt/`,
   como `assets/`) entram sozinhos em `qt/...` dentro do pacote; `qt/app.py` os acha por `Path(__file__).parent`,
   que no executável congelado aponta para esse mesmo lugar. O ícone da janela vai em `infamous.png` na raiz.
+- O pacote leva um arquivo `VERSION` (`vAAAA.MM.DD-<commit>`), escrito por `package.sh` quando `GITHUB_SHA` existe (o CI); é com ele que a tela Atualizações sabe a versão instalada.
 - Redução de tamanho: módulos PySide6 que o launcher não usa são excluídos (WebEngine, Multimedia, 3D,
   Quick3D, Pdf, Sql, Charts, Widgets, ...) e o spec descarta arquivos que o launcher nunca carrega: estilos
   do Qt Quick Controls que não são o Basic, traduções do Qt, plugins de depuração QML, plataformas para

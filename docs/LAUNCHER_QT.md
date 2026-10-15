@@ -1,6 +1,6 @@
-# Novo launcher (Qt Quick) - fase 1
+# Launcher Qt Quick (o padrão dos pacotes)
 
-O novo launcher usa Qt Quick (PySide6) e segue a maquete aprovada: trilho de navegação à esquerda, tela **Início** com o botão **Jogar** e as telas **Correções** (BP01-BP12 e chaves A/B). **Gráficos** e **Controles** estão descritos abaixo; Suporte e Atualizações aparecem como "Em breve". O launcher Tk (`infamous_launcher.py`) continua sendo o padrão e funciona como antes.
+O launcher usa Qt Quick (PySide6) e é o **padrão** dos pacotes (veja [QT_PACKAGING.md](QT_PACKAGING.md)); o launcher Tk (`infamous_launcher.py`) continua no pacote como **inFAMOUS Second Son (classic)**, de reserva. O trilho de navegação à esquerda tem oito telas: **Jogar** (com o botão Jogar, o idioma do jogo e o seletor de oclusão), **Gráficos**, **Controles**, **Correções** (BP01-BP12 e chaves A/B), **Saves e dados**, **Guias de controle**, **Suporte** e **Atualizações**. A interface vem em pt-BR e en-US (idioma do sistema por padrão).
 
 Ele **não reimplementa nada**: usa `infamous_run.py` (`prepare`, `launch`, `build_env`, `save_experimental`), `backports_table.py`, `shader_cache.py` e `tlg_vulkan.py`. O mesmo `settings.json` e o mesmo `tlg.ini` valem nos dois launchers.
 
@@ -23,6 +23,10 @@ Seletor "Idioma do jogo / Game language" no canto do herói, sob **Escolher a pa
 `infamous_run.system_game_language()` lê `LC_ALL`, `LC_MESSAGES`, `LANG`, depois `locale.getlocale()` e, no Windows, `GetUserDefaultLocaleName`; pelo prefixo: pt (inclui pt_PT) vira `pt_BR`, es `es_LA`, fr `fr_CA`, tr `tr`, ru `ru`, o resto `en`. `resolve_game_language()` devolve a escolha explícita, ou o idioma do sistema para `auto` e valores inválidos. `build_env` usa essa função (`ISS_LANGUAGE` do ambiente continua ganhando): en=1, pt_BR=17, es_LA=20, fr_CA=22, tr=19, ru=8. Quem já tinha `pt_BR` (ou outro) gravado mantém. O launcher Tk usa a mesma caixa e a mesma função.
 
 Escolher grava a chave por `save_settings` e vale na próxima partida; a ajuda diz isso e que só funciona se os arquivos do jogo tiverem o idioma. É separado da língua da interface (PT-BR / EN-US). Código: `Backend.gameLanguageOptions/gameLanguageIndex/gameLanguageNow/setGameLanguage`.
+
+## Oclusão (Início)
+
+Seletor **Brilho das luzes (oclusão)** na tela Início, com os quatro valores de `ISS_OCCLUSION_MODE` (0 como antes, 1 luzes tapadas, 2 luzes totalmente visíveis, 3 contagem zero, o padrão); grava `occlusion_mode` pela mesma tabela da tela Correções (`Backend.occlusionOptions/occlusionIndex/setOcclusion`) e vale na próxima partida. O modo 3 corrigiu os faróis que piscavam e o brilho que atravessava personagens (confirmado no Windows e no Linux); veja o [README](../README.md#luzes-e-oclusão). O launcher Tk tem a mesma caixa.
 
 ## O que a tela Início lê
 
@@ -80,7 +84,7 @@ Entrada **Gráficos** (azul `#4d8bff`). Reúne, sem chave nova, o que o launcher
 Entrada **Controles** (néon `#ff3d9a`). Lógica e nomes de tecla em `launcher/padsettings.py`, conferidos com o código do jogo (`port/src/runtime_pad.c`, `port/gpu/shim/tlg_settings.cpp`) por `test_qt_screens_a.py`.
 
 - **Controle:** nome e tipo detectados (o mesmo detector do chip do Início), zona morta dos analógicos (0-40%, `stick_deadzone`, reinicia) e velocidade da mira do grafite (`sensor_aim`, no jogo). Texto curto sobre sensor/touchpad e botão para a tela **Guias de controle** (só aparece se essa tela existir).
-- **Mouse:** `mouse_enabled`, `mouse_sensitivity`, `mouse_invert_y`, `mouse_smoothing`, `mouse_accel`, `mouse_deadzone` no `tlg.ini` (a chave sai quando volta ao padrão) e o botão **Desligar o mouse** (`mouse_enabled=0`, o mesmo que `TLG_MOUSE=0`). Modo touchpad do mouse: `settings.json` (`mouse_pad`, `mouse_pad_key`, `mouse_pad_mode`, `mouse_pad_sens`, `mouse_pad_drag`) virando `ISS_MOUSE_PAD`, `ISS_MOUSE_PAD_KEY` (Ctrl esquerdo ou X1 por padrão), `ISS_MOUSE_PAD_MODE` (`hold`/`toggle`), `ISS_MOUSE_PAD_SENS` e `ISS_MOUSE_PAD_DRAG` em `build_env`, só quando diferem do padrão. O código do mouse está em `feat/mouse-camera`; sem ele no jogo, as chaves são gravadas e ignoradas.
+- **Mouse:** `mouse_enabled`, `mouse_sensitivity`, `mouse_invert_y`, `mouse_smoothing`, `mouse_accel`, `mouse_deadzone` no `tlg.ini` (a chave sai quando volta ao padrão) e o botão **Desligar o mouse** (`mouse_enabled=0`, o mesmo que `TLG_MOUSE=0`). Modo touchpad do mouse: `settings.json` (`mouse_pad`, `mouse_pad_key`, `mouse_pad_mode`, `mouse_pad_sens`, `mouse_pad_drag`) virando `ISS_MOUSE_PAD`, `ISS_MOUSE_PAD_KEY` (Ctrl esquerdo ou X1 por padrão), `ISS_MOUSE_PAD_MODE` (`hold`/`toggle`), `ISS_MOUSE_PAD_SENS` e `ISS_MOUSE_PAD_DRAG` em `build_env`, só quando diferem do padrão. O mouse como câmera e como touchpad já está no jogo; ainda foi pouco testado por outros jogadores.
 - **Teclado:** tabela do mapa padrão (lida do `key_map` de `runtime_pad.c`; um teste compara) e o campo avançado do `TLG_KEY_MAP` (`botão=tecla`, vírgulas, `|` para várias fontes, `none`, até 1023 caracteres e 8 fontes por botão; botões e nomes de mouse como em `apply_button_map`). Erros de formato bloqueiam o botão Salvar; nome de tecla que a lista do launcher não conhece é só aviso (quem decide é o SDL no jogo). O valor vai em `settings.json` (`key_map`) e sai como `ISS_KEY_MAP`; um `TLG_KEY_MAP`/`ISS_KEY_MAP` do sistema vale mais.
 
 ## Suporte e Atualizações
