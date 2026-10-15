@@ -1,7 +1,7 @@
-# tlg on Windows
+# inFAMOUS Second Son on Windows
 
 The port builds and runs natively on 64-bit Windows 10 (1903+) / 11 with the same sources as
-on Linux. Players: see `README-Windows.txt` (it ships in the package).
+on Linux. Players: see `README-player.md` (it ships in the package, pt-BR and en).
 
 ## Build
 
@@ -22,36 +22,33 @@ Then, in the repository:
 
 ```bash
 git submodule update --init --recursive
-bash build.sh                      # out/tlg-probe.exe, out/tlg-gpu-capabilities.exe
-TLG_GAME_DIR=F:/path/to/CUSA01623 python run.py
-python launcher/tlg_launcher_win.py
-bash packaging/windows/package.sh  # dist/tlg-windows/ and .zip: God of War III.exe + DLLs
+bash build.sh                      # out/tlg-probe.exe, out/tlg-gpu-capabilities.exe, out/tlg-play.exe
+TLG_GAME_DIR=F:/path/to/CUSA00223 python run.py
+python launcher/infamous_launcher_qt.py   # the Qt launcher (needs PySide6); infamous_launcher.py is the Tk one
+bash packaging/windows/package.sh  # dist/infamous-windows-x86_64.zip: inFAMOUS Second Son.exe + DLLs
 ```
 
 `run.py` is the Windows `run.sh` (same variables; works from a plain Windows Python too).
-The package freezes the launcher with PyInstaller (a private venv in `out/pyenv`, from a
-python.org Python) into `God of War III.exe`, which also runs `run.py` (`--run`), the preparation
-scripts (`--script`) and the game without the window (`--play`): players need no Python.
-`Play God of War III.exe` (`packaging/windows/play.c`) is a small native program that runs
-`God of War III.exe --play` from its folder and waits for it, for players who want to start the
+The package freezes the launchers with PyInstaller (a private venv in `out/pyenv`, from a
+python.org Python) into `inFAMOUS Second Son.exe` (Qt) and `inFAMOUS Second Son (classic).exe` (Tk).
+Both also run the preparation scripts (`--script`) and the game without the window (`--play`):
+players need no Python.
+`Play inFAMOUS Second Son.exe` (`packaging/windows/play.c`) is a small native program that runs
+the launcher's `--play` from its folder and waits for it, for players who want to start the
 game directly with the saved settings.
-`patches.py` applies the built-in patches only to the game build they were checked against
-(CUSA01623 01.02, by eboot.bin sha256; `TLG_FORCE_PATCHES=1` overrides); other builds run unpatched.
+`scripts/patches.py` applies the built-in patches only to the game build they were checked against
+(by `eboot.bin` sha256; `TLG_FORCE_PATCHES=1` overrides); other builds run unpatched.
 From a source tree it adds `C:\msys64\clang64\bin` (or `$MSYS2_ROOT`) to `PATH` for the DLLs.
-`bash tools/fetch_fsr4_assets.sh` works in the CLANG64 shell as on Linux.
 
-DLSS (optional): `DLSS_SDK_ROOT=<checkout of github.com/NVIDIA/DLSS> bash
-packaging/windows/build_dlss.sh` builds `tlg_dlss.dll` (`gpu/dlss_bridge`, the only code that
-uses the NVIDIA SDK, compiled with MSVC 2022) and copies it with `nvngx_dlss.dll` next to
-`out/tlg-probe.exe`; `package.sh` ships both when present. The renderer loads the bridge at run
-time (`vk_dlss.cpp`), adds the Vulkan extensions NGX asks for, and DLSS gets the same inputs as
-FSR 3 (scene color, depth, render-pixel motion vectors, jitter). `TLG_DLSS=0` turns it off.
+The shared core also carries optional upscaler code from other ports (a DLSS bridge built with
+`packaging/windows/build_dlss.sh`, FSR 4 helpers in `tools/`). **inFAMOUS does not use them**: the
+game's menu only has FSR 1 and sharpening (RCAS), and the launcher runs with the native image
+(`ISS_UPSCALER=off`).
 
-The launcher texts are written in English with the Russian beside them; the other languages
-are in `launcher/tlg_lang.py` (one list per language in the order of `KEYS`; a missing or
-empty text falls back to English). The icon (`launcher/tlg.ico`/`.png`) is drawn by
-`packaging/windows/make_icon.py` and built into `God of War III.exe`, `tlg-probe.exe` (the game
-window) and `tlg-gpu-capabilities.exe`.
+The launcher texts are in Portuguese (Brazil) and English (`launcher/qt/i18n/strings.json`, plus the
+Tk launcher's own table). The icon (`launcher/infamous.ico`/`.png`) is original art drawn by
+`packaging/windows/make_icon.py` and built into the executables and `tlg-probe.exe` (the game
+window).
 
 ## What is different from Linux
 
@@ -85,3 +82,16 @@ under `qt\`; unused Qt modules, Controls styles, translations and platform plugi
 (see `docs/QT_PACKAGING.md`). `"inFAMOUS Second Son.exe" --selftest` opens the QML offscreen, renders one
 frame and writes `selftest ok` to the file in `ISS_SELFTEST_OUT` (a windowed exe has no console); the
 CI runs it after Package. Estimated size: the zip grows by 55-70 MB.
+
+## Status on Windows
+
+Players have tested the Windows package (the occlusion fix for headlights and light glare was confirmed on Windows).
+Windows-specific points, all described in the top-level `README.md`:
+
+- Saves and settings live in `user/` next to the game by default; the launcher can move them to a fixed folder
+  (suggestion `Documents\inFAMOUS-PC`), remembered in `%APPDATA%\inFAMOUS-PC\launcher.json`. `ISS_USER_DIR` overrides it.
+- Logs go to `out\logs\run-*.log`; the Support screen builds a report without personal paths.
+- Red-zone protection (crash at `0x1cfaaf`, #29/#41) is on by default on Windows (`ISS_RED_ZONE_REWRITE=0` turns it off).
+- AMD's Windows driver: tiny BC textures are decoded on the CPU (`ISS_BC_TINY`). RX 580 / Polaris still crashes in
+  `amdvlk64.dll+0xebbbb` (#31, #49, #59, #65, #67, #81): cause under investigation; try `ISS_BP09=1` and the latest driver.
+- The executables are not digitally signed: Windows shows "Windows protected your PC" (More info, Run anyway).
