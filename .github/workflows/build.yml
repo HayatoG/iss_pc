@@ -182,7 +182,7 @@ jobs:
           Automatic build of commit ${short}. **No game files included**: see README-player.md inside the package for what to copy from your PS4.
 
           - Linux x86-64 (glibc 2.39+): \`infamous-linux-x86_64.tar.gz\`
-          - Windows 10/11 64-bit: \`infamous-windows-x86_64.zip\` (ainda não testado em jogo / not yet tested in game)
+          - Windows 10/11 64-bit: \`infamous-windows-x86_64.zip\`
 
           **Sensor de movimento e touchpad** (grafite, absorver poderes, portas): no DualShock 4/DualSense funcionam direto. Em outros controles, um toque em **L3+R3** liga/desliga o modo sensor (ou Share no Xbox Series): ele é a lata de spray do grafite: o controle fica de lado, X/A sacode, R2 pinta e o **analógico esquerdo mira** o cursor (para os lados e para cima/baixo; ele fica onde você soltar). **View/Select** é o clique do touchpad (segurar para absorver fumaça, neon...), e **View/Select + analógico direito** desliza. Teclado: T/G viram de lado (as setas miram enquanto seguram), Y sacode, F pinta (R2), Tab/Backspace clicam, Tab + setas deslizam, Tab + Backspace apertam as duas pontas (View/Select + R1 no controle: levantar o carro de cima do Reggie). A zona morta dos analógicos fica no launcher.
 
