@@ -20,3 +20,10 @@ GPL-2.0, AjncSystem; its multi-wave/ReadLane part credits Pink-shadPS4 by luizgu
 (shader_recompiler/recompiler_toggles.h):
   6f0b3e56 + shared_memory_barrier_pass.cpp at 70bb4385 LDS barriers for partial-wave and multi-wave
   compute workgroups (IR SubgroupBarrier), debb0c49 + e3227814 S_WQM_B64.
+Backported as switchable "BPnn" fixes (common/backports.h; TLG_BPnn / ISS_BPnn, one commit each, origin in the commit message):
+  BP01 shadPS4 #5258, BP02 shadPS4 145932bf (#5240), BP03 shadPS4 c34ca21f, BP04 shadPS4 1c2b8f97 (#5346),
+  BP05 shadPS4 #5257, BP10 shadPS4 #5262, BP11 shadPS4 #5348, BP12 shadPS4 7d28d279 (#5264);
+  BP06 Shadow of the Colossus native port 8d84cf7 (maximal reconvergence);
+  BP07 bbport (deadinside/bloodborne_pc) 10baf9d (async compile that does not skip draws);
+  BP08 Mrsuss60/bloodborne_pc_windows_port b972798 and 0xCydral/bloodborne_pc bdb9769 + 4f16e00 (driver pipeline cache blob);
+  BP09 T3CHNOLOG1C/CTR d26bcb2 (1D images lowered to 2D).
