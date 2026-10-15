@@ -1136,11 +1136,13 @@ struct AsyncWaitBudget {
             return;
         }
         last_log = now;
-        LOG_INFO(Render_Vulkan,
-                 "Async wait (total): {} waits for a compiling shader or pipeline, {:.1f} ms in all, {} finished in "
-                 "time, {} gave up at the limit and the draw was skipped ({} ms per wait, {} ms per frame)",
-                 waited, double(total.count()) / 1e6, ready, timed_out,
-                 per_draw.count() / 1000, per_frame.count() / 1000);
+        // A warning, not info: the log keeps only warnings and above.
+        LOG_WARNING(Render_Vulkan,
+                    "Async wait (total): {} waits for a compiling shader or pipeline, {:.1f} ms in all, "
+                    "{} finished in time, {} gave up at the limit and the draw was skipped "
+                    "({} ms per wait, {} ms per frame)",
+                    waited, double(total.count()) / 1e6, ready, timed_out, per_draw.count() / 1000,
+                    per_frame.count() / 1000);
     }
 };
 AsyncWaitBudget async_wait; // GPU thread only (pipeline selection)
@@ -1162,7 +1164,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (prepared) {
         if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
             used_prepared = prepared;
-            TlgRegion::NotePipeline('g', std::hash<GraphicsPipelineKey>{}(prepared->key));
+            TlgRegion::NotePipeline('g', std::hash<GraphicsPipelineKey>{}(prepared->key), true);
             return pipeline;
         }
     }
@@ -1177,7 +1179,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         return nullptr;
     }
     // tlg: region trace (TLG_REGION_TRACE=1): the first request of each pipeline.
-    TlgRegion::NotePipeline('g', std::hash<GraphicsPipelineKey>{}(sel.graphics_key));
+    TlgRegion::NotePipeline('g', std::hash<GraphicsPipelineKey>{}(sel.graphics_key),
+                            graphics_pipelines.contains(sel.graphics_key));
     if (AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect()) {
         const auto found = graphics_pipelines.find(sel.graphics_key);
         if (found != graphics_pipelines.end()) {
@@ -1290,7 +1293,8 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     if (!RefreshComputeKey()) {
         return nullptr;
     }
-    TlgRegion::NotePipeline('c', std::hash<ComputePipelineKey>{}(compute_key));
+    TlgRegion::NotePipeline('c', std::hash<ComputePipelineKey>{}(compute_key),
+                            compute_pipelines.contains(compute_key));
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     if (is_new) {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);

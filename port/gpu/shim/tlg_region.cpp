@@ -31,12 +31,13 @@ public:
         Write("O\t%lld\t%s\n", Elapsed(), package.c_str());
     }
 
-    void Pipeline(char kind, std::uint64_t hash) {
+    void Pipeline(char kind, std::uint64_t hash, bool ready) {
         std::scoped_lock lock{mutex};
         if (!seen.insert(hash ^ (std::uint64_t(kind) << 56)).second) {
             return;
         }
-        std::fprintf(file, "P\t%lld\t%c\t%#llx\n", Elapsed(), kind, static_cast<unsigned long long>(hash));
+        std::fprintf(file, "P\t%lld\t%c\t%#llx\t%c\n", Elapsed(), kind, static_cast<unsigned long long>(hash),
+                     ready ? 'r' : 'm');
         std::fflush(file);
     }
 
@@ -98,9 +99,9 @@ void NoteOpen(const char* guest_path) {
     Trace::Get().Open(name ? name + 1 : guest_path);
 }
 
-void NotePipeline(char kind, std::uint64_t hash) {
+void NotePipeline(char kind, std::uint64_t hash, bool ready) {
     if (Enabled()) {
-        Trace::Get().Pipeline(kind, hash);
+        Trace::Get().Pipeline(kind, hash, ready);
     }
 }
 
