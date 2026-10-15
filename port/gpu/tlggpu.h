@@ -74,6 +74,8 @@ void tlggpu_set_wait_hooks(TlgGpuWaitBegin begin, TlgGpuWaitEnd end);
  * page-protection faults being handled now and handled so far. */
 typedef struct { uint64_t submitted, shown, presented, vblanks, faults_in_progress, faults_handled; } TlgGpuFrameCounters;
 void tlggpu_frame_counters(TlgGpuFrameCounters *out);
+/* The game opened a file (guest path): feeds the region trace (TLG_REGION_TRACE=1, gpu/shim/tlg_region.h). */
+void tlggpu_note_open(const char *guest_path);
 /* The mouse, gathered by the window thread while the game has it (SDL relative mode: the window
  * has focus, the port's menu is closed and Esc did not release it; a click takes it again).
  * take: motion in mouse counts and wheel notches since the last call, then cleared. Buttons are

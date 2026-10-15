@@ -17,6 +17,7 @@
 #include <xxhash.h>
 #include "common/backports.h"
 #include "tlg_threads.h"
+#include "tlg_region.h"
 
 #include "common/elf_info.h"
 #include "common/hash.h"
@@ -1159,6 +1160,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (prepared) {
         if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
             used_prepared = prepared;
+            TlgRegion::NotePipeline('g', std::hash<GraphicsPipelineKey>{}(prepared->key));
             return pipeline;
         }
     }
@@ -1172,6 +1174,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
         return nullptr;
     }
+    // tlg: region trace (TLG_REGION_TRACE=1): the first request of each pipeline.
+    TlgRegion::NotePipeline('g', std::hash<GraphicsPipelineKey>{}(sel.graphics_key));
     if (AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect()) {
         const auto found = graphics_pipelines.find(sel.graphics_key);
         if (found != graphics_pipelines.end()) {
@@ -1284,6 +1288,7 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     if (!RefreshComputeKey()) {
         return nullptr;
     }
+    TlgRegion::NotePipeline('c', std::hash<ComputePipelineKey>{}(compute_key));
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     if (is_new) {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);

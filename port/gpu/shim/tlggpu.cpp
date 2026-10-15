@@ -10,6 +10,7 @@
 #ifndef _WIN32
 #include <sys/resource.h>
 #endif
+#include "tlg_region.h"
 #include "tlg_toggles.h"
 #include "tlg_freeze.h"
 #include <algorithm>
@@ -347,6 +348,10 @@ extern "C" int tlggpu_handle_fault(void* ucontext, void* address) {
 extern "C" void tlggpu_set_wait_hooks(TlgGpuWaitBegin begin, TlgGpuWaitEnd end) {
     TlgFreeze::end_hook.store(end);
     TlgFreeze::begin_hook.store(begin);
+}
+
+extern "C" void tlggpu_note_open(const char* guest_path) {
+    TlgRegion::NoteOpen(guest_path);
 }
 
 extern "C" void tlggpu_frame_counters(TlgGpuFrameCounters* out) {

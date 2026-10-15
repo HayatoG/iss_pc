@@ -5,6 +5,7 @@
  * Paths containing ".." components are rejected rather than normalized. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "gpu/tlggpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -253,6 +254,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     files[fd]=(File){.used=1,.host=host,.dir=dir,.append=(flags&0x8)!=0};
     pthread_mutex_init(&files[fd].io,NULL);
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
+    tlggpu_note_open(guest); /* region trace (TLG_REGION_TRACE=1) */
     ++opens;
     pthread_mutex_unlock(&lock);
     if (audio_trace() && strstr(guest,"sound/")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
