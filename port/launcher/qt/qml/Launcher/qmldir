@@ -9,6 +9,7 @@ Toggle 1.0 Toggle.qml
 Select 1.0 Select.qml
 HomePage 1.0 HomePage.qml
 FixesPage 1.0 FixesPage.qml
+AdvancedPage 1.0 AdvancedPage.qml
 FixRow 1.0 FixRow.qml
 SoonPage 1.0 SoonPage.qml
 GraphicsPage 1.0 GraphicsPage.qml

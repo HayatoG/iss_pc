@@ -403,5 +403,17 @@
   "guides_copied": {"en": "Image copied: just paste it into Discord.", "pt": "Imagem copiada: é só colar no Discord."},
   "guides_saved": {"en": "Image saved to {path}.", "pt": "Imagem salva em {path}."},
   "guides_failed": {"en": "Could not save/copy the image ({detail}).", "pt": "Não foi possível salvar/copiar a imagem ({detail})."},
-  "guides_save_title": {"en": "Save the guide image", "pt": "Salvar imagem do guia"}
+  "guides_save_title": {"en": "Save the guide image", "pt": "Salvar imagem do guia"},
+  "nav_advanced": {"en": "Advanced", "pt": "Avançado"},
+  "adv_title": {"en": "Advanced parameters", "pt": "Parâmetros avançados"},
+  "adv_intro": {"en": "Every tuning switch of the GPU backend and the runtime that the Fixes screen does not cover. Each one changes only what you touch; \"Automatic\" lets the game decide. Changes apply on the next start. The values you set are printed at the top of every log (Config: lines), so a report shows exactly what ran.", "pt": "Todos os ajustes finos da placa de vídeo e do runtime que a tela Correções não cobre. Cada um muda só o que você mexer; \"Automático\" deixa o jogo decidir. As mudanças valem na próxima partida. Os valores que você definir aparecem no começo de todo log (linhas Config:), então um relato mostra exatamente o que rodou."},
+  "adv_warning": {"en": "These are test switches. A wrong value can lower the FPS, break an effect or stop the game from starting; \"Restore defaults\" undoes everything on this screen.", "pt": "São ajustes para teste. Um valor errado pode derrubar o FPS, quebrar um efeito ou impedir o jogo de abrir; \"Restaurar padrões\" desfaz tudo desta tela."},
+  "adv_search": {"en": "Search parameters", "pt": "Buscar parâmetros"},
+  "adv_reset": {"en": "Restore defaults", "pt": "Restaurar padrões"},
+  "adv_copy": {"en": "Copy my combination", "pt": "Copiar minha combinação"},
+  "adv_copied": {"en": "Combination copied. Paste it in the issue.", "pt": "Combinação copiada. Cole na issue."},
+  "adv_nothing": {"en": "Nothing found.", "pt": "Nada encontrado."},
+  "adv_auto": {"en": "automatic", "pt": "automático"},
+  "adv_profile_default": {"en": "All defaults", "pt": "Tudo no padrão"},
+  "adv_profile_custom": {"en": "{n} changed", "pt": "{n} alterado(s)"}
 }

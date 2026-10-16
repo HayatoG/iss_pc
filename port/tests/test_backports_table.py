@@ -181,3 +181,44 @@ class LaunchEnvTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AdvancedTableTest(unittest.TestCase):
+    def test_names_exist_in_sources(self):
+        text = repo_text()
+        for item in t.ADVANCED:
+            self.assertIn(f'"{item.env}"', text, item.env)
+
+    def test_rows_are_consistent(self):
+        import advanced_table
+        areas = {a[0] for a in advanced_table.AREAS}
+        for item in t.ADVANCED:
+            self.assertEqual('adv', item.group)
+            self.assertIn(item.tab, areas, item.id)
+            self.assertTrue(item.key.startswith('adv_') and item.pass_env and not item.shader, item.id)
+            self.assertTrue(all(item.name) and all(item.what), item.id)
+            if item.vtype == 'int':
+                self.assertLess(item.lo, item.hi, item.id)
+                self.assertTrue(item.default is None or item.lo <= int(item.default) <= item.hi, item.id)
+            if item.vtype == 'choice':
+                self.assertIn(item.default, [c[0] for c in item.choices], item.id)
+
+    def test_changes_reach_the_game_and_the_ini(self):
+        states = {i.id: None for i in t.ITEMS}
+        threads = next(i for i in t.ADVANCED if i.env == 'TLG_PREP_WORKERS')
+        states[threads.id] = t.normalize(threads, '4')
+        self.assertEqual('4', states[threads.id])
+        self.assertEqual({'ISS_PREP_WORKERS': '4'}, t.environment(states, {}))
+        self.assertEqual('4', t.ini_updates(states)['adv_prep_workers'])
+        self.assertEqual(1, t.advanced_changes(states))
+        self.assertEqual(0, t.changes(states))                      # the profile counts fixes only
+        self.assertIsNone(t.normalize(threads, '99'))               # out of range
+        self.assertEqual({}, t.environment(states, {'ISS_PREP_WORKERS': '2'}))   # the environment wins
+
+    def test_defaults_clear_only_the_advanced_group(self):
+        states = {i.id: None for i in t.ITEMS}
+        states['TLG_FULL_BARRIERS'] = '1'
+        states['BP01'] = '0'
+        cleared = t.defaults(states, 'adv')
+        self.assertIsNone(cleared['TLG_FULL_BARRIERS'])
+        self.assertEqual('0', cleared['BP01'])

@@ -282,7 +282,7 @@ def main(out):
     out.mkdir(parents=True, exist_ok=True)
     backend = demo_backend(with_art='--art' in sys.argv)
     app = App(backend=backend)
-    names = ['inicio', 'graficos', 'controles', 'correcoes', 'saves', 'guias', 'suporte', 'atualizacoes']
+    names = ['inicio', 'graficos', 'controles', 'correcoes', 'saves', 'guias', 'suporte', 'atualizacoes', 'avancado']
     app.window.setProperty('animate', False)
     prefix = 'art-' if '--art' in sys.argv else ''
     for index, name in enumerate(names):

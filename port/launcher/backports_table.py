@@ -227,7 +227,10 @@ DIAGNOSTICS = [
                source='diagnóstico (liverpool.cpp ZPASS_DONE)'),
 ]
 
-ITEMS = MENU + BACKPORTS + DIAGNOSTICS
+import advanced_table  # noqa: E402
+
+ADVANCED = advanced_table.build(_make)
+ITEMS = MENU + BACKPORTS + DIAGNOSTICS + ADVANCED
 PREFIX = 'ISS_'
 
 
@@ -315,6 +318,11 @@ def changes(states):
     """How many fixes/switches (BPnn and A/B) differ from the Recommended profile. The game menu
     options (overlay corner, limits...) are preferences and do not count."""
     return sum(1 for item in BACKPORTS + DIAGNOSTICS if states.get(item.id) is not None)
+
+
+def advanced_changes(states):
+    """How many Advanced parameters the player changed."""
+    return sum(1 for item in ADVANCED if states.get(item.id) is not None)
 
 
 def notice_pending(settings):

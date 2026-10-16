@@ -12,6 +12,7 @@ from .saves import Saves
 from .support import Support
 from .updates import Updates
 from .logic import backports_table, tlg_run
+import advanced_table  # noqa: E402
 
 URLS = {'channel': 'https://www.youtube.com/@hayatog-dev', 'discord': 'https://discord.gg/UMkdMYZh9g'}
 
@@ -20,9 +21,11 @@ class FixesModel(QAbstractListModel):
     """Rows of the Fixes screen: group headers and one row per BPnn / A-B switch."""
     DATA = Qt.UserRole + 1
 
-    def __init__(self, backend):
+    def __init__(self, backend, scope='fixes'):
         super().__init__(backend)
         self.backend = backend
+        self.scope = scope          # 'fixes' (BPnn + A/B switches) or 'adv' (the Advanced screen)
+        self.filter = ''
         self.rows = []
         self.rebuild()
 
@@ -41,6 +44,9 @@ class FixesModel(QAbstractListModel):
         t = self.backend.t_
         states = self.backend.fix_states
         rows = []
+        if self.scope == 'adv':
+            self._rebuild_advanced(t, states)
+            return
         titles = {'light': 'fixes_group_light', 'perf': 'fixes_group_perf', 'tex': 'fixes_group_tex',
                   'exp': 'fixes_group_exp'}
         for group in logic.GROUP_ORDER:
@@ -54,6 +60,28 @@ class FixesModel(QAbstractListModel):
         self.rows = rows
         self.endResetModel()
 
+    def _rebuild_advanced(self, t, states):
+        words = self.filter.lower().split()
+        rows = []
+        for area, title_en, title_pt in advanced_table.AREAS:
+            items = [i for i in backports_table.ADVANCED if i.tab == area and self._matches(i, words, t)]
+            if not items:
+                continue
+            rows.append({'kind': 'header', 'id': 'hdr-' + area, 'title': title_pt if t.pt() else title_en, 'note': ''})
+            rows += [self.item_row(i, states) for i in items]
+        self.beginResetModel()
+        self.rows = rows
+        self.endResetModel()
+
+    @staticmethod
+    def _matches(item, words, t):
+        text = (item.id + ' ' + t.pair(item.name) + ' ' + t.pair(item.what)).lower()
+        return all(w in text for w in words)
+
+    def set_filter(self, text):
+        self.filter = text
+        self.rebuild()
+
     def item_row(self, item, states):
         t = self.backend.t_
         value = backports_table.effective(item, states)
@@ -62,6 +90,8 @@ class FixesModel(QAbstractListModel):
         if item.source:
             what += ' (' + t('exp_source', source=item.source) + ')'
         tags = [{'text': t('exp_live') if item.live else t('exp_restart'), 'tone': 'info'}]
+        if item.group == 'adv':
+            tags.append({'text': item.env, 'tone': 'info'})
         if backports_table.is_recommended(item):
             tags.append({'text': t('exp_recommended'), 'tone': 'good'})
         if item.risky:
@@ -73,7 +103,12 @@ class FixesModel(QAbstractListModel):
                'changed': states.get(item.id) is not None, 'control': 'switch', 'on': value == '1',
                'value': value if value is not None else 'auto', 'options': [], 'index': 0,
                'lo': 0, 'hi': 0, 'unit': ''}
-        if not (item.vtype == 'bool' and item.default is not None):
+        if item.vtype == 'int':
+            row['control'] = 'number'
+            row['value'] = '' if states.get(item.id) is None else states[item.id]
+            row['lo'], row['hi'], row['unit'] = item.lo, item.hi, item.unit
+            row['placeholder'] = t('adv_auto') if item.default is None else item.default
+        elif not (item.vtype == 'bool' and item.default is not None):
             if item.vtype == 'bool':  # automatic: the GPU code decides
                 options = [('auto', t('exp_auto')), ('1', t('exp_on')), ('0', t('exp_off'))]
             else:
@@ -86,7 +121,7 @@ class FixesModel(QAbstractListModel):
     def refresh_item(self, item_id):
         for n, row in enumerate(self.rows):
             if row['id'] == item_id:
-                item = next(i for i in logic.fix_items() if i.id == item_id)
+                item = next(i for i in backports_table.ITEMS if i.id == item_id)
                 self.rows[n] = self.item_row(item, self.backend.fix_states)
                 self.dataChanged.emit(self.index(n), self.index(n))
                 return
@@ -130,6 +165,7 @@ class Backend(QObject):
         self._guide_kind, self._guide_message = None, ''
         self.process = None
         self.fixes = FixesModel(self)
+        self.advanced = FixesModel(self, 'adv')
         self.gpuFound.connect(self._on_gpu)
         self.lineReceived.connect(self._on_line)
         self.finished.connect(self._on_finished)
@@ -390,6 +426,41 @@ class Backend(QObject):
     def fixesModel(self):
         return self.fixes
 
+    @Property(QObject, constant=True)
+    def advancedModel(self):
+        return self.advanced
+
+    @Property(str, notify=profileChanged)
+    def advancedText(self):
+        n = backports_table.advanced_changes(self.fix_states)
+        return self.t_('adv_profile_default') if n == 0 else self.t_('adv_profile_custom', n=n)
+
+    @Property(bool, notify=profileChanged)
+    def advancedIsDefault(self):
+        return backports_table.advanced_changes(self.fix_states) == 0
+
+    @Slot(str)
+    def setAdvancedFilter(self, text):
+        self.advanced.set_filter(text)
+
+    @Slot()
+    def copyCombination(self):
+        """Every ISS_ variable the player's choices add, one per line, for pasting into an issue."""
+        from PySide6.QtGui import QGuiApplication
+        env = backports_table.environment(self.fix_states, {})
+        text = '\n'.join(f'{k}={v}' for k, v in sorted(env.items())) or '(defaults)'
+        app = QGuiApplication.instance()
+        if app is not None:
+            app.clipboard().setText(text)
+        self.message.emit(self.t_('adv_copied'))
+
+    @Slot()
+    def resetAdvanced(self):
+        self.fix_states = backports_table.defaults(self.fix_states, 'adv')
+        self._save_fixes()
+        self.advanced.refresh_all()
+        self.refresh()
+
     @Property(str, notify=profileChanged)
     def profileText(self):
         n = backports_table.changes(self.fix_states)
@@ -531,6 +602,7 @@ class Backend(QObject):
         self.fix_states[item_id] = backports_table.normalize(item, None if value == 'auto' else value)
         self._save_fixes()
         self.fixes.refresh_item(item_id)
+        self.advanced.refresh_item(item_id)
         self.refresh()
 
     @Slot(str)
@@ -541,6 +613,7 @@ class Backend(QObject):
             self.fix_states = backports_table.defaults(self.fix_states)
         self._save_fixes()
         self.fixes.refresh_all()
+        self.advanced.refresh_all()
         self.refresh()
 
     def _save_fixes(self):

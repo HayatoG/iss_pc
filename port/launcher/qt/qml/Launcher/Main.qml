@@ -8,7 +8,7 @@ Rectangle {
     implicitWidth: 1120
     implicitHeight: 700
     property int current: 0
-    readonly property var pages: ["play", "graphics", "controls", "fixes", "saves", "guides", "support", "updates"]
+    readonly property var pages: ["play", "graphics", "controls", "fixes", "saves", "guides", "support", "updates", "advanced"]
     property bool animate: true
 
     Rail {
@@ -37,7 +37,7 @@ Rectangle {
                     sourceComponent: { var k = root.pages[index]
                         return k === "play" ? home : k === "graphics" ? graphics : k === "controls" ? controls
                              : k === "fixes" ? fixes : k === "saves" ? saves : k === "guides" ? guides
-                             : k === "support" ? support : k === "updates" ? updates : soon }
+                             : k === "support" ? support : k === "updates" ? updates : k === "advanced" ? advanced : soon }
                     onLoaded: if (item.key !== undefined) item.key = root.pages[index]
                 }
             }
@@ -49,6 +49,7 @@ Rectangle {
         ControlsPage { guidesShown: root.pages.indexOf("guides") >= 0
                        onOpenGuides: root.current = root.pages.indexOf("guides") } }
     Component { id: fixes; FixesPage { } }
+    Component { id: advanced; AdvancedPage { } }
     Component { id: saves; SavesPage { } }
     Component { id: support; SupportPage { } }
     Component { id: updates; UpdatesPage { } }
