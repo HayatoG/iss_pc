@@ -577,6 +577,33 @@ now reads guest memory for the constant ring, is not treated as a GPU-side threa
 prints which logged write landed near the corrupted block; bisect the pipeline toggles
 (38 tasks, 39 pending fence waits, 41 recorder fences, 42 memory writes, 36 constant ring).
 
+## Asynchronous compute queue in the draw pipeline (2026-10-16)
+
+inFAMOUS submits about 1200 small asynchronous compute jobs per frame (a `NOP` and an indirect
+buffer of register packets, `DISPATCH_DIRECT`, `DMA_DATA`, `RELEASE_MEM`). `ProcessCompute`
+drained the draw pipe before every packet, so each job made stage A wait for stage B to finish
+all the draws handed over before it: ~43k drains/s that waited, nearly all on the job's first
+packet (`NOP`). Skipping the drain for register-only packets alone changed nothing: the wait
+moved to the next packet.
+
+The compute queue now uses the graphics queue's tools (toggle 1 << 56 switches it off live):
+register packets, nested buffers and dispatches are handed over without a drain (dispatches
+were already pipelined by `Rasterizer::DispatchDirect`); `WRITE_DATA`, `DMA_DATA` and
+`RELEASE_MEM` run in order on stage B (`RunInOrder`; the indirect-dispatch patch of `DMA_DATA`
+is still recorded on stage A); `WAIT_REG_MEM` drains only while unmet. Other packets
+(`MEM_SEMAPHORE`, `REWIND`) still drain first.
+
+Measured headless (gamescope) in a static outdoor scene, 1080p, `TLG_VBLANK_HZ=0`,
+`TLG_FPS_LIMIT=240`, alternating the toggle every 60 s (two rounds each, RX 9070 XT / RADV):
+
+| | FPS | drains/s that waited | stage A waited | stage B busy |
+|---|---|---|---|---|
+| drain before every packet | 35.45 | ~43,300 | ~29% | ~44% |
+| pipelined compute queue | 39.27 | ~870 | ~22.6% | ~51.5% |
+
+The remaining stage A waits are `WAIT_REG_MEM` (13%) and rasterizer tasks (9%). Frames dumped in
+both modes (`TLG_FRAME_DUMP_TRIGGER`, fire and smoke in view) look the same.
+
 ## Freeze report (TLG_FREEZE_REPORT_SECONDS)
 
 `src/runtime_freeze.c`: a monitor thread watches the flips shown (`tlggpu_frame_counters`). After

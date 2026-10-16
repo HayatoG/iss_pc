@@ -68,6 +68,10 @@ enum : std::uint64_t {
     // On by default (bit set: off): history of a thin feature this jitter phase missed is kept
     // when nothing moves. Static-camera flicker of railings/window bars p99.9 -45% (2026-10-03).
     TaaKeepNearerHistory = 1ull << 55,
+    /// The asynchronous compute queues hand their packets to the draw recording thread like the
+    /// graphics queue (dispatches, fences and memory writes in order) instead of draining it
+    /// before every packet; this bit switches it off live.
+    PipelinedCompute = 1ull << 56,
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
     /// Guest threads wait for their own readback copies (TLG_DEFERRED_READBACK=1 enables it;
     /// this bit switches it off live for A/B, see BufferCache::ReadMemory).
