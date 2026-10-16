@@ -139,6 +139,11 @@ _ROWS = (
     ('image', '1D_NO_MUTABLE', 'bool', '0', ('1D images without mutable format', 'Imagens 1D sem formato mutável'),
      ('AMD workaround test: creates 1D images without the mutable-format flag.',
       'Teste de contorno para AMD: cria imagens 1D sem o formato mutável.'), {'risky': True}),
+    ('diag', 'REGION_TRACE', 'bool', '0', ('Trace regions and pipelines', 'Rastrear regiões e pipelines'),
+     ('Writes region_trace.tsv in the GPU user folder: every .xpps package the game opens and the first request of each '
+      'pipeline. For studying which pipelines each area needs.',
+      'Grava region_trace.tsv na pasta do usuário da GPU: cada pacote .xpps que o jogo abre e o primeiro pedido de cada '
+      'pipeline. Serve para estudar quais pipelines cada área precisa.'), {}),
     ('diag', 'OCCLUSION_LOG', 'bool', '0', ('Log occlusion queries', 'Registrar consultas de oclusão'),
      ('Writes the first visibility-query events to the log. For investigating lights and smoke.',
       'Escreve no log os primeiros eventos de consulta de visibilidade. Para investigar luzes e fumaça.'), {}),

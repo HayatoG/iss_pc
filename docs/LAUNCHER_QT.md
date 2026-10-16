@@ -97,6 +97,17 @@ Redação (`qt/report.py`): o nome em `C:\Users\<nome>`, `/home/<nome>`, `/Users
 
 Versão: o pacote agora leva um arquivo `VERSION` com o nome da release (`vAAAA.MM.DD-<commit>`, escrito por `packaging/*/package.sh` quando `GITHUB_SHA` existe). Sem ele, só o commit do `Build:` do log é conhecido e a comparação diz "é outra versão" em vez de "mais nova". Testes: `port/tests/test_qt_support.py` (sem rede: o GET usa um `opener` de teste).
 
+## Avançado
+
+A tela **Avançado** (última do menu) reúne os parâmetros de ajuste fino da GPU e do runtime que a tela Correções não cobre: sincronização e tempo, threads e filas, leituras da GPU e memória, shaders e pipelines, contornos de imagem e diagnóstico (logs). Cada parâmetro é um interruptor, um número com unidade e faixa válida, ou uma lista; onde o jogo decide sozinho aparece "Automático".
+
+- **Só o que você mudar vale.** Um valor igual ao padrão não é guardado. Os valores alterados ficam no `tlg.ini` (`adv_<nome>`), viram `ISS_<NOME>` na partida e aparecem no bloco `Config:` do log. Uma variável já definida fora do launcher continua vencendo.
+- **Busca, restaurar padrões e copiar minha combinação** (as variáveis alteradas, para colar numa issue).
+- **São ajustes para teste.** Um valor errado pode derrubar o FPS, quebrar um efeito ou impedir o jogo de abrir; restaurar os padrões desfaz tudo desta tela. Os rótulos "Experimental" marcam os de maior risco.
+- A tabela vive em `port/launcher/advanced_table.py` (uma linha por parâmetro, textos em PT-BR e EN-US) e o teste `tests/test_backports_table.py` confere que cada nome existe no código.
+
+Dois parâmetros novos merecem destaque: `ASYNC_WAIT_MS` (espera curta por um shader ou pipeline em compilação, em vez de pular o desenho; 0 = desligado, o padrão) e `DRIVER_CACHE_SAVE_S` (de quanto em quanto tempo o cache do driver é gravado; 60 s, antes 180 s).
+
 ## Estrutura
 
 - `qt/qml/Launcher/Theme.qml`: todas as cores, tamanhos e ícones (um lugar só).
