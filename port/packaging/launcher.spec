@@ -74,9 +74,20 @@ drop = ('/translations/', '/plugins/qmltooling/', '/plugins/egldeviceintegration
         'libdatrie')
 
 
+# Exceptions to `drop`, matched the same way: dropping a whole folder would take these with it.
+# Qt.labs.folderlistmodel is what the non-native FolderDialog falls back to when the platform has
+# no native folder dialog (Linux without a portal); without it the dialog never opens (issue #122).
+keep_anyway = ('/qml/Qt/labs/folderlistmodel',)
+
+
 def keep(entry):
     path = '/' + entry[0].replace('\\', '/')
-    return not any(mark in path or path.endswith('/' + mark) or path.startswith('/' + mark) for mark in drop)
+
+    def matches(marks):
+        return any(mark in path or path.endswith('/' + mark) or path.startswith('/' + mark)
+                   for mark in marks)
+
+    return matches(keep_anyway) or not matches(drop)
 
 
 qt_a = analysis(os.environ['ISS_SPEC_QT'], qt_datas, qt_excludes)
