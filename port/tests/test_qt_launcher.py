@@ -231,6 +231,33 @@ class BackendTests(unittest.TestCase):
         base = dict(logic.tlg_run.DEFAULT_SETTINGS, game_dir='/g', ui_language='pt_BR', **settings)
         return Backend(settings=base, probes=probes), saved
 
+    def test_a_flood_of_game_output_updates_the_log_panel_in_batches(self):
+        """The AMD driver trace printed tens of thousands of lines; one signal per line froze the window
+        ("not responding"), most of all when the game closed. Lines wait in a queue and the panel is
+        refreshed in batches; the end of the output is not lost."""
+        import io
+        backend, _ = self.make()
+
+        class FakeGame:
+            stdout = io.StringIO(''.join(f'GPU trace: Transit {n:016x}\n' for n in range(50000)) + 'last line\n')
+
+            def wait(self):
+                return 0
+
+        updates = []
+        backend.logChanged.connect(lambda: updates.append(1))
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(logic.tlg_run, 'prepare', lambda settings, log=None: None), \
+                mock.patch.object(logic.tlg_run, 'launch',
+                                  lambda settings: (FakeGame(), str(Path(folder) / 'run.log'))):
+            backend._run_game()                       # the reader thread's work, run here
+            logged = (Path(folder) / 'run.log').read_text(encoding='utf-8').count('\n')
+        self.assertEqual(50001, logged)               # the log file on disk has every line
+        self.assertLessEqual(len(updates), 5)         # ...but the panel did not update per line
+        self.assertEqual('last line', backend._log[-2])   # the output's end is shown (then "ended")
+        self.assertLessEqual(len(backend._log), 2001)
+        self.assertEqual('idle', backend._play_state)
+
     def test_play_subtitle_continues_the_save(self):
         backend, _ = self.make()
         self.assertTrue(backend.canPlay)
