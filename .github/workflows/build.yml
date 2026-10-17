@@ -247,14 +247,15 @@ jobs:
                 fields: [{name: "Downloads", value: $dl}], footer: {text: $commit}}]}' |
             curl -fsS -H 'Content-Type: application/json' -d @- "$DISCORD_WEBHOOK"
       - name: Delete older builds
-        # Only after the new release is live: the previous runs and their artifacts go, the
+        # Only after the new release is live: previous PUSH runs and their artifacts go, the
         # current run (the one that produced this release) stays. Releases are not touched,
-        # apart from leftover nightly-staging drafts of failed runs.
+        # apart from leftover nightly-staging drafts of failed runs. Scoped to event=push so an
+        # open PR's own checks are never deleted just because something else merged to main.
         if: github.ref == 'refs/heads/main'
         run: |
           set -uo pipefail
           gh release list --limit 100 --json tagName,isDraft \
             --jq '.[] | select(.isDraft and (.tagName | startswith("nightly-staging-"))) | .tagName' |
             while read -r t; do gh release delete "$t" --yes || true; done
-          gh run list --workflow build.yml --status completed --limit 200 --json databaseId --jq '.[].databaseId' |
+          gh run list --workflow build.yml --event push --status completed --limit 200 --json databaseId --jq '.[].databaseId' |
             grep -vx "$GITHUB_RUN_ID" | xargs -r -n1 gh run delete || true
