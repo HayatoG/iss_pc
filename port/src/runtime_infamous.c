@@ -1,14 +1,13 @@
 /* System functions only inFAMOUS Second Son (CUSA00223 1.07) imports. All describe an offline
  * console with the whole game installed: PSN signed out (the "A" NpManager variants take a user
  * id instead of an online id, same answers as runtime_services.c), PlayGo with nothing left to
- * download, no add-ons, networking calls that succeed without a network. */
+ * download, networking calls that succeed without a network (add-ons: runtime_content.c). */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "runtime.h"
 
 #define NP_SIGNED_OUT ((int32_t)0x80550006)
-#define APP_CONTENT_NOT_FOUND ((int32_t)0x80d90005)
 #define SYSTEM_SERVICE_INVALID ((int32_t)0x80a10003)
 
 static void once(const char *what) { printf("Runtime: %s (inFAMOUS)\n", what); }
@@ -41,11 +40,6 @@ static ABI int32_t playgo_language_mask(int32_t handle, uint64_t mask) {
     (void)handle;
     return 0;
 }
-/* sceAppContentGetAddcontInfo(label, entitlement, info): no add-on is installed. */
-static ABI int32_t addcont_info(uint32_t label, const void *entitlement, void *info) {
-    (void)label; (void)entitlement; (void)info;
-    return APP_CONTENT_NOT_FOUND;
-}
 
 static const RuntimeExport exports[] = {
     {"sceSystemServiceParamGetString", param_string},
@@ -56,6 +50,6 @@ static const RuntimeExport exports[] = {
     {"sceNpCheckNpAvailabilityA", signed_out}, {"sceNpGetAccountCountryA", signed_out},
     {"sceNpGetAccountIdA", signed_out}, {"sceNpGetGamePresenceStatusA", signed_out},
     {"sceNpRegisterGamePresenceCallbackA", np_register_a}, {"sceNpRegisterStateCallbackA", np_register_a},
-    {"sceAppContentGetAddcontInfo", addcont_info},
+    /* sceAppContentGetAddcontInfo: src/runtime_content.c (the profile's installed add-ons) */
 };
 uintptr_t runtime_infamous_resolve(const char *name) { return RUNTIME_LOOKUP(exports, name); }

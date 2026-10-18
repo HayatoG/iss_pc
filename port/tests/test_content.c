@@ -20,6 +20,32 @@ int main(int argc,char **argv) {
     if (argc>1 && !strcmp(argv[1],"--missing")) { load(0xb4); return 99; }
     const uint32_t profile[]={1,13,0x80000000,0,7};
     runtime_content_configure(profile);
+    if (argc>1 && !strcmp(argv[1],"--addons")) {
+        /* Installed unlockers from the profile (G3CONT02): listed and looked up by label. */
+        typedef int32_t (ABI *Get)(uint32_t,const char *,void *);
+        Get get=GET(Get,"m47juOmH0VE#libSceAppContent");
+        assert(get);
+        runtime_content_set_addons("UNLOCKCOLEJACKETUNLOCKVESTJOS000",2);
+        unsigned char boot[40]={0}, init_param[32]={0};
+        assert(load(0xb4)==0 && init(init_param,boot)==0);
+        uint32_t hits=0;
+        assert(list(0,NULL,0,&hits)==0 && hits==2);
+        unsigned char entries[3*24]; memset(entries,0xaa,sizeof(entries));
+        assert(list(0,entries,3,&hits)==0 && hits==2);
+        uint32_t status; memcpy(&status,entries+20,4);
+        assert(!memcmp(entries,"UNLOCKCOLEJACKET",16) && entries[16]==0 && status==4);
+        assert(!memcmp(entries+24,"UNLOCKVESTJOS000",16));
+        for (unsigned i=48;i<sizeof(entries);++i) assert(entries[i]==0xaa); /* the unused slot */
+        assert(list(0,entries,1,&hits)==0 && hits==1);
+        struct { unsigned char label[20]; uint32_t status; } info; memset(&info,0,sizeof(info));
+        char label[20]={0}; memcpy(label,"UNLOCKVESTJOS000",16);
+        assert(get(0,label,&info)==0 && !memcmp(info.label,"UNLOCKVESTJOS000",17) && info.status==4);
+        memcpy(label,"UNLOCKAPPLICATIO",16);
+        assert((uint32_t)get(0,label,&info)==0x80d90005);
+        assert((uint32_t)get(0,NULL,&info)==0x80d90002);
+        puts("PASS: installed add-ons listed and found");
+        return 0;
+    }
     if (argc>1 && !strcmp(argv[1],"--unknown")) {
         /* Other system modules are host-provided: reference counted, independent. */
         assert((uint32_t)loaded(0xb5)==0x805a1001);

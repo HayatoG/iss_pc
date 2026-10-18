@@ -401,15 +401,26 @@ def step_error(name, output):
     return RuntimeError(f'{name}: {lines[-1] if lines else "failed"}')
 
 
+def addcont_dir(game):
+    """The player's DLC folder (one subfolder per add-on with sce_sys/param.sfo, as extracted from
+    their PKGs): ISS_ADDCONT_DIR, else <game folder>-DLC beside the game folder, else None."""
+    if os.environ.get('ISS_ADDCONT_DIR'):
+        return Path(os.environ['ISS_ADDCONT_DIR'])
+    beside = Path(game).with_name(Path(game).name + '-DLC')
+    return beside if beside.is_dir() else None
+
+
 def prepare(settings, log=print):
     """Builds out/boot-linked.bin and out/content.bin; returns the module list that was linked."""
     game = settings['game_dir']
     scripts = PORT_DIR / 'scripts'
     modules = list(MODULES)
+    dlc = addcont_dir(game)
     steps = [
         [*python_command(scripts / 'prepare.py'), game, '--out', str(OUT_DIR)],
         [*python_command(scripts / 'link_modules.py'), game, '--out', str(OUT_DIR), '--modules', *modules],
-        [*python_command(scripts / 'content_profile.py'), game, '--out', str(OUT_DIR)],
+        [*python_command(scripts / 'content_profile.py'), game, '--out', str(OUT_DIR),
+         *(['--addcont', str(dlc)] if dlc else [])],
         [*python_command(scripts / 'infamous_patches.py'), game, '--out', str(OUT_DIR),
          '--mods-dir', str(mods_dir()), '--mods-config', str(mods_config())],
     ]

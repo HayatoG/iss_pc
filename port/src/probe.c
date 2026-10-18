@@ -1011,17 +1011,26 @@ int main(int argc, char **argv) {
     int red_zone_on = red_zone_policy && !strcmp(red_zone_policy, "1");
 #endif
     if (content_profile) {
+        /* G3CONT01: SKU and user parameters (28 bytes). G3CONT02 (scripts/content_profile.py --addcont):
+         * the same, then a count and that many 16-character entitlement labels of installed add-ons. */
         FILE *profile=fopen(content_profile,"rb");
-        unsigned char data[28];
+        unsigned char data[28+4+RUNTIME_ADDCONT_MAX*16];
         if (!profile) fail("cannot open content profile");
-        if (fread(data,1,sizeof(data),profile)!=sizeof(data) || fgetc(profile)!=EOF || memcmp(data,"G3CONT01",8)) fail("invalid content profile");
+        size_t got=fread(data,1,sizeof(data),profile);
+        int extra=fgetc(profile)!=EOF;
         fclose(profile);
+        uint32_t addons=0;
+        if (got>=32) memcpy(&addons,data+28,4);
+        if (extra || got<28 || !((!memcmp(data,"G3CONT01",8) && got==28) ||
+                                 (!memcmp(data,"G3CONT02",8) && got>=32 && addons<=RUNTIME_ADDCONT_MAX && got==32+addons*16)))
+            fail("invalid content profile");
         uint32_t values[5];
         for (unsigned i=0;i<5;++i) {
             unsigned char *p=data+8+i*4;
             values[i]=(uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;
         }
         runtime_content_configure(values);
+        if (!memcmp(data,"G3CONT02",8)) runtime_content_set_addons((const char *)data+32,addons);
     }
     if (app0) {
         runtime_file_configure(app0, user_dir ? user_dir : "user");
