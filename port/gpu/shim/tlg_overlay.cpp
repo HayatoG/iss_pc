@@ -983,8 +983,8 @@ std::string SaveWhen(s64 mtime) {
         std::snprintf(out, sizeof(out), "%02d/%02d/%04d · %02d:%02d", tm.tm_mday, tm.tm_mon + 1,
                       tm.tm_year + 1900, tm.tm_hour, tm.tm_min);
     } else {
-        static const char* months[] = {"Jan", "Mar", "Apr", "May", "Jun",
-                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        static const char* const months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
         const int hour = tm.tm_hour % 12 ? tm.tm_hour % 12 : 12;
         std::snprintf(out, sizeof(out), "%s %d, %d · %d:%02d %s", months[tm.tm_mon % 12], tm.tm_mday,
                       tm.tm_year + 1900, hour, tm.tm_min, tm.tm_hour < 12 ? "AM" : "PM");
