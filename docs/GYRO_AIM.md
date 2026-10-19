@@ -7,13 +7,13 @@ Enable **Launcher > Controls > Gyro while holding L2** before launching, or **In
 | `tlg.ini` key | Environment override | Default | Meaning |
 |---|---|---|---|
 | `gyro_aim` | `ISS_GYRO_AIM` / `TLG_GYRO_AIM` | `0` | Enable the L2-held gyro contribution |
-| `gyro_sensitivity` | `ISS_GYRO_SENS` / `TLG_GYRO_SENS` | `1` | 0.1–5; 180 degrees/s maps to a full stick at 1x |
+| `gyro_sensitivity` | `ISS_GYRO_SENS` / `TLG_GYRO_SENS` | `2.5` | 0.1–5; recommended starting range 2–2.5; 180 degrees/s maps to a full stick at 1x |
 | `gyro_invert_y` | `ISS_GYRO_INVERT_Y` / `TLG_GYRO_INVERT_Y` | `0` | Reverse vertical gyro aiming |
 | `gyro_smoothing` | `ISS_GYRO_SMOOTHING` / `TLG_GYRO_SMOOTHING` | `0.025` | Exponential filter time constant, 0–0.2 seconds; 0 disables it |
 | `gyro_noise` | `ISS_GYRO_NOISE` / `TLG_GYRO_NOISE` | `0.01` | Radial noise threshold, 0–0.1 radians/s |
 | `gyro_deadzone` | `ISS_GYRO_DEADZONE` / `TLG_GYRO_DEADZONE` | `0.1` | Anti-dead zone to overcome the game's stick dead zone, 0–0.5 |
 
-Start at the defaults. If the aim drifts with the controller still, increase the noise threshold slightly; if slow movement does nothing, try a slightly larger anti-dead zone. Smoothing reduces jitter but adds latency. This uses SDL's calibrated gyro readings, with an adjustable noise threshold; it does not add a new bias-calibration procedure.
+Start with sensitivity **2–2.5** (default **2.5**), then adjust to preference and the controller. Existing saved sensitivity values are preserved. This is a starting recommendation, not a hardware-independent calibration. If the aim drifts with the controller still, increase the noise threshold slightly; if slow movement does nothing, try a slightly larger anti-dead zone. Smoothing reduces jitter but adds latency. This uses SDL's calibrated gyro readings, with an adjustable noise threshold; it does not add a new bias-calibration procedure.
 
 SDL pitch (X) controls vertical aim and yaw (Y) controls horizontal aim; roll (Z) is ignored. Angular velocity maps to stick deflection, so the game's existing stick response, acceleration, sensitivity and maximum turn speed still apply. It is not a direct camera-angle patch. Adding the gyro and stick can saturate at the stick limits.
 
@@ -29,6 +29,6 @@ On Linux these are part of `bash build.sh --test`; on Windows build the CMake ta
 
 Ative **Launcher > Controls > Giroscópio ao segurar L2** antes de iniciar, ou **Insert > Controls > Mira por giroscópio** durante o jogo. A opção vem desligada e só soma o movimento real do controle à mira enquanto L2 está pressionado; o analógico direito continua funcionando. O controle precisa expor o giroscópio ao SDL (por exemplo no modo Switch Pro). O modo XInput sem sensor não fornece esses dados.
 
-As mudanças do launcher valem na próxima partida; as do menu Insert são imediatas. Comece com os padrões: aumente um pouco o limiar de ruído se a mira deslizar em repouso, ou a anti-zona morta se movimentos lentos não fizerem nada. A suavização reduz tremor e aumenta o atraso. A resposta e o limite de velocidade do analógico do jogo continuam valendo.
+As mudanças do launcher valem na próxima partida; as do menu Insert são imediatas. Comece com sensibilidade **2–2,5** (padrão **2,5**) e ajuste ao controle e à sua preferência; os valores já salvos são preservados. É uma recomendação inicial, não uma calibração universal. Aumente um pouco o limiar de ruído se a mira deslizar em repouso, ou a anti-zona morta se movimentos lentos não fizerem nada. A suavização reduz tremor e aumenta o atraso. A resposta e o limite de velocidade do analógico do jogo continuam valendo.
 
 Soltar L2, perder o foco, abrir o menu do port ou entrar na simulação do grafite/touchpad remove a contribuição do giroscópio. Os dados reais de movimento usados pelo grafite não são alterados. Os testes automáticos não substituem a avaliação da mira durante uma partida.

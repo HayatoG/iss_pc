@@ -37,7 +37,7 @@ static inline void gyro_aim_update(GyroAim *s, const GyroAimParams *p,
     const float magnitude=hypotf(pitch,yaw);
     if (!isfinite(magnitude) || magnitude<=noise) { gyro_aim_reset(s); return; }
     const float gain=(magnitude-noise)/magnitude *
-                     gyro_aim_clamp(p->sensitivity,0.1f,5,1)/GYRO_AIM_FULL_SPEED;
+                     gyro_aim_clamp(p->sensitivity,0.1f,5,2.5f)/GYRO_AIM_FULL_SPEED;
     const float target[2]={-yaw*gain,(p->invert_y ? pitch : -pitch)*gain};
     const float tau=gyro_aim_clamp(p->smoothing,0,0.2f,0.025f);
     const float blend=tau>0 ? -expm1f(-dt/tau) : 1;

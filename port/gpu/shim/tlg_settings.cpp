@@ -143,7 +143,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "gyro_invert_y") {
         v.gyro_invert_y = i != 0;
     } else if (key == "gyro_sensitivity") {
-        v.gyro_sensitivity = std::isfinite(f) ? Clamp(f, 0.1f, 5.0f) : 1.0f;
+        v.gyro_sensitivity = std::isfinite(f) ? Clamp(f, 0.1f, 5.0f) : 2.5f;
     } else if (key == "gyro_smoothing") {
         v.gyro_smoothing = std::isfinite(f) ? Clamp(f, 0.0f, 0.2f) : 0.025f;
     } else if (key == "gyro_noise") {

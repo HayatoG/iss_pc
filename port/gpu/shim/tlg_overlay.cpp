@@ -659,8 +659,8 @@ void ControlsTab() {
                     "Soma o giroscopio real ao analogico direito so ao segurar L2. Desligado por padrao; nao altera o grafite."));
         ImGui::BeginDisabled(!s.gyro_aim);
         FloatRow(TL("Gyro sensitivity", "Sensibilidade do giroscopio"), s.gyro_sensitivity, 0.1f, 5.0f, "%.2f",
-                 TL("1x maps 180 degrees/second to a full stick. The game's stick response and speed limit still apply.",
-                    "1x transforma 180 graus/segundo em analogico no maximo. A resposta e o limite do jogo continuam valendo."));
+                 TL("Recommended starting range: 2-2.5 (default 2.5). At 1x, 180 degrees/second maps to a full stick. The game's stick response and speed limit still apply.",
+                    "Faixa inicial recomendada: 2-2,5 (padrao 2,5). Em 1x, 180 graus/segundo vira analogico no maximo. A resposta e o limite do jogo continuam valendo."));
         CheckRow(TL("Invert gyro Y", "Inverter Y do giroscopio"), s.gyro_invert_y,
                  TL("Reverse the vertical aiming direction.", "Inverte a direcao vertical da mira."));
         FloatRow(TL("Gyro smoothing (seconds)", "Suavizacao do giroscopio (segundos)"), s.gyro_smoothing, 0, 0.2f, "%.3f",

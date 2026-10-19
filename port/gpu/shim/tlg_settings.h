@@ -159,7 +159,7 @@ struct Values {
     std::atomic<float> mouse_sensitivity{1.0f}, mouse_smoothing{0.5f}, mouse_accel{0.0f}, mouse_deadzone{0.1f};
     // Opt-in real gyro -> right stick, only while L2 is held; independent of graffiti motion.
     std::atomic<bool> gyro_aim{false}, gyro_invert_y{false};
-    std::atomic<float> gyro_sensitivity{1.0f}, gyro_smoothing{0.025f}, gyro_noise{0.01f}, gyro_deadzone{0.1f};
+    std::atomic<float> gyro_sensitivity{2.5f}, gyro_smoothing{0.025f}, gyro_noise{0.01f}, gyro_deadzone{0.1f};
     /// Keyboard and mouse button remap (TLG_KEY_MAP syntax); written by Load only, read once.
     std::string key_map;
     // Append experimental settings so established renderer field offsets stay stable.
