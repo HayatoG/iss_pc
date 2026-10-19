@@ -2,6 +2,9 @@
 
 [Português](#arquivos-do-jogo-necessários) · [English](#required-game-files)
 
+Metadados de DLC / DLC metadata: [inspeção, importação e verificação de unlockers / inspect, import and verify unlockers](DLC_SETUP.md).
+O suporte do runtime é separado (#249) / Runtime support is separate (#249).
+
 ## Arquivos do jogo necessários
 
 Tudo vem do **seu** PS4 (GoldHEN + Itemzflow). Nada disso vai no download. Use **inFAMOUS Second Son CUSA00223 (EUA), jogo base 1.00 com o update 1.07**, montado numa pasta só, com o jogo base e o update por cima. São ~33 GB (27 GB do jogo base + 6,4 GB do update).
