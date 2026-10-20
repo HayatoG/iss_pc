@@ -466,7 +466,7 @@ void PerformanceTab() {
     // offered: they do not apply to TLG, and the readback ones crash it (it needs precise readbacks).
     ImGui::SeparatorText(TL("Live", "Em tempo real"));
     if (BeginRows("##live")) {
-        static const char* const fps_labels[] = {"30", "120", "240", TL("Unlimited", "Sem limite")};
+        static const char* const fps_labels[] = {"30", "60", "120", "240", TL("Unlimited", "Sem limite")};
         ChoiceRow(TL("Frame rate limit", "Limite de FPS"), s.fps_limit, fps_labels, G::FpsLimits.data(), int(G::FpsLimits.size()),
                   TL("Caps the presented frames. The game runs at 30 FPS (as on PS4).", "Limita os quadros apresentados. O jogo roda a 30 FPS (como no PS4)."));
         static const char* const queued_labels[] = {TL("1 (lowest latency)", "1 (menor atraso)"), "2", TL("Unlimited", "Sem limite")};
