@@ -7,6 +7,12 @@ game once. Uncheck it before the next launch to restore normal speed. It default
 to off and is stored in the existing `mods.json`, for both Windows and Linux x86_64.
 The checkbox controls both axes and overrides inherited camera scale variables.
 
+Troubleshooting: one Windows tester reported that the mod took effect on the second
+launch. If it appears inactive after enabling it, close the game and launch it again.
+This is a reported workaround, not an intended two-launch requirement. If it still
+does not work, check the startup log for the enabled message or a signature/version
+rejection; the cause of the first-launch report has not been established.
+
 The native runtime raises the effective horizontal and vertical angular-speed
 parameters after zoom interpolation and mode preferences. It does not amplify
 stick axes. Both turn directions share the same axis scale. Adaptive input gain,
@@ -65,6 +71,12 @@ directions, vertical movement, zoom, both renderers and scripted cameras before 
 No launcher atualizado, abra **Mods**, marque **Camera speed 1.5x** e inicie o jogo.
 Desmarque antes da próxima inicialização para restaurar a velocidade normal. A opção
 vem desativada e é salva no `mods.json`, tanto no Windows quanto no Linux x86_64.
+
+Solução de problemas: um jogador no Windows relatou que o mod funcionou na segunda
+inicialização. Se ele parecer inativo após ser marcado, feche o jogo e abra novamente.
+Esse é um contorno relatado, não uma exigência normal de duas inicializações. Se o
+problema persistir, consulte o log para verificar a ativação ou uma rejeição por versão
+ou assinatura; a causa da falha na primeira tentativa ainda não foi identificada.
 
 O mod aumenta em 50% os parâmetros de velocidade angular horizontal e vertical,
 sem multiplicar os eixos do controle. O ganho adaptativo, a aceleração e os limites
