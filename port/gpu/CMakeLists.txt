@@ -524,3 +524,6 @@ target_link_libraries(fsr4-bench PRIVATE ffx-vulkan::fsr4-v07-vulkan ffx-vulkan:
 
 add_executable(cheat-hook-test EXCLUDE_FROM_ALL ../tests/test_cheat_hook.cpp)
 target_compile_options(cheat-hook-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+
+add_executable(camera-hook-test EXCLUDE_FROM_ALL ../tests/test_iss_camera_hook.cpp)
+target_compile_options(camera-hook-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)

@@ -56,6 +56,26 @@ def mods_config():
     return Path(os.environ.get('ISS_MODS_CONFIG') or user_dir() / 'mods.json')
 
 
+# Native runtime feature, stored with the existing Mods selections. This key is not
+# an XML patch: the runtime allocates a guarded trampoline before guest execution.
+CAMERA_MOD_KEY = 'native/camera-speed-1.5x'
+
+
+def camera_mod_enabled():
+    try:
+        config = json.loads(mods_config().read_text())
+        return (isinstance(config, dict) and
+                CAMERA_MOD_KEY in config.get('enabled', []) and
+                CAMERA_MOD_KEY not in config.get('disabled', []))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def camera_mod_environment():
+    scale = '1.5' if camera_mod_enabled() else '1'
+    return {'ISS_CAMERA_PAN_SCALE': scale, 'ISS_CAMERA_TILT_SCALE': scale}
+
+
 def list_mods(settings):
     """[(key, name, note, enabled)] for the Mods tab: every shadPS4/GoldHEN cheat XML found in
     the mods folder for this game's version, with its current enabled state."""
@@ -64,7 +84,14 @@ def list_mods(settings):
     found = mod_patches.external_patches(
         mods_dir(), app_version, TITLE_IDS, builtin_files=BUILTIN_MODS)
     selected = {key for key, _, _ in mod_patches.external_selection(found, mods_config())}
-    return [(key, meta.get('Name'), meta.get('Note', ''), key in selected) for key, _, meta in found]
+    rows = [(key, meta.get('Name'), meta.get('Note', ''), key in selected) for key, _, meta in found]
+    if app_version == '01.07':
+        rows.append((CAMERA_MOD_KEY, 'Camera speed 1.5x',
+                     'Raises horizontal and vertical camera speed limits by 50%. Requires the '
+                     'updated native runtime and CUSA00223 1.07; original-code signatures are '
+                     'checked at startup. Adaptive slowdown and pitch limits remain. '
+                     'Changes apply on the next game launch.', camera_mod_enabled()))
+    return rows
 
 
 def set_mod_enabled(key, enabled):
@@ -765,6 +792,9 @@ def build_env(settings, extra=None):
                 env[key] = value
     if extra:
         env.update(extra)
+    # The Mods checkbox is authoritative, including when an older session script
+    # leaves scale variables in the launcher's inherited environment.
+    env.update(camera_mod_environment())
     return env
 
 
