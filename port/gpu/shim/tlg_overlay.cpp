@@ -652,6 +652,14 @@ void OpenGuide(); // the graffiti guide (below, with the save dialogs)
 extern "C" int runtime_mouse_aim_installed(void);
 void ControlsTab() {
     auto& s = TlgSettings::Get();
+    ImGui::SeparatorText(TL("Controller camera", "Camera do controle"));
+    if (BeginRows("##stick_look")) {
+        FloatRow(TL("Free-look stick sensitivity", "Sensibilidade do analogico da camera"),
+                 s.stick_look_sensitivity, 0.25f, 3.0f, "%.2fx",
+                 TL("Physical right stick while L2 is released. Try 1.35-1.50x. Reaches full input sooner; does not raise the game's maximum turn speed. Gyro, mouse and graffiti are unchanged.",
+                    "Analogico direito fisico sem L2. Experimente 1,35-1,50x. Atinge a entrada maxima antes; nao aumenta a velocidade maxima da camera. Giroscopio, mouse e grafite nao mudam."));
+        ImGui::EndTable();
+    }
     // Mouse (src/runtime_pad.c): the camera settings apply at once. The buttons and the touchpad
     // mode are fixed unless TLG_KEY_MAP / TLG_MOUSE_PAD_* (or tlg.ini key_map) change them.
     ImGui::SeparatorText(TL("Mouse", "Mouse"));

@@ -66,6 +66,12 @@ class Controls(QObject):
         rumble = self.ini().get('rumble', '1') != '0'     # tlg.ini, shared with the in-game menu
         rows.append(self._row('i:rumble', self.t('ctl_rumble'), self.t('ctl_what_rumble'), 'switch', True,
                               not rumble, on=rumble))
+        item = gfxlogic.item_by_id('menu:stick_look_sensitivity')
+        value = float(backports_table.effective(item, self.backend.fix_states))
+        rows.append(self._row(item.id, self.backend.t_.pair(item.name), self.backend.t_.pair(item.what),
+                              'slider', True, self.backend.fix_states.get(item.id) is not None,
+                              lo=item.lo, hi=item.hi, step=0.05, unit='x', value=value,
+                              valueText=f'{value:.2f}x', decimals=2))
         item = gfxlogic.item_by_id('menu:sensor_aim')
         value = int(backports_table.effective(item, self.backend.fix_states))
         rows.append(self._row(item.id, self.backend.t_.pair(item.name), self.backend.t_.pair(item.what), 'slider',

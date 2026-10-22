@@ -101,6 +101,7 @@ typedef struct {
     int32_t rumble;             /* controller vibration on (tlg.ini rumble, TLG_RUMBLE) */
     float sensitivity, smoothing, accel, deadzone;
     char key_map[512];
+    float stick_look_sensitivity;
 } TlgGpuInputSettings;
 void tlggpu_input_settings(TlgGpuInputSettings *settings);
 /* Touchpad mode of the mouse (runtime_pad.c): while active, a small touchpad with the virtual

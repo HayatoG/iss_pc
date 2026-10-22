@@ -418,6 +418,16 @@ class StringsTests(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_QT, 'PySide6 not installed')
 class ControllerTests(unittest.TestCase):
+    def test_free_look_gain_is_live_and_preserves_default(self):
+        item_id = 'menu:stick_look_sensitivity'
+        row = self.controls.pad_model.get(item_id)
+        self.assertEqual(1.0, row['value'])
+        self.assertEqual(3.0, row['hi'])
+        self.controls.setValue(item_id, '1.35')
+        self.assertIn('stick_look_sensitivity=1.35', self.ini_text())
+        self.controls.setValue(item_id, '1')
+        self.assertNotIn('stick_look_sensitivity=', self.ini_text())
+
     """Real files in a temporary data folder: what the screens write is what the game and Tk read."""
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
