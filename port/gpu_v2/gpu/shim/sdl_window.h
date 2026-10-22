@@ -32,6 +32,7 @@ public:
     bool IsOpen() const { return is_open.load(std::memory_order_relaxed); }
     bool WantsExclusive() const { return exclusive_requested.load(std::memory_order_acquire); }
     bool CanPresent() const { return !display_transition.load(std::memory_order_acquire) && presentation_available.load(std::memory_order_acquire); }
+    bool HasInputFocus() const { return focused.load(std::memory_order_relaxed); }
     /// Processes pending window events. Returns false once the user closed the window.
     bool PollEvents();
     /// The loading screen (window thread, before the renderer presents): the step (bridge.cpp
@@ -55,7 +56,8 @@ private:
     void ApplyDisplayMode(int mode);
     // Mouse for the game (tlggpu_mouse_take): relative mode while focused, the menu closed and
     // not released with Esc. Window thread only.
-    bool focused{}, mouse_captured{}, mouse_released{};
+    std::atomic<bool> focused{false};
+    bool mouse_captured{}, mouse_released{};
     u32 mouse_swallow{}; ///< buttons whose release belongs to the click that took the mouse
     float wheel_x{}, wheel_y{};
     u64 mouse_test_start{}, mouse_test_last{}; ///< TLG_MOUSE_TEST: synthetic motion and clicks

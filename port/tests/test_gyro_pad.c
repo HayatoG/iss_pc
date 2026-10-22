@@ -5,6 +5,8 @@
 
 static TlgGpuInputSettings input;
 static int capture;
+uint64_t tlggpu_total_draws(void) { return 0; }
+void tlggpu_frame_counters(TlgGpuFrameCounters *out) { memset(out,0,sizeof(*out)); }
 void tlggpu_mouse_take(TlgGpuMouse *m) { memset(m,0,sizeof(*m)); }
 void tlggpu_input_settings(TlgGpuInputSettings *out) { *out=input; }
 void tlggpu_mouse_pad_hud(int a,float x,float y,int t,int c) { (void)a;(void)x;(void)y;(void)t;(void)c; }
