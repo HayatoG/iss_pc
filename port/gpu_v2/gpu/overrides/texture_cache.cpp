@@ -123,10 +123,52 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     trigger_gc_memory = std::max<u64>(trigger_gc_memory, u64(std::max<s64>(relaxed, 0)));
     if (const char* p = std::getenv("ISS_GC_TRIGGER_MB"))
         trigger_gc_memory = u64(std::strtoull(p, nullptr, 10)) << 20;
-    std::fprintf(stderr, "TEXTURE_GC budget=%lld MB trigger=%llu MB pressure=%llu MB critical=%llu MB\n",
-                 (long long)(device_local_memory >> 20), (unsigned long long)(trigger_gc_memory >> 20),
+    base_trigger_gc_memory = trigger_gc_memory;
+    base_pressure_gc_memory = pressure_gc_memory;
+    base_critical_gc_memory = critical_gc_memory;
+    card_budget_memory = u64(device_local_memory);
+    // ISS_GC_BUDGET_MB: the launcher's VRAM budget (3500 by default). Only the first renderer
+    // read it: renderer v2 aimed at the driver's budget, critical at 5 GB on 8 GB cards, and
+    // ran out of VRAM (2026-10-21, RX 6600 / RTX 5050 / RTX 5060).
+    if (const char* p = std::getenv("ISS_GC_BUDGET_MB"); p && *p)
+        forced_gc_budget = u64(std::strtoull(p, nullptr, 10)) << 20;
+    RefreshGcLimits();
+    std::fprintf(stderr, "TEXTURE_GC budget=%lld MB forced=%llu MB trigger=%llu MB pressure=%llu MB critical=%llu MB\n",
+                 (long long)(device_local_memory >> 20), (unsigned long long)(forced_gc_budget >> 20),
+                 (unsigned long long)(trigger_gc_memory >> 20),
                  (unsigned long long)(pressure_gc_memory >> 20),
                  (unsigned long long)(critical_gc_memory >> 20));
+}
+
+void TextureCache::RefreshGcLimits() {
+    // The driver's budget now: lower than at startup when other programs hold VRAM, and the
+    // only meaningful one on integrated GPUs.
+    const u64 now = instance.GetDeviceMemoryBudgetNow();
+    u64 card = card_budget_memory;
+    if (now != 0 && (instance.IsIntegrated() || now < card)) {
+        card = now;
+    }
+    trigger_gc_memory = base_trigger_gc_memory;
+    pressure_gc_memory = base_pressure_gc_memory;
+    critical_gc_memory = base_critical_gc_memory;
+    u64 budget = forced_gc_budget ? std::min(forced_gc_budget, card) : 0;
+    if (budget == 0 && instance.IsIntegrated()) {
+        budget = card;
+    }
+    if (budget != 0) {
+        trigger_gc_memory = budget / 10 * 7;
+        pressure_gc_memory = budget / 100 * 85;
+        critical_gc_memory = budget / 100 * 95;
+    }
+    // Usage counts every allocation (buffers, swapchain, staging), not only images: on smaller
+    // discrete cards keep RESIDENCY_HEADROOM free whatever the budget says.
+    if (!instance.IsIntegrated() && card <= u64(SMALL_CARD_MEMORY)) {
+        const u64 headroom = std::max<u64>(card > u64(RESIDENCY_HEADROOM) ? card - RESIDENCY_HEADROOM : 0,
+                                           card / 2);
+        critical_gc_memory = std::min(critical_gc_memory, headroom);
+    }
+    pressure_gc_memory = std::min(pressure_gc_memory, critical_gc_memory);
+    trigger_gc_memory = std::min(trigger_gc_memory, pressure_gc_memory);
 }
 
 TextureCache::~TextureCache() {
@@ -1551,6 +1593,9 @@ void TextureCache::GarbageCollectImages() {
                      (unsigned long long)(trigger_gc_memory >> 20));
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
+        if (gc_tick % 60 == 0) {
+            RefreshGcLimits();
+        }
     }
     if (total_used_memory < trigger_gc_memory) {
         return;
@@ -1579,6 +1624,8 @@ void TextureCache::GarbageCollectImages() {
         const char* p = std::getenv("ISS_GC_RECENT_USE");
         return !p || p[0] != '0';
     }();
+    // A pass stops after looking at 256 images.
+    u32 visited = 0;
     const auto clean_up = [&](ImageId image_id) {
         if (num_deletions == 0) {
             return true;
@@ -1595,18 +1642,22 @@ void TextureCache::GarbageCollectImages() {
                 return false;
             }
         }
-        deleted.fetch_add(1, std::memory_order_relaxed);
-        --num_deletions;
+        if (++visited > 256) {
+            return true;
+        }
         auto& image = slot_images[image_id];
         const bool download = image.SafeToDownload();
         const bool tiled = image.info.IsTiled();
-        if (tiled && download) {
-            // This is a workaround for now. We can't handle non-linear image downloads.
+        if ((tiled && download) || (download && !pressured)) {
+            // Tiled: we can't handle non-linear image downloads yet. Otherwise a download
+            // waits for memory pressure. Either way the image moves to the back of the queue
+            // (bloodborne_pc 0.3, ported from the first renderer): left at the front, the
+            // GPU-written targets were looked at again every pass while VRAM kept growing.
+            lru_cache.Touch(image.lru_id, gc_tick);
             return false;
         }
-        if (download && !pressured) {
-            return false;
-        }
+        deleted.fetch_add(1, std::memory_order_relaxed);
+        --num_deletions;
         if (download) {
             DownloadImageMemory(image_id);
         }
@@ -1632,6 +1683,7 @@ void TextureCache::GarbageCollectImages() {
     if (total_used_memory >= critical_gc_memory) {
         // If we are still over the critical limit, run an aggressive GC
         configure(true);
+        visited = 0;
         lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
     }
 }

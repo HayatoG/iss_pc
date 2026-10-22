@@ -49,6 +49,11 @@ class TextureCache {
     static constexpr s64 DEFAULT_PRESSURE_GC_MEMORY = 1_GB + 512_MB;
     static constexpr s64 DEFAULT_CRITICAL_GC_MEMORY = 3_GB;
     static constexpr s64 TARGET_GC_THRESHOLD = 8_GB;
+    /// iss: discrete cards up to this budget keep RESIDENCY_HEADROOM of VRAM out of the
+    /// collector's reach, for buffers (guest memory becomes resident in large ranges) and the
+    /// swapchain. 8 GB cards (RX 6600, RTX 5050/5060) reached 6.4 GB of a 6.4 GB budget.
+    static constexpr s64 SMALL_CARD_MEMORY = 12_GB;
+    static constexpr s64 RESIDENCY_HEADROOM = 1_GB + 512_MB;
 
     using ImageIds = boost::container::small_vector<ImageId, 16>;
 
@@ -521,6 +526,7 @@ private:
     }
 
     void GarbageCollectImages();
+    void RefreshGcLimits();
     void GarbageCollectSamplers();
 
 private:
@@ -540,6 +546,13 @@ private:
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;
     u64 critical_gc_memory = 0;
+    /// iss: the limits before RefreshGcLimits applies the forced budget and the headroom.
+    u64 base_trigger_gc_memory = 0;
+    u64 base_pressure_gc_memory = 0;
+    u64 base_critical_gc_memory = 0;
+    u64 card_budget_memory = 0;
+    /// ISS_GC_BUDGET_MB (the launcher's VRAM budget), 0 when unset.
+    u64 forced_gc_budget = 0;
     u64 total_used_samplers = 0;
     u64 trigger_gc_samplers = 0;
     u64 pressure_gc_samplers = 0;
