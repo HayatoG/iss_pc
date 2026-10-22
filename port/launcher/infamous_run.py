@@ -223,7 +223,25 @@ def game_languages(game_dir):
             ids = _cached(Path(game_dir) / 'sce_sys' / 'playgo-chunk.dat', 'languages', playgo_languages)
         except (OSError, ValueError, struct.error):
             pass
-    return [key for key, code in GAME_LANGUAGES.items() if code in ids] or list(_DEFAULT_LANGUAGES)
+    keys = [key for key, code in GAME_LANGUAGES.items() if code in ids] or list(_DEFAULT_LANGUAGES)
+    return [key for key in keys if not _stub_language(game_dir, key)] or keys
+
+
+# The name in art/cache/lang_<name>_text.xpps of the languages CUSA00223 ships.
+_LANGUAGE_FILES = {'en': 'english', 'pt_BR': 'brazilian', 'es_LA': 'latino', 'fr': 'french', 'fr_CA': 'french'}
+
+
+def _stub_language(game_dir, key):
+    """True when the dump has only a placeholder for that language: a PS4 installs the language
+    chunks of the console's language alone, and a dump leaves the others as 3-byte files the game
+    hangs on, on a black screen (issue #504). A missing file says nothing (FTP dumps, other games)."""
+    name = _LANGUAGE_FILES.get(key)
+    if not (game_dir and name):
+        return False
+    try:
+        return (Path(game_dir) / 'art' / 'cache' / f'lang_{name}_text.xpps').stat().st_size < 1024
+    except OSError:
+        return False
 
 
 def game_language_choices(settings):

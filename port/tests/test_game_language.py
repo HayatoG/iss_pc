@@ -45,6 +45,26 @@ class SystemGameLanguageTests(unittest.TestCase):
         self.assertEqual('fr_CA', run.resolve_game_language({'game_language': 'auto'}, {'LANG': 'fr_FR'}))
         self.assertEqual('pl', run.resolve_game_language({'game_language': 'pl'}, env))         # kept
 
+    def test_placeholder_languages_are_skipped(self):
+        """Issue #504: a dump from an English console has 3-byte Brazilian files; 'auto' on a pt-BR
+        system must not pick them. A missing file keeps the language."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / 'art' / 'cache'
+            cache.mkdir(parents=True)
+            (cache / 'lang_brazilian_text.xpps').write_bytes(b'\0\0\0')
+            (cache / 'lang_english_text.xpps').write_bytes(b'\0' * 4096)
+            settings = {'game_dir': tmp, 'game_language': 'auto'}
+            self.assertEqual(['en', 'es_LA', 'fr_CA', 'tr', 'ru'], run.game_languages(tmp))   # latino: no file
+            self.assertEqual('en', run.resolve_game_language(settings, {'LANG': 'pt_BR.UTF-8'}))
+            self.assertNotIn('pt_BR', run.game_language_choices(settings))
+            self.assertIn('pt_BR', run.game_language_choices(dict(settings, game_language='pt_BR')))  # kept
+            for name in ('english', 'latino', 'french'):
+                (cache / f'lang_{name}_text.xpps').write_bytes(b'\0\0\0')
+            self.assertEqual(['tr', 'ru'], run.game_languages(tmp))
+        self.assertEqual(list(run._DEFAULT_LANGUAGES), run.game_languages(''))
+
     def test_every_ps4_language_has_a_choice(self):
         self.assertEqual(list(range(30)), sorted(run.GAME_LANGUAGES.values()))
         with mock.patch.dict(os.environ):
