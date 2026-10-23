@@ -91,6 +91,11 @@ struct Values {
     /// Set by the presenter: the game's image and the window it is shown in, in pixels.
     std::atomic<int> image_width{0}, image_height{0}, window_width{0}, window_height{0};
     std::atomic<int> frames_queued{1};
+    /// Frame generation (host_passes/frame_gen_pass.h): a frame generated between two game
+    /// frames is shown before each one, 30 FPS reach the display as 60. Live.
+    std::atomic<bool> frame_gen{false};
+    /// Set by the presenter: generated frames were shown in the last second.
+    std::atomic<bool> frame_gen_active{false};
     // Startup: run.py turns them into patches and environment variables; "Apply and restart".
     std::atomic<int> render_resolution{0};
     std::atomic<int> engine_fps{120};

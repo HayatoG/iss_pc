@@ -7,6 +7,7 @@
 
 #include "core/libraries/videoout/buffer.h"
 #include "imgui/imgui_texture.h"
+#include "video_core/renderer_vulkan/host_passes/frame_gen_pass.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -99,6 +100,10 @@ public:
     Frame* PrepareBlankFrame(bool present_thread);
 
     void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
+    /// iss: a game flip. With frame generation on (TlgSettings::frame_gen), first shows the
+    /// frame generated between the previous flip and this one; VSync puts the two on
+    /// consecutive vblanks.
+    void PresentGameFrame(Frame* frame);
     Frame* PrepareLastFrame();
 
 private:
@@ -119,6 +124,14 @@ private:
     HostPasses::FsrPass::Settings fsr_settings{};
     HostPasses::PostProcessingPass::Settings pp_settings{};
     HostPasses::PostProcessingPass pp_pass;
+    HostPasses::FrameGenPass frame_gen_pass;
+    Frame frame_gen_frame{};              ///< iss: wraps frame_gen_pass's output for Present
+    vk::ImageView frame_gen_texture_view{}; ///< the view frame_gen_frame.imgui_texture shows
+    std::chrono::steady_clock::time_point last_game_flip{};
+    double flip_interval_ms{33.3};        ///< iss: smoothed time between game flips
+    bool frame_gen_rate_on{false};        ///< iss: the game rate is low enough for it
+    std::chrono::steady_clock::time_point frame_gen_report{};
+    u32 frame_gen_count{}, frame_gen_skipped{};
     AmdGpu::Liverpool* liverpool;
     Scheduler draw_scheduler;
     Scheduler present_scheduler;

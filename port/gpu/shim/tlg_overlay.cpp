@@ -502,6 +502,9 @@ void PerformanceTab() {
         static const char* const queued_labels[] = {TL("1 (lowest latency)", "1 (menor atraso)"), "2", TL("Unlimited", "Sem limite")};
         ChoiceRow(TL("Frames queued", "Quadros na fila"), s.frames_queued, queued_labels, G::FramesQueued.data(),
                   int(G::FramesQueued.size()), TL("More frames queued: steadier FPS, slower response to input.", "Mais quadros na fila: FPS mais estável, resposta mais lenta."));
+        CheckRow(TL("Frame generation (smooth frames)", "Geração de quadros (quadros suaves)"), s.frame_gen,
+                 TL("Shows a generated frame between every two game frames: 30 FPS look like 60. Needs VSync; adds about half a frame of delay. Best with a steady 30 FPS limit.",
+                    "Mostra um quadro gerado entre cada dois quadros do jogo: 30 FPS parecem 60. Precisa do VSync; soma cerca de meio quadro de atraso. Fica melhor com o limite de 30 FPS estável."));
         CheckRow(TL("Compile new shaders in the background", "Compilar shaders novos em segundo plano"), s.async_shaders,
                  TL("Fewer stutters in new areas; an object or effect may appear a moment later.", "Menos engasgos em áreas novas; um objeto ou efeito pode aparecer um instante depois."));
         ImGui::EndTable();

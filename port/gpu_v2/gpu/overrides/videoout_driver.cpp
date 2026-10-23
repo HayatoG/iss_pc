@@ -259,7 +259,7 @@ void VideoOutDriver::Flip(const Request& req, u64 vblank_count) {
     presenter->SetHDR(req.port->is_hdr);
 
     // Present the frame.
-    presenter->Present(req.frame);
+    presenter->PresentGameFrame(req.frame);
     if (iss::timeline::enabled) {
         iss::timeline::Emit("vo_present_return", req.trace_id, vblank_count,
                             frame_address, frame_ready_tick,

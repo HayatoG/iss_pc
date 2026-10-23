@@ -380,7 +380,13 @@ void VideoOutDriver::Flip(const Request& req) {
     TlgFreeze::flips_shown.fetch_add(1, std::memory_order_relaxed);
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);
-        presenter->Present(frame);
+        // tlg: frame generation waits half a frame between its two presents, so only on the
+        // swap thread (TLG_SEPARATE_SWAP=0 presents on the vblank thread).
+        if (separate_swap) {
+            presenter->PresentGameFrame(frame);
+        } else {
+            presenter->Present(frame);
+        }
         TlgFreeze::presents.fetch_add(1, std::memory_order_relaxed);
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left

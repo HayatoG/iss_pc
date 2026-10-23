@@ -5,9 +5,11 @@
 
 #include <deque>
 
+#include <chrono>
 #include <condition_variable>
 
 #include "core/libraries/videoout/buffer.h"
+#include "video_core/renderer_vulkan/host_passes/frame_gen_pass.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -99,6 +101,9 @@ public:
     Frame* PrepareBlankFrame(bool present_thread);
 
     void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
+    /// tlg: a game flip. With frame generation on (TlgSettings::frame_gen), first shows the
+    /// frame generated between the previous flip and this one, then this one half a frame later.
+    void PresentGameFrame(Frame* frame);
     /// tlg: a black frame with the loading screen (TlgOverlay::SetLoading) only.
     void PresentLoadingFrame();
     Frame* PrepareLastFrame();
@@ -121,6 +126,14 @@ private:
     HostPasses::FsrPass::Settings fsr_settings{};
     HostPasses::PostProcessingPass::Settings pp_settings{};
     HostPasses::PostProcessingPass pp_pass;
+    HostPasses::FrameGenPass frame_gen_pass;
+    Frame frame_gen_frame{};               ///< tlg: wraps frame_gen_pass's output for Present
+    std::chrono::steady_clock::time_point last_game_flip{};
+    double flip_interval_ms{33.3};         ///< tlg: smoothed time between game flips
+    std::chrono::steady_clock::time_point frame_gen_shown{};
+    bool frame_gen_rate_on{false};         ///< tlg: the game rate is low enough for it
+    std::chrono::steady_clock::time_point frame_gen_report{};
+    u32 frame_gen_count{}, frame_gen_skipped{};
     AmdGpu::Liverpool* liverpool;
     Scheduler draw_scheduler;
     std::deque<u64> recent_frame_ticks; ///< tlg: TLG_FRAMES_AHEAD bound (PrepareFrame)
