@@ -123,6 +123,21 @@ int main() {
     TlgSettings::Load();
     assert(v.iss_native_ui_16_9);
     assert(Read(path).find("iss_native_ui_16_9=1\n")!=std::string::npos);
+    {
+        std::ofstream out(path);
+        out << "stick_look_sensitivity=8\n";
+    }
+    TlgSettings::Load();
+    assert(v.stick_look_sensitivity == 3.0f);
+    {
+        std::ofstream out(path);
+        out << "stick_look_sensitivity=nan\n";
+    }
+    TlgSettings::Load();
+    assert(v.stick_look_sensitivity == 1.0f);
+    v.stick_look_sensitivity=1.5f;
+    TlgSettings::Save();
+    assert(Read(path).find("stick_look_sensitivity=1.500\n") != std::string::npos);
     std::remove(path);
     std::puts("PASS: graphics settings");
 }

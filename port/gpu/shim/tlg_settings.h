@@ -161,6 +161,8 @@ struct Values {
     std::string key_map;
     // Append experimental settings so established renderer field offsets stay stable.
     std::atomic<int> iss_native_ui_16_9{0};
+    // Physical right-stick gain while roaming; default preserves the original input.
+    std::atomic<float> stick_look_sensitivity{1.0f};
 };
 
 Values& Get();

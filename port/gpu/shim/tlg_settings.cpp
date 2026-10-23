@@ -137,6 +137,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.mouse_accel = Clamp(f, 0.0f, 2.0f);
     } else if (key == "mouse_deadzone") {
         v.mouse_deadzone = Clamp(f, 0.0f, 0.5f);
+    } else if (key == "stick_look_sensitivity") {
+        v.stick_look_sensitivity = std::isfinite(f) ? Clamp(f, 0.25f, 3.0f) : 1.0f;
     } else if (key == "sensor_aim") {
         v.sensor_aim = std::clamp(i, 25, 200);
     } else if (key == "graffiti_guide_seen") {
@@ -259,6 +261,7 @@ void Load() {
         {"TLG_MOUSE_INVERT_Y", "mouse_invert_y"}, {"TLG_MOUSE_SMOOTHING", "mouse_smoothing"},
         {"TLG_MOUSE_ACCEL", "mouse_accel"},       {"TLG_MOUSE_DEADZONE", "mouse_deadzone"},
         {"TLG_RUMBLE", "rumble"},
+        {"TLG_STICK_LOOK_SENS", "stick_look_sensitivity"},
         {"TLG_LOD_SCALE", "lod_scale"},           {"TLG_LOD_BANDS", "lod_bands"},
         {"TLG_REGION_LOD", "region_lod"},         {"TLG_REGION_FADE", "region_fade"},
         {"TLG_NEAR_CLIP", "near_clip"},           {"TLG_FAR_CLIP", "far_clip"},
@@ -413,6 +416,7 @@ void Save() {
                  int(v.mouse_enabled.load()), v.mouse_sensitivity.load(), int(v.mouse_invert_y.load()),
                  v.mouse_smoothing.load(), v.mouse_accel.load(), v.mouse_deadzone.load(),
                  int(v.rumble.load()), v.key_map.c_str());
+    std::fprintf(file, "stick_look_sensitivity=%.3f\n", v.stick_look_sensitivity.load());
     // Read by run.sh at start.
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");
