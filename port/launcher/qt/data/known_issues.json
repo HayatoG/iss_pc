@@ -4,11 +4,11 @@
     {
       "id": "polaris-windows",
       "match": {"os": ["windows"], "vendor": ["AMD"], "gpu": ["\\bRX\\s*(4[4-9]0|5[4-9]0)\\b", "Polaris", "Radeon\\s*\\(?(TM)?\\)?\\s*5[4-9]0\\b"]},
-      "title": {"en": "AMD RX 580 / Polaris on Windows: crash in amdvlk64.dll", "pt": "AMD RX 580 / Polaris no Windows: crash em amdvlk64.dll"},
+      "title": {"en": "AMD RX 580 / Polaris on Windows: use the RX 580 / Polaris preset", "pt": "AMD RX 580 / Polaris no Windows: use o perfil RX 580 / Polaris"},
       "what": {
-        "en": "The game can close with a crash at amdvlk64.dll+0xebbbb. Try the switch BP09 (\"1D as 2D\", ISS_BP09=1) in Fixes > Experimental, and update the AMD driver to the latest version.",
-        "pt": "O jogo pode fechar com crash em amdvlk64.dll+0xebbbb. Tente a chave BP09 (\"1D como 2D\", ISS_BP09=1) em Correções > Experimental e atualize o driver da AMD para o mais recente."},
-      "issues": [49, 65, 67]
+        "en": "Apply the RX 580 / Polaris preset (Graphics screen): renderer v2 with native passes, about 30 FPS in gameplay. The driver lacks VK_EXT_vertex_input_dynamic_state; builds before this fix closed when gameplay started (execute access to 0). The old crash at amdvlk64.dll+0xebbbb came from this port's renderer before barrier merging (#232). Keep the AMD driver up to date.",
+        "pt": "Aplique o perfil RX 580 / Polaris (tela Gráficos): renderer v2 com native passes, cerca de 30 FPS no gameplay. O driver não tem VK_EXT_vertex_input_dynamic_state; builds anteriores a esta correção fechavam ao entrar no jogo (execute access to 0). O crash antigo em amdvlk64.dll+0xebbbb vinha do renderer deste port antes da junção de barreiras (#232). Mantenha o driver da AMD atualizado."},
+      "issues": [31, 49, 65, 67, 472]
     },
     {
       "id": "ampere-windows",
