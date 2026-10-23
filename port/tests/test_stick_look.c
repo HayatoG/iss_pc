@@ -16,6 +16,10 @@ void tlggpu_graffiti_guide(int force) { (void)force; }
 float tlggpu_sensor_aim_scale(void) { return 1; }
 uintptr_t runtime_lookup(const RuntimeExport *t,size_t n,const char *s) { (void)t;(void)n;(void)s;return 0; }
 
+int runtime_mouse_aim_motion(float dx,float dy,float sensitivity,int invert_y,int active) {
+    (void)dx;(void)dy;(void)sensitivity;(void)invert_y;(void)active;return 0;
+}
+
 int main(void) {
     for (int v=0;v<256;++v) {
         assert(stick_look_axis((uint8_t)v,1)==v);
