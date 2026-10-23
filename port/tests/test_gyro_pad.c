@@ -17,6 +17,10 @@ float tlggpu_sensor_aim_scale(void) { return 1; }
 uintptr_t runtime_lookup(const RuntimeExport *t,size_t n,const char *s) { (void)t;(void)n;(void)s;return 0; }
 static bool SDLCALL sensors(void *data,bool on) { (void)data;(void)on;return true; }
 
+int runtime_mouse_aim_motion(float dx,float dy,float sensitivity,int invert_y,int active) {
+    (void)dx;(void)dy;(void)sensitivity;(void)invert_y;(void)active;return 0;
+}
+
 static SDL_Joystick *joystick;
 static PadData read_sample(float pitch,float yaw,float roll) {
     const float gyro[3]={pitch,yaw,roll}, accel[3]={0,9.80665f,0};
