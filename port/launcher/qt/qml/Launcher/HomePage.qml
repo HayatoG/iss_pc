@@ -169,6 +169,7 @@ Item {
                 Repeater { model: Backend.chips; Chip { text: modelData.text; level: modelData.level } }
             }
             Column {   // light glare (occlusion): same file/env path as the other switches
+                visible: Backend.advancedMode   // automatic setup: hidden (hardware.py)
                 width: parent.width; spacing: 6
                 Row {
                     spacing: 12
@@ -185,6 +186,7 @@ Item {
                        font.family: Theme.fontText; font.pixelSize: 12; lineHeight: 1.25; lineHeightMode: Text.ProportionalHeight }
             }
             Column {   // detailed log (ISS_VERBOSE_LOG), right under the light glare selector
+                visible: Backend.advancedMode
                 width: parent.width; spacing: 6
                 Row {
                     spacing: 12
@@ -231,6 +233,7 @@ Item {
                 }
             }
             Text {
+                visible: Backend.advancedMode   // opens the Fixes screen, hidden in the automatic setup
                 anchors.left: parent.left; anchors.leftMargin: 18; anchors.bottom: parent.bottom; anchors.bottomMargin: 16
                 text: Theme.tr("news_link"); color: page.accent; font.family: Theme.fontText
                 font.pixelSize: 14; font.weight: Font.Bold

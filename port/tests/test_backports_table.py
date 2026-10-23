@@ -180,6 +180,7 @@ class LaunchEnvTest(unittest.TestCase):
                     if name.startswith(('ISS_BP', 'TLG_BP')):
                         del os.environ[name]
                 os.environ['ISS_USER_DIR'] = folder
+                os.environ['ISS_ADVANCED'] = '1'   # the player's choices apply only in the advanced mode
                 settings = dict(run.DEFAULT_SETTINGS)
                 env = run.build_env(settings)
                 self.assertFalse([k for k in env if k.startswith('ISS_BP')])

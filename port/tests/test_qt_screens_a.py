@@ -498,7 +498,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_rx580_toggle_shares_and_persists_the_advanced_setting(self):
         item_id = 'TLG_BARRIER_MERGE'
-        with mock.patch.dict(os.environ, {}, clear=False):
+        with mock.patch.dict(os.environ, {'ISS_ADVANCED': '1'}, clear=False):   # Graphics: advanced mode
             os.environ.pop('ISS_BARRIER_MERGE', None)
             os.environ.pop('TLG_BARRIER_MERGE', None)
             row = self.graphics.model.get(item_id)

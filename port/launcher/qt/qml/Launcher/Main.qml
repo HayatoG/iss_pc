@@ -8,13 +8,20 @@ Rectangle {
     implicitWidth: 1120
     implicitHeight: 700
     property int current: 0
-    readonly property var pages: ["play", "graphics", "controls", "fixes", "saves", "guides", "support", "updates", "advanced", "mods"]
+    // Graphics, Fixes and Advanced only in the hidden advanced mode (Ctrl+Shift+A or ISS_ADVANCED=1):
+    // otherwise the launcher sets the graphics up for the hardware by itself (hardware.py).
+    readonly property var pages: Backend.advancedMode
+        ? ["play", "graphics", "controls", "fixes", "saves", "guides", "support", "updates", "advanced", "mods"]
+        : ["play", "controls", "saves", "guides", "support", "updates", "mods"]
+    onPagesChanged: current = 0
+    Shortcut { sequence: "Ctrl+Shift+A"; onActivated: Backend.toggleAdvanced() }
     property bool animate: true
 
     Rail {
         id: rail
         anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
         current: root.current
+        keys: root.pages
         onPick: (i) => root.current = i
     }
     Item {
@@ -44,7 +51,8 @@ Rectangle {
             }
         }
     }
-    Component { id: home; HomePage { animate: root.animate; onOpenFixes: root.current = 3; onOpenSaves: root.current = 4 } }
+    Component { id: home; HomePage { animate: root.animate; onOpenFixes: { var i = root.pages.indexOf("fixes"); if (i >= 0) root.current = i }
+                                    onOpenSaves: root.current = root.pages.indexOf("saves") } }
     Component { id: graphics; GraphicsPage { } }
     Component { id: controls
         ControlsPage { guidesShown: root.pages.indexOf("guides") >= 0

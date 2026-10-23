@@ -21,6 +21,7 @@ import time
 
 import addons
 import backports_table
+import hardware
 import logtail
 import shader_cache
 import padsettings
@@ -337,6 +338,11 @@ DEFAULT_SETTINGS = {
     'reopen_launcher': True,  # launcher closed on play: opens again when the game exits  # launcher: close about 2 s after the game starts (an open launcher cost ~30% FPS in CPU-bound scenes)
     'gpu_readbacks': '2',    # 2 precise: GPU particles (smoke to drain) need it; 0 fast skips them
 }
+
+
+# settings.json keys of the hidden Graphics screen: their defaults apply in the automatic setup.
+AUTO_SETTING_DEFAULTS = ('vsync', 'vram_budget_mb', 'vram_auto', 'eager_readback', 'write_merge',
+                         'deferred_readback', 'gpu_readbacks', 'precompile_shaders')
 
 
 def config_path():
@@ -757,9 +763,78 @@ def read_ini(path):
     return values
 
 
+# Menu tabs the player still sees without the advanced mode (the in-game menu hides the others).
+PLAYER_TABS = ('Overlay', 'Controls')
+_HARDWARE = None
+
+
+def detected_hardware():
+    """hardware.detect(), once per launcher process (the registry/sysfs reads are fast)."""
+    global _HARDWARE
+    if _HARDWARE is None:
+        _HARDWARE = hardware.detect()
+    return _HARDWARE
+
+
+def auto_config(settings):
+    """hardware.decide() for this machine; None in the advanced mode (the player's choices apply)."""
+    return None if hardware.advanced_mode(settings) else hardware.decide(detected_hardware())
+
+
 def experimental_states(settings):
-    """The player's choices of the launcher's "Experimental fixes" window (tlg.ini + settings)."""
-    return backports_table.read_states(read_ini(user_dir() / 'tlg.ini'), settings)
+    """The switches the game gets. Normally automatic (hardware.py): every graphics switch at its
+    default, renderer v2, native passes as the hardware calls for; only the Overlay and Controls
+    menu keys keep the player's values. In the advanced mode: the player's choices of the launcher's
+    "Experimental fixes" window (tlg.ini + settings), as before."""
+    stored = backports_table.read_states(read_ini(user_dir() / 'tlg.ini'), settings)
+    auto = auto_config(settings)
+    if auto is None:
+        states = stored
+        # This port's renderer on AMD's Windows driver crashed in amdvlk64 (+0xebbbb, +0x2063335)
+        # unless image barriers were merged (the RX 580 preset): applied unless the player chose.
+        if (os.name == 'nt' and detected_hardware()['vendor'] == 'AMD'
+                and backports_table.effective(_item('renderer'), states) == '1'):
+            for key, value in (('TLG_BARRIER_MERGE', '1'), ('TLG_EXPLICIT_RANGE', '1'), ('TLG_BARRIER_SPLIT', '0')):
+                if states.get(key) is None:
+                    states[key] = backports_table.normalize(_item_id(key), value)
+        return states
+    states = {item.id: (stored.get(item.id) if item.group == 'menu' and item.tab in PLAYER_TABS else None)
+              for item in backports_table.ITEMS}
+    states[_item('renderer').id] = backports_table.normalize(_item('renderer'), '2')
+    states[_item('native_passes').id] = backports_table.normalize(_item('native_passes'),
+                                                                  '1' if auto['native_passes'] else '0')
+    return states
+
+
+def _item(key):
+    return next(i for i in backports_table.ITEMS if i.key == key)
+
+
+def _item_id(item_id):
+    return next(i for i in backports_table.ITEMS if i.id == item_id)
+
+
+def reset_to_auto(settings):
+    """Once, when the automatic setup first applies: tlg.ini is copied aside (tlg.ini.before-auto)
+    and its graphics keys are removed (the Overlay and Controls menu keys, the window mode and the
+    mouse stay), so the game reads its defaults and the advanced mode starts clean too."""
+    if hardware.advanced_mode(settings) or settings.get('auto_config_reset'):
+        return False
+    ini = user_dir() / 'tlg.ini'
+    try:
+        text = ini.read_text(encoding='utf-8')
+    except OSError:
+        text = None
+    if text is not None:
+        backup = ini.with_name('tlg.ini.before-auto')
+        if not backup.exists():
+            backup.write_text(text, encoding='utf-8')
+        graphics = {item.key: None for item in backports_table.ITEMS
+                    if item.store == 'ini' and not (item.group == 'menu' and item.tab in PLAYER_TABS)}
+        backports_table.write_ini(ini, graphics)
+    settings['auto_config_reset'] = True
+    save_settings(settings)
+    return True
 
 
 def save_experimental(settings, states):
@@ -780,6 +855,9 @@ def build_env(settings, extra=None):
         env.setdefault(key, value)  # explicit ISS_* in the environment always win
     # Renderer v2 computes the texture budget itself (what the card leaves after everything else);
     # this port's renderer always takes the number.
+    if auto_config(settings) is not None:
+        # Automatic setup: the graphics settings of settings.json are not offered; their defaults apply.
+        settings = {**settings, **{k: DEFAULT_SETTINGS[k] for k in AUTO_SETTING_DEFAULTS}}
     budget = 'auto' if settings.get('vram_auto', True) and renderer_v2(settings) else str(int(settings['vram_budget_mb']))
     env['ISS_GC_BUDGET_MB'] = os.environ.get('ISS_GC_BUDGET_MB', budget)
     env['ISS_READBACKS'] = os.environ.get('ISS_READBACKS', str(settings.get('gpu_readbacks', '2')))
@@ -793,6 +871,12 @@ def build_env(settings, extra=None):
     if settings.get('ui_language', 'auto') != 'auto':
         env['ISS_UI_LANG'] = settings['ui_language']
     env['ISS_CONFIG'] = str(user_dir() / 'tlg.ini')
+    auto = auto_config(settings)
+    if auto is not None:
+        # The automatic setup in the log's Config block (reports show what was picked and why).
+        env['ISS_AUTO_PROFILE'] = auto['profile']
+    else:
+        env['TLG_ADVANCED'] = '1'   # the in-game menu shows its Image and Performance tabs
     dlc = addons.labels(user_dir() / 'dlc')
     if dlc:
         env.setdefault('ISS_ADDCONT_LABELS', ','.join(dlc))
@@ -955,11 +1039,17 @@ def launch(settings, seconds=0, extra_env=None):
     logtail.LogTail and wait() for the exit code."""
     data = user_dir()
     data.mkdir(parents=True, exist_ok=True)
-    update_ini(data / 'tlg.ini', {
-        'display_mode': str(settings['display_mode']).lower(),  # the game's keys: windowed|borderless|fullscreen
-        'vsync': int(bool(settings['vsync'])),
-        'show_fps': int(bool(settings['show_fps'])),
-    })
+    if auto_config(settings) is None:
+        update_ini(data / 'tlg.ini', {
+            'display_mode': str(settings['display_mode']).lower(),  # the game's keys: windowed|borderless|fullscreen
+            'vsync': int(bool(settings['vsync'])),
+            'show_fps': int(bool(settings['show_fps'])),
+        })
+    else:
+        # Automatic setup: the window mode and the FPS counter are the in-game menu's (tlg.ini);
+        # the graphics keys go back to the defaults once (a copy of tlg.ini is kept).
+        update_ini(data / 'tlg.ini', {})   # created when missing: the game and the in-game menu use it
+        reset_to_auto(settings)
     log = new_log()
     note = savemanager.backup_before_play(data)   # saves copied aside before every start (and to the extra folder)
     if note:

@@ -14,6 +14,7 @@ from .support import Support
 from .updates import Updates
 from .logic import backports_table, tlg_run
 import advanced_table  # noqa: E402
+import hardware  # noqa: E402
 import logtail  # noqa: E402
 import precompile  # noqa: E402
 
@@ -158,6 +159,7 @@ class Backend(QObject):
     guideChanged = Signal()
     scrollRequested = Signal(int)   # used by the screenshot tool
     modsChanged = Signal()
+    advancedModeChanged = Signal()
 
     def __init__(self, settings=None, translator=None, probes=None):
         """probes: optional dict of callables replacing the slow/hardware ones (tests, screenshots)."""
@@ -326,6 +328,23 @@ class Backend(QObject):
         if hasattr(self, 'support'):
             self.support.reload()
             self.updates.changed.emit()
+
+    # -- automatic setup / hidden advanced mode ---------------------------------------------------
+    @Property(bool, notify=advancedModeChanged)
+    def advancedMode(self):
+        """Graphics, Fixes and Advanced are shown only in the advanced mode (hardware.advanced_mode);
+        otherwise the setup is automatic (hardware.py) and those screens stay hidden."""
+        return hardware.advanced_mode(self.settings)
+
+    @Slot()
+    def toggleAdvanced(self):
+        """Ctrl+Shift+A: support and testers switch the hidden advanced mode on and off."""
+        self.settings['advanced_mode'] = not self.settings.get('advanced_mode', False)
+        tlg_run.save_settings(self.settings)
+        self.fix_states = tlg_run.experimental_states(self.settings)
+        self.fixes.refresh_all()
+        self.advancedModeChanged.emit()
+        self.refresh()
 
     # -- home state -----------------------------------------------------------------------------
     @Property('QVariantList', notify=chipsChanged)

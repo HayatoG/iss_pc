@@ -258,9 +258,12 @@ def compute_chips(settings, t, gpu='checking', pad=None, problems=None, states=N
         chips.append((t('chip_game_ok', version='1.07'), 'ok'))
     if not built:
         chips.append((t('chip_port_missing'), 'bad'))
-    states = tlg_run.experimental_states(settings) if states is None else states
-    n = backports_table.changes(states)
-    chips.append((t('chip_profile_rec') if n == 0 else t('chip_profile_custom', n=n), 'ok' if n == 0 else 'warn'))
+    if tlg_run.auto_config(settings) is not None:   # the launcher picks the graphics (hardware.py)
+        chips.append((t('chip_profile_auto'), 'ok'))
+    else:
+        states = tlg_run.experimental_states(settings) if states is None else states
+        n = backports_table.changes(states)
+        chips.append((t('chip_profile_rec') if n == 0 else t('chip_profile_custom', n=n), 'ok' if n == 0 else 'warn'))
     if cache_bytes is None and not measure_cache:
         chips.append((t('chip_cache_checking'), 'ok'))
     elif cache_bytes is None:

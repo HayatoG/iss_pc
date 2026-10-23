@@ -66,6 +66,7 @@ class SavesControllerTests(unittest.TestCase):
         self.saves.resetDir()
         self.assertEqual(str(self.default), self.saves.userDir)
 
+    @mock.patch.dict(os.environ, {'ISS_ADVANCED': '1'})   # fix_states read tlg.ini: advanced mode only
     def test_changing_folder_asks_to_copy_and_copies_never_moves(self):
         put_slot(self.default, 'infamousssUser0', 'T', b'data')
         (self.default / 'tlg.ini').write_text('bp01=0\n')

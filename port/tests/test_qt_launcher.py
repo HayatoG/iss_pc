@@ -236,6 +236,7 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(backend.canPlay)
         self.assertEqual('Continuar · Welcome to Seattle — 8%', backend.playSubtitle)
 
+    @mock.patch.dict(os.environ, {'ISS_ADVANCED': '1'})   # the Fixes screen: advanced mode only
     def test_set_fix_saves_and_profile_follows(self):
         backend, saved = self.make()
         self.assertTrue(backend.profileIsRecommended)

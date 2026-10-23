@@ -194,6 +194,7 @@
   "chip_game_bad": {"en": "Game folder: {problem}", "pt": "Pasta do jogo: {problem}"},
   "chip_game_none": {"en": "Game folder not chosen", "pt": "Pasta do jogo não escolhida"},
   "chip_port_missing": {"en": "Port not built (run build.sh)", "pt": "Port não compilado (rode o build.sh)"},
+  "chip_profile_auto": {"en": "Graphics: automatic for your hardware", "pt": "Gráficos: automático para o seu hardware"},
   "chip_profile_rec": {"en": "Profile: Recommended", "pt": "Perfil: Recomendado"},
   "chip_profile_custom": {"en": "Profile: custom ({n} changes)", "pt": "Perfil: personalizado ({n} mudanças)"},
   "chip_cache": {"en": "Shader cache: {size}", "pt": "Cache de shaders: {size}"},
