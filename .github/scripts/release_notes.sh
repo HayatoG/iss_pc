@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Writes the "what changed" part of the release notes (pt-BR and en-US) to stdout: every PR
+# Writes the "what changed" part of the release notes (en-US, then pt-BR) to stdout: every PR
 # merged since the previous release, with the issues it fixes and who opened them.
 #
 # Each PR body carries its notes between these markers (one "- " line per change):
@@ -56,11 +56,11 @@ thanks=""
 for i in $(printf '%s\n' "${!authors[@]}" | sed '/^$/d' | sort -n); do thanks+="#$i (@${authors[$i]}), "; done
 thanks=${thanks%, }
 
-echo "## Novidades"
-printf '%s' "$pt"
-[[ -n $thanks ]] && echo && echo "Issues relatadas por: $thanks. Obrigado!"
-echo
 echo "## What's new"
 printf '%s' "$en"
 [[ -n $thanks ]] && echo && echo "Reported by: $thanks. Thank you!"
+echo
+echo "## Novidades"
+printf '%s' "$pt"
+[[ -n $thanks ]] && echo && echo "Issues relatadas por: $thanks. Obrigado!"
 echo
