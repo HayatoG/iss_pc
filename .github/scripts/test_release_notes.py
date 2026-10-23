@@ -51,7 +51,7 @@ class ReleaseNotesTests(unittest.TestCase):
 - English (#12)
 <!-- /notes:en-US -->''')
         self.assertEqual(result.returncode, 0, result.stderr)
-        pt, en = result.stdout.split("## What's new")
+        en, pt = result.stdout.split('## Novidades')  # English first since 16d6b92
         self.assertNotIn('- English', pt)
         self.assertNotIn('- Português', en)
         self.assertIn('#12 (@reporter)', pt)
@@ -77,7 +77,7 @@ class ReleaseNotesTests(unittest.TestCase):
     def test_new_language_marker_also_ends_previous_block(self):
         result = self.run_notes('<!-- notes:pt-BR -->\n- PT\n<!-- notes:en-US -->\n- EN')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn('- EN', result.stdout.split("## What's new")[0])
+        self.assertNotIn('- EN', result.stdout.split('## Novidades')[1])
 
     def test_api_error_cannot_publish_partial_notes(self):
         result = self.run_notes(fail_second=True)
