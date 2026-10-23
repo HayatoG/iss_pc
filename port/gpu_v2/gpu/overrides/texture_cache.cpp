@@ -1668,6 +1668,38 @@ void TextureCache::GarbageCollectImages() {
                          (unsigned long long)(buffer_cache.ArenaReasonBytes(1) >> 20),
                          (unsigned long long)(buffer_cache.ArenaReasonBytes(2) >> 20));
         }
+        {
+            // VRAM held by VMA: blocks it reserved against the allocations inside them (the gap is
+            // free space in blocks); what the driver reports beyond the blocks and the arena was
+            // allocated outside VMA (swapchain, query pools, pipelines, driver internals).
+            const auto& props = instance.GetMemoryProperties();
+            VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+            vmaGetHeapBudgets(instance.GetAllocator(), budgets);
+            VmaTotalStatistics stats{};
+            vmaCalculateStatistics(instance.GetAllocator(), &stats);
+            u64 blocks = 0;
+            for (u32 h = 0; h < props.memoryHeapCount; ++h) {
+                if (!(props.memoryHeaps[h].flags & vk::MemoryHeapFlagBits::eDeviceLocal)) continue;
+                const VmaDetailedStatistics& d = stats.memoryHeap[h];
+                blocks += budgets[h].statistics.blockBytes;
+                std::fprintf(stderr,
+                             "VRAM_VMA heap=%u blocks=%llu MB (%u) allocations=%llu MB (%u) "
+                             "free_in_blocks=%llu MB largest_free=%llu MB driver_usage=%llu MB\n",
+                             h, (unsigned long long)(budgets[h].statistics.blockBytes >> 20),
+                             budgets[h].statistics.blockCount,
+                             (unsigned long long)(budgets[h].statistics.allocationBytes >> 20),
+                             budgets[h].statistics.allocationCount,
+                             (unsigned long long)((budgets[h].statistics.blockBytes -
+                                                   budgets[h].statistics.allocationBytes) >> 20),
+                             (unsigned long long)(d.unusedRangeSizeMax >> 20),
+                             (unsigned long long)(budgets[h].usage >> 20));
+            }
+            const u64 named = blocks + arena; // the arena's device part (its spill is host memory)
+            std::fprintf(stderr, "VRAM_OUTSIDE_VMA %llu MB (driver usage %llu - VMA blocks %llu - arena %llu)\n",
+                         (unsigned long long)((usage > named ? usage - named : 0) >> 20),
+                         (unsigned long long)(usage >> 20), (unsigned long long)(blocks >> 20),
+                         (unsigned long long)(arena >> 20));
+        }
         // What the game holds of its GPU heaps (live) against the span it reached: the arena
         // can only shrink to the live part.
         iss::heap_census::Heap h[2];

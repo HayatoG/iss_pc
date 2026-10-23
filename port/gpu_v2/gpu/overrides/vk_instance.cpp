@@ -781,10 +781,19 @@ void Instance::CreateAllocator() {
         .vkGetDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
     };
 
+    // iss: VMA's default 256 MB blocks left one almost empty block resident (VRAM_VMA: 175-253 MB
+    // free in blocks, 251 MB of it in one hole on the 11% route, RTX 2060). Smaller blocks give
+    // that back. ISS_VMA_BLOCK_MB (0 = VMA's default) for A/B.
+    static const VkDeviceSize block_size = [] {
+        const char* value = std::getenv("ISS_VMA_BLOCK_MB");
+        const unsigned long long mb = value && value[0] ? std::strtoull(value, nullptr, 10) : 64;
+        return VkDeviceSize(mb) << 20;
+    }();
     const VmaAllocatorCreateInfo allocator_info = {
         .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
         .physicalDevice = physical_device,
         .device = *device,
+        .preferredLargeHeapBlockSize = block_size,
         .pVulkanFunctions = &functions,
         .instance = *instance,
         .vulkanApiVersion = TargetVulkanApiVersion,
