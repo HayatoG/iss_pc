@@ -227,10 +227,10 @@ class KnownIssuesTests(unittest.TestCase):
 
     def test_the_four_starting_entries_exist_with_their_issue_numbers(self):
         by_id = {i['id']: i for i in self.issues}
-        self.assertEqual(by_id['polaris-windows']['issues'], [49, 65, 67])
+        self.assertEqual(by_id['polaris-windows']['issues'], [31, 49, 65, 67, 472])
         self.assertEqual(by_id['vram-4gb']['issues'], [72, 75])
         self.assertEqual(by_id['maxwell-quadro']['issues'], [70])
-        self.assertIn('ISS_BP09=1', by_id['polaris-windows']['what']['en'])
+        self.assertIn('RX 580 / Polaris preset', by_id['polaris-windows']['what']['en'])
         for i in self.issues:
             self.assertTrue(i['title']['en'] and i['title']['pt'] and i['what']['en'] and i['what']['pt'])
 

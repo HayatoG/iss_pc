@@ -34,7 +34,7 @@ SECTIONS = (
     ('gfx_sec_renderer', ('TLG_RENDERER', 'TLG_NATIVE_PASSES')),
     ('gfx_sec_image', ('s:display_mode', 's:vsync', 'menu:fsr1', 'menu:rcas', 'menu:rcas_strength',
                         'TLG_BARRIER_MERGE')),
-    ('gfx_sec_rate', ('menu:fps_limit', 'menu:frames_queued')),
+    ('gfx_sec_rate', ('menu:fps_limit', 'menu:frames_queued', 'menu:frame_gen')),
     ('gfx_sec_view', tuple(i.id for i in backports_table.MENU if i.tab == 'View')),
     ('gfx_sec_gpu', ('TLG_ASYNC_SHADERS', 'TLG_BACKGROUND_WARMUP', 's:gpu_readbacks', 's:eager_readback',
                      's:write_merge', 'TLG_DEFERRED_READBACK', 'TLG_STALE_READBACK', 'TLG_DRAIN_SLEEP', 's:precompile_shaders',

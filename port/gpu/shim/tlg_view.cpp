@@ -14,6 +14,10 @@
 #include <cstring>
 #include <thread>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace {
 
 unsigned char* image = nullptr;
@@ -21,7 +25,26 @@ unsigned char* image = nullptr;
 alignas(16) float region_params[2] = {1.0f, 1.0f};
 alignas(16) float fade_inverse = 1.0f;
 
+// The image's data pages can be inaccessible for a moment while the loader maps them; the
+// thread's first ticks raced that once (read fault at image+0xda08c0, 2026-10-22).
+// A read-only page is fine: GPU page tracking write-protects guest pages and resolves the write.
+bool Accessible(const unsigned char* at) {
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(at, &info, sizeof(info)) != sizeof(info) || info.State != MEM_COMMIT) {
+        return false;
+    }
+    return !(info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) && info.Protect != 0;
+#else
+    (void)at;
+    return true;
+#endif
+}
+
 void Put(uint32_t at, float value) {
+    if (!Accessible(image + at)) {
+        return;
+    }
     float current;
     std::memcpy(&current, image + at, 4);
     if (current != value) {

@@ -1,0 +1,363 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// tlg: frame generation (frame_gen_pass.cpp): one frame halfway between the previous and the
+// current game frame, from the two images alone (no depth or engine motion vectors). Passes:
+//   LUMA_PASS   quarter resolution luma of a frame (4x4 box)
+//   COARSE_PASS symmetric block search on the luma: one 32x32 pixel block per workgroup
+//   REFINE_PASS full resolution search on 16x16 pixel blocks around the coarse vectors of the
+//               parent block and its neighbours, then half a pixel
+//   MEDIAN_PASS 3x3 vector median of the refined field: a lone wrong block (the "jumping
+//               square") takes its neighbours' motion
+//   INTERP_PASS each pixel picks the best of the nearby block vectors (or none) and blends the
+//               two frames moved halfway along it; where no vector matches (a camera cut,
+//               something appearing) it shows the current frame instead of a guess
+// Vectors are half motions h in full resolution pixels: a point at p in the previous frame is
+// at p + 2h in the current one, so the generated frame samples prev(x - h) and cur(x + h).
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+// Loops stay loops: unrolled, the block searches took AMD's compiler minutes (renderer v2, RX 580).
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform texture2D tex_a; // LUMA: the frame; COARSE: previous luma; else previous frame
+layout(binding = 1) uniform texture2D tex_b; // COARSE: current luma; else current frame
+layout(binding = 2) uniform sampler linear_clamp;
+layout(binding = 3) uniform texture2D tex_motion; // REFINE: coarse field; MEDIAN, INTERP: fine field
+layout(binding = 4, rgba16f) uniform writeonly image2D out_img;
+// COARSE, REFINE: the previous frame's filtered field (16x16 blocks), valid when flags has 2.
+layout(binding = 5) uniform texture2D tex_prior;
+// REFINE counts the blocks no vector fits; INTERP reads the count (cleared every frame).
+layout(binding = 6, r32ui) uniform uimage2D stats;
+
+layout(push_constant) uniform Constants {
+    ivec2 size;        // full resolution, pixels
+    ivec2 luma_size;   // quarter resolution
+    ivec2 blocks;      // 32x32 pixel blocks (coarse field)
+    ivec2 fine_blocks; // 16x16 pixel blocks (refined field)
+    float threshold;   // INTERP: colour difference above which the pair is treated as occluded
+    uint flags;        // 1 = show the vectors (INTERP, debug); 2 = tex_prior holds a field
+};
+
+const int BLOCK = 32;      // pixels per coarse block side
+const int FINE = 16;       // pixels per refined block side
+const int LBLOCK = 8;      // luma texels per coarse block side
+const int RANGE = 8;       // coarse search radius in luma texels (64 pixels of motion)
+const int WINDOW = LBLOCK + 2 * RANGE;
+const int SIDE = 2 * RANGE + 1;
+
+float Luma(vec3 c) {
+    return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+#ifdef LUMA_PASS
+void main() {
+    const ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= luma_size.x || q.y >= luma_size.y) {
+        return;
+    }
+    // Four bilinear taps on texel corners: the exact 4x4 box.
+    const vec2 inv = 1.0 / vec2(size);
+    const vec2 base = vec2(q * 4);
+    vec3 sum = vec3(0.0);
+    sum += textureLod(sampler2D(tex_a, linear_clamp), (base + vec2(1.0, 1.0)) * inv, 0.0).rgb;
+    sum += textureLod(sampler2D(tex_a, linear_clamp), (base + vec2(3.0, 1.0)) * inv, 0.0).rgb;
+    sum += textureLod(sampler2D(tex_a, linear_clamp), (base + vec2(1.0, 3.0)) * inv, 0.0).rgb;
+    sum += textureLod(sampler2D(tex_a, linear_clamp), (base + vec2(3.0, 3.0)) * inv, 0.0).rgb;
+    imageStore(out_img, q, vec4(Luma(sum * 0.25), 0.0, 0.0, 1.0));
+}
+#endif
+
+#if defined(COARSE_PASS) || defined(REFINE_PASS)
+// Motion keeps going: the previous frame's vector of a block is the first guess for it. It
+// reaches motions past the search window (fast camera turns, flying) and keeps the field from
+// changing between frames on its own.
+bool HasPrior() {
+    return (flags & 2u) != 0u;
+}
+vec2 PriorAt(ivec2 fine_block) {
+    return texelFetch(tex_prior, clamp(fine_block, ivec2(0), fine_blocks - 1), 0).xy;
+}
+
+shared float best_cost[64];
+shared vec2 best_vec[64];
+
+// Minimum of the 64 lanes' (cost, vector); lane 0 ends with the winner.
+void Reduce(uint lane) {
+    barrier();
+    [[dont_unroll]] for (uint stride = 32; stride > 0; stride >>= 1) {
+        if (lane < stride && best_cost[lane + stride] < best_cost[lane]) {
+            best_cost[lane] = best_cost[lane + stride];
+            best_vec[lane] = best_vec[lane + stride];
+        }
+        barrier();
+    }
+}
+#endif
+
+#ifdef COARSE_PASS
+shared float window_a[WINDOW * WINDOW];
+shared float window_b[WINDOW * WINDOW];
+
+void main() {
+    const ivec2 block = ivec2(gl_WorkGroupID.xy);
+    const uint lane = gl_LocalInvocationIndex;
+    const ivec2 origin = block * LBLOCK - RANGE;
+    [[dont_unroll]] for (uint i = lane; i < WINDOW * WINDOW; i += 64) {
+        const ivec2 t = clamp(origin + ivec2(i % WINDOW, i / WINDOW), ivec2(0), luma_size - 1);
+        window_a[i] = texelFetch(tex_a, t, 0).r;
+        window_b[i] = texelFetch(tex_b, t, 0).r;
+    }
+    barrier();
+
+    float cost = 1e9;
+    vec2 vec = vec2(0.0);
+    [[dont_unroll]] for (uint c = lane; c < SIDE * SIDE; c += 64) {
+        const ivec2 k = ivec2(c % SIDE, c / SIDE) - RANGE;
+        float sad = 0.0;
+        [[dont_unroll]] for (int y = 0; y < LBLOCK; ++y) {
+            [[dont_unroll]] for (int x = 0; x < LBLOCK; ++x) {
+                const ivec2 p = ivec2(x, y) + RANGE;
+                const ivec2 pa = p - k;
+                const ivec2 pb = p + k;
+                sad += abs(window_a[pa.y * WINDOW + pa.x] - window_b[pb.y * WINDOW + pb.x]);
+            }
+        }
+        // Small vectors win ties: flat areas and noise must not invent motion.
+        sad += 0.06 * float(abs(k.x) + abs(k.y));
+        if (k == ivec2(0)) {
+            sad *= 0.85;
+        }
+        if (sad < cost) {
+            cost = sad;
+            vec = vec2(k * 4); // luma texels to full resolution pixels
+        }
+    }
+    // Lanes 0-48: a 7x7 window around last frame's vector of this block, which may lie outside
+    // the shared window (read from the luma images instead).
+    if (HasPrior() && lane < 49) {
+        const vec2 prior = 0.25 * (PriorAt(block * 2) + PriorAt(block * 2 + ivec2(1, 0)) +
+                                   PriorAt(block * 2 + ivec2(0, 1)) + PriorAt(block * 2 + ivec2(1)));
+        const ivec2 kp = ivec2(round(prior / 4.0));
+        const ivec2 k = kp + ivec2(int(lane % 7) - 3, int(lane / 7) - 3);
+        const ivec2 base = block * LBLOCK;
+        float sad = 0.0;
+        [[dont_unroll]] for (int y = 0; y < LBLOCK; ++y) {
+            [[dont_unroll]] for (int x = 0; x < LBLOCK; ++x) {
+                const ivec2 p = base + ivec2(x, y);
+                const float a = texelFetch(tex_a, clamp(p - k, ivec2(0), luma_size - 1), 0).r;
+                const float b = texelFetch(tex_b, clamp(p + k, ivec2(0), luma_size - 1), 0).r;
+                sad += abs(a - b);
+            }
+        }
+        // Staying close to last frame's vector wins ties (no new motion from noise).
+        sad += 0.03 * float(abs(k.x - kp.x) + abs(k.y - kp.y));
+        if (sad < cost) {
+            cost = sad;
+            vec = vec2(k * 4);
+        }
+    }
+    best_cost[lane] = cost;
+    best_vec[lane] = vec;
+    Reduce(lane);
+    if (lane == 0) {
+        imageStore(out_img, block, vec4(best_vec[0], best_cost[0] / float(LBLOCK * LBLOCK), 1.0));
+    }
+}
+#endif
+
+#ifdef REFINE_PASS
+// Block cost of a half motion over the 16x16 block, every `step` pixels.
+float BlockCost(ivec2 block, vec2 h, int step) {
+    const vec2 inv = 1.0 / vec2(size);
+    const vec2 origin = vec2(block * FINE) + 0.5;
+    const int count = FINE / step;
+    float sad = 0.0;
+    [[dont_unroll]] for (int y = 0; y < count; ++y) {
+        [[dont_unroll]] for (int x = 0; x < count; ++x) {
+            const vec2 p = origin + vec2(x, y) * float(step);
+            const float a = Luma(textureLod(sampler2D(tex_a, linear_clamp), (p - h) * inv, 0.0).rgb);
+            const float b = Luma(textureLod(sampler2D(tex_b, linear_clamp), (p + h) * inv, 0.0).rgb);
+            sad += abs(a - b);
+        }
+    }
+    return sad / float(count * count) + 0.002 * (abs(h.x) + abs(h.y)) / 8.0;
+}
+
+vec2 CoarseAt(ivec2 block) {
+    return texelFetch(tex_motion, clamp(block, ivec2(0), blocks - 1), 0).xy;
+}
+
+void main() {
+    const ivec2 block = ivec2(gl_WorkGroupID.xy);
+    const uint lane = gl_LocalInvocationIndex;
+    // The coarse block this one lies in, and the one beside it towards this quarter.
+    const ivec2 parent = block / 2;
+    const ivec2 side = ivec2((block.x & 1) == 0 ? -1 : 1, (block.y & 1) == 0 ? -1 : 1);
+    const vec2 coarse = CoarseAt(parent);
+
+    // Lanes 0-48: a 7x7 pixel window around the parent's vector; 49-55: the vectors of the
+    // coarse blocks around (an edge between two motions, a block the coarse search got wrong);
+    // 56: no motion (HUD, static areas); 57: last frame's vector of this block.
+    vec2 h = coarse;
+    bool in_use = true;
+    if (lane < 49) {
+        h = coarse + vec2(int(lane % 7) - 3, int(lane / 7) - 3);
+    } else if (lane == 49) {
+        h = CoarseAt(parent + ivec2(side.x, 0));
+    } else if (lane == 50) {
+        h = CoarseAt(parent + ivec2(0, side.y));
+    } else if (lane == 51) {
+        h = CoarseAt(parent + side);
+    } else if (lane == 52) {
+        h = CoarseAt(parent + ivec2(-side.x, 0));
+    } else if (lane == 53) {
+        h = CoarseAt(parent + ivec2(0, -side.y));
+    } else if (lane == 54) {
+        h = 0.5 * (CoarseAt(parent + ivec2(side.x, 0)) + coarse);
+    } else if (lane == 55) {
+        h = 0.5 * (CoarseAt(parent + ivec2(0, side.y)) + coarse);
+    } else if (lane == 56) {
+        h = vec2(0.0);
+    } else if (lane == 57 && HasPrior()) {
+        h = PriorAt(block);
+    } else {
+        in_use = false;
+    }
+    best_cost[lane] = in_use ? BlockCost(block, h, 2) *
+                                   (h == vec2(0.0) ? 0.9 : lane == 57 ? 0.95 : 1.0) : 1e9;
+    best_vec[lane] = h;
+    Reduce(lane);
+    const vec2 whole = best_vec[0];
+    barrier();
+
+    // Half a pixel around the winner.
+    const ivec2 d = ivec2(int(lane % 3) - 1, int(lane / 3) - 1);
+    if (lane < 9 && lane != 4) {
+        const vec2 hh = whole + vec2(d) * 0.5;
+        best_cost[lane] = BlockCost(block, hh, 1);
+        best_vec[lane] = hh;
+    } else {
+        best_cost[lane] = lane == 4 ? BlockCost(block, whole, 1) : 1e9;
+        best_vec[lane] = whole;
+    }
+    Reduce(lane);
+    if (lane == 0) {
+        imageStore(out_img, block, vec4(best_vec[0], best_cost[0], 1.0));
+        // A fast camera turn or a cut: the best vector still does not match, or the motion is
+        // past what the search can follow. Motion blur makes wrong vectors look good, so both.
+        if (best_cost[0] > 0.04 || length(best_vec[0]) > 24.0) {
+            imageAtomicAdd(stats, ivec2(0), 1u);
+        }
+    }
+}
+#endif
+
+#ifdef MEDIAN_PASS
+void main() {
+    const ivec2 block = ivec2(gl_GlobalInvocationID.xy);
+    if (block.x >= fine_blocks.x || block.y >= fine_blocks.y) {
+        return;
+    }
+    vec4 field[9];
+    [[dont_unroll]] for (int i = 0; i < 9; ++i) {
+        const ivec2 at = clamp(block + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), fine_blocks - 1);
+        field[i] = texelFetch(tex_motion, at, 0);
+    }
+    // Vector median: the vector closest to all the others. The block's own vector wins ties.
+    int best = 4;
+    float best_sum = 1e9;
+    [[dont_unroll]] for (int i = 0; i < 9; ++i) {
+        float sum = 0.0;
+        [[dont_unroll]] for (int j = 0; j < 9; ++j) {
+            const vec2 d = abs(field[i].xy - field[j].xy);
+            sum += d.x + d.y;
+        }
+        if (i == 4) {
+            sum *= 0.95;
+        }
+        if (sum < best_sum) {
+            best_sum = sum;
+            best = i;
+        }
+    }
+    imageStore(out_img, block, vec4(field[best].xy, field[4].z, 1.0));
+}
+#endif
+
+#ifdef INTERP_PASS
+vec3 SampleA(vec2 p) {
+    return textureLod(sampler2D(tex_a, linear_clamp), p / vec2(size), 0.0).rgb;
+}
+vec3 SampleB(vec2 p) {
+    return textureLod(sampler2D(tex_b, linear_clamp), p / vec2(size), 0.0).rgb;
+}
+
+// How well a half motion matches around this pixel: a 3x3 grid, 2 pixels apart. Mean absolute
+// colour difference per channel.
+float PixelCost(vec2 x, vec2 h) {
+    float sum = 0.0;
+    [[dont_unroll]] for (int y = -1; y <= 1; ++y) {
+        [[dont_unroll]] for (int i = -1; i <= 1; ++i) {
+            const vec2 o = vec2(i, y) * 2.0;
+            const vec3 d = abs(SampleA(x - h + o) - SampleB(x + h + o));
+            sum += d.r + d.g + d.b;
+        }
+    }
+    return sum / 27.0;
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+    const vec2 x = vec2(pixel) + 0.5;
+
+    // The four blocks around the pixel, their bilinear blend and no motion.
+    const vec2 bf = x / float(FINE) - 0.5;
+    const ivec2 b0 = ivec2(floor(bf));
+    const vec2 w = bf - vec2(b0);
+    const ivec2 last = fine_blocks - 1;
+    const vec2 m00 = texelFetch(tex_motion, clamp(b0, ivec2(0), last), 0).xy;
+    const vec2 m10 = texelFetch(tex_motion, clamp(b0 + ivec2(1, 0), ivec2(0), last), 0).xy;
+    const vec2 m01 = texelFetch(tex_motion, clamp(b0 + ivec2(0, 1), ivec2(0), last), 0).xy;
+    const vec2 m11 = texelFetch(tex_motion, clamp(b0 + ivec2(1, 1), ivec2(0), last), 0).xy;
+    const vec2 smooth_vec = mix(mix(m00, m10, w.x), mix(m01, m11, w.x), w.y);
+
+    vec2 best = smooth_vec;
+    float best_cost = PixelCost(x, smooth_vec);
+    const vec2 candidates[5] = vec2[](m00, m10, m01, m11, vec2(0.0));
+    [[dont_unroll]] for (int i = 0; i < 5; ++i) {
+        // The smooth vector wins ties: neighbours only where it clearly fails (edges).
+        const float c = PixelCost(x, candidates[i]) * (i == 4 ? 1.02 : 1.08);
+        if (c < best_cost) {
+            best_cost = c;
+            best = candidates[i];
+        }
+    }
+
+    const vec3 a = SampleA(x - best);
+    const vec3 b = SampleB(x + best);
+    vec3 color = 0.5 * (a + b);
+    const float diff = Luma(abs(a - b));
+    // The two sides disagree: something covers or uncovers this pixel, or the vector is wrong.
+    // The current frame, which the next shown frame is, rather than a mix of two guesses.
+    color = mix(color, b, smoothstep(threshold * 0.5, threshold * 1.5, diff));
+    // No vector matches at all (a camera cut, an explosion, fast motion past the search
+    // range): the current frame as it is, never a moved guess.
+    float confidence_loss = smoothstep(threshold * 0.35, threshold * 0.9, best_cost);
+    // Fast motion (over ~24 pixels a frame): block vectors break objects apart there, so the
+    // region shows the current frame (a little judder only where things move fast).
+    confidence_loss = max(confidence_loss, smoothstep(12.0, 24.0, length(best)));
+    // Many blocks without a match: the whole frame moved too much to guess (a fast turn, a cut).
+    // The generated frame is then the current one; for an instant it looks like 30 FPS, never
+    // like broken blocks.
+    const float bad = float(imageLoad(stats, ivec2(0)).r) / float(fine_blocks.x * fine_blocks.y);
+    confidence_loss = max(confidence_loss, smoothstep(0.05, 0.15, bad));
+    color = mix(color, texelFetch(tex_b, pixel, 0).rgb, confidence_loss);
+    if ((flags & 1u) != 0u) {
+        color = mix(color, vec3(0.5 + best / 64.0, 0.5 + confidence_loss * 0.5), 0.5);
+    }
+    imageStore(out_img, pixel, vec4(color, 1.0));
+}
+#endif

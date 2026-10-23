@@ -109,6 +109,14 @@ MENU = [
            'Mais quadros na fila: FPS mais estável, resposta mais lenta.'),
           choices=(('1', '1 (lowest latency)', '1 (menor atraso)'), ('2', '2', '2'),
                    ('0', 'Unlimited', 'Sem limite'))),
+    # Renderer 1 only (gpu/shadps4/video_core/renderer_vulkan/host_passes/frame_gen_pass.h).
+    _menu('Performance', 'frame_gen', 'bool', '0', ('Frame generation (smooth frames)', 'Geração de quadros (quadros suaves)'),
+          ('Shows a generated frame between every two game frames, like a console: 30 FPS look like 60. '
+           'Needs VSync and works best with the 30 FPS limit; adds about half a frame of delay. '
+           'This port\'s renderer (1) only.',
+           'Mostra um quadro gerado entre cada dois quadros do jogo, como num console: 30 FPS parecem 60. '
+           'Precisa do VSync e fica melhor com o limite de 30 FPS; soma cerca de meio quadro de atraso. '
+           'Só no renderer deste port (1).')),
     _menu('Controls', 'sensor_aim', 'int', '100', ('Graffiti aiming speed', 'Velocidade da mira do grafite'),
           ('How fast the stick moves the graffiti cursor in sensor mode (100% = default).',
            'Quão rápido o analógico move o cursor do grafite no modo sensor (100% = padrão).'),

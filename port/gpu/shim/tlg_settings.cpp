@@ -11,6 +11,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace TlgSettings {
 
@@ -155,6 +156,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.rcas_strength = TlgGraphics::ParseRcasStrength(value.empty() ? -1 : i);
     } else if (key == "frames_queued") {
         v.frames_queued = TlgGraphics::ParseFramesQueued(value.empty() ? -1 : i);
+    } else if (key == "frame_gen") {
+        v.frame_gen = i != 0;
     } else if (key == "render_resolution") {
         v.render_resolution = TlgGraphics::ParseResolution(value);
     } else if (key == "engine_fps") {
@@ -244,6 +247,7 @@ void Load() {
         {"TLG_ASYNC_SHADERS", "async_shaders"},      {"TLG_DEFERRED_READBACK", "deferred_readback"},
         {"TLG_STALE_READBACK", "stale_readback"},     {"TLG_FSR1", "fsr1"},
         {"TLG_RCAS", "rcas"},                        {"TLG_FRAMES_AHEAD", "frames_queued"},
+        {"TLG_FRAME_GEN", "frame_gen"},
         {"TLG_SHOW_FPS", "show_fps"},             {"TLG_SENSOR_AIM", "sensor_aim"},
         {"TLG_MOUSE", "mouse_enabled"},           {"TLG_MOUSE_SENS", "mouse_sensitivity"},
         {"TLG_MOUSE_INVERT_Y", "mouse_invert_y"}, {"TLG_MOUSE_SMOOTHING", "mouse_smoothing"},
@@ -327,9 +331,33 @@ bool ResolutionNeedsRestart() {
          (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa));
 }
 
+// The key of an ini line ("key=value"), or empty for comments and blank lines.
+static std::string_view KeyOf(std::string_view line) {
+    const size_t eq = line.find('=');
+    if (eq == std::string_view::npos || line.empty() || line[0] == '#') return {};
+    return line.substr(0, eq);
+}
+
+static std::vector<std::string> ReadLines(const char* path) {
+    std::vector<std::string> lines;
+    if (FILE* file = std::fopen(path, "r")) {
+        char buffer[1024];
+        while (std::fgets(buffer, sizeof(buffer), file)) {
+            std::string line = buffer;
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+            lines.push_back(std::move(line));
+        }
+        std::fclose(file);
+    }
+    return lines;
+}
+
 void Save() {
     const auto& v = Get();
-    FILE* file = std::fopen(Path(), "w");
+    // The launcher keeps its own keys in the same file (renderer, native_passes, adv_*...): the
+    // menu must not drop them, or the next start silently goes back to the defaults.
+    const std::vector<std::string> previous = ReadLines(Path());
+    FILE* file = std::fopen(Path(), "w+");
     if (!file) {
         std::printf("Settings: cannot write %s\n", Path());
         return;
@@ -377,6 +405,7 @@ void Save() {
                  TlgGraphics::Resolutions[std::clamp(v.render_resolution.load(), 0, 5)].data(),
                  v.engine_fps.load(), int(v.deferred_readback.load()), int(v.stale_readback.load()),
                  int(v.restart_unconfirmed.load()));
+    std::fprintf(file, "frame_gen=%d\n", int(v.frame_gen.load()));
     std::fprintf(file, "sensor_aim=%d\ngraffiti_guide_seen=%d\n", v.sensor_aim.load(),
                  int(v.graffiti_guide_seen.load()));
     std::fprintf(file,
@@ -401,6 +430,22 @@ void Save() {
     // Read by run.sh at start.
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");
+    // Keep every earlier line whose key this function does not write.
+    std::fflush(file);
+    std::rewind(file);
+    std::vector<std::string> written_keys;
+    char buffer[1024];
+    while (std::fgets(buffer, sizeof(buffer), file)) {
+        if (const auto key = KeyOf(buffer); !key.empty()) written_keys.emplace_back(key);
+    }
+    std::fseek(file, 0, SEEK_END);
+    for (const auto& line : previous) {
+        const auto key = KeyOf(line);
+        if (!key.empty() &&
+            std::find(written_keys.begin(), written_keys.end(), key) == written_keys.end()) {
+            std::fprintf(file, "%s\n", line.c_str());
+        }
+    }
     std::fclose(file);
 }
 

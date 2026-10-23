@@ -19,6 +19,7 @@
 #include "imgui/notifications_layer.h"
 #include "imgui/renderer/imgui_core.h"
 #include "tlg_overlay.h"
+#include "tlg_settings.h"
 #include "imgui/renderer/imgui_impl_vulkan.h"
 #include "imgui/shadnet_notifications_layer.h"
 #include "sdl_window.h"
@@ -496,6 +497,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
+    frame_gen_pass.Create(device, instance.GetAllocator(), swapchain.GetSurfaceFormat().format);
+    frame_gen_frame.id = u8(num_images);
+    frame_gen_frame.present_done = Check<"create frame generation fence">(
+        device.createFence({.flags = vk::FenceCreateFlagBits::eSignaled}));
 
     // Linux host: this port's own overlay (FPS counter, Insert menu, loading screen, save
     // dialogs), drawn over everything with its own ImGui context (gpu/ours/tlg_overlay.cpp).
@@ -526,6 +531,7 @@ Presenter::~Presenter() {
         device.destroyImageView(frame.image_view);
         device.destroyFence(frame.present_done);
     }
+    device.destroyFence(frame_gen_frame.present_done);
 }
 
 bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const {
@@ -1203,6 +1209,87 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             std::fprintf(frame_ts, "%llu\n", (unsigned long long)Common::Perf::NowNs());
         }
         Core::PerfSampler::PollTuning();
+    }
+}
+
+void Presenter::PresentGameFrame(Frame* frame) {
+    using Clock = std::chrono::steady_clock;
+    auto& settings = TlgSettings::Get();
+    const auto now = Clock::now();
+    bool stale_history = true;
+    if (last_game_flip != Clock::time_point{}) {
+        const double ms = std::chrono::duration<double, std::milli>(now - last_game_flip).count();
+        // A pause or a loading screen says nothing about the frame rate, and the frame before it
+        // is no neighbour of this one: nothing is generated across it.
+        if (ms < 100.0) {
+            flip_interval_ms += (ms - flip_interval_ms) * 0.2;
+            stale_history = false;
+        }
+    }
+    last_game_flip = now;
+
+    if (!settings.frame_gen.load(std::memory_order_relaxed) ||
+        Libraries::SystemService::IsSplashVisible()) {
+        frame_gen_pass.Reset();
+        frame_gen_rate_on = false;
+        settings.frame_gen_active.store(false, std::memory_order_relaxed);
+        Present(frame);
+        return;
+    }
+
+    // Above ~45 FPS a generated frame would need a faster display than the usual 60 Hz. Two
+    // thresholds, so a rate around them (cutscenes, menus) does not switch it on and off.
+    if (frame_gen_rate_on ? flip_interval_ms < 20.0 : flip_interval_ms > 24.0) {
+        frame_gen_rate_on = !frame_gen_rate_on;
+    }
+    if (stale_history) {
+        frame_gen_pass.Reset();
+    }
+    // This runs on the vblank thread: no waiting between the two presents. With VSync the
+    // swapchain queue shows them on consecutive vblanks by itself.
+    bool generated = false;
+    if (frame_gen_rate_on && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        const vk::Device device = instance.GetDevice();
+        // The previous generated frame must be shown before its image is rewritten.
+        (void)device.waitForFences(frame_gen_frame.present_done, true, 100'000'000);
+        if (frame_gen_pass.Generate(present_scheduler.CommandBuffer(), frame->image,
+                                    frame->image_view, frame->width, frame->height)) {
+            if (frame_gen_texture_view != frame_gen_pass.OutputView()) {
+                // The output was (re)created at this frame's size: a new ImGui texture for it.
+                if (frame_gen_frame.imgui_texture) {
+                    ImGui::Vulkan::RemoveTexture(frame_gen_frame.imgui_texture);
+                }
+                frame_gen_texture_view = frame_gen_pass.OutputView();
+                frame_gen_frame.imgui_texture = ImGui::Vulkan::AddTexture(
+                    frame_gen_texture_view, vk::ImageLayout::eShaderReadOnlyOptimal);
+            }
+            frame_gen_frame.width = frame->width;
+            frame_gen_frame.height = frame->height;
+            frame_gen_frame.image = frame_gen_pass.Output();
+            frame_gen_frame.image_view = frame_gen_pass.OutputView();
+            // Its commands read this frame: the same wait as the frame's own present.
+            frame_gen_frame.ready_semaphore = frame->ready_semaphore;
+            frame_gen_frame.ready_tick = frame->ready_tick;
+            frame_gen_frame.is_hdr = frame->is_hdr;
+            Present(&frame_gen_frame, true, false);
+            generated = true;
+        }
+    }
+    frame_gen_pass.Remember(present_scheduler.CommandBuffer(), frame->image, frame->width,
+                            frame->height);
+    settings.frame_gen_active.store(generated, std::memory_order_relaxed);
+    Present(frame);
+
+    // Every 5 s: how many game frames got a generated one.
+    ++(generated ? frame_gen_count : frame_gen_skipped);
+    if (now - frame_gen_report >= std::chrono::seconds(5)) {
+        if (frame_gen_report != Clock::time_point{}) {
+            std::fprintf(stderr, "Frame generation: %u generated, %u game frames without one "
+                                 "(game frame every %.1f ms)\n",
+                         frame_gen_count, frame_gen_skipped, flip_interval_ms);
+        }
+        frame_gen_report = now;
+        frame_gen_count = frame_gen_skipped = 0;
     }
 }
 

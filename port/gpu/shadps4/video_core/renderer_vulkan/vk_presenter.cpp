@@ -38,6 +38,7 @@
 #include <memory>
 #include <span>
 #include <sstream>
+#include <thread>
 #include <system_error>
 #include <vector>
 #include <vk_mem_alloc.h>
@@ -181,6 +182,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
+    frame_gen_pass.Create(device, instance.GetAllocator(), swapchain.GetSurfaceFormat().format);
+    frame_gen_frame.id = u8(num_images);
+    frame_gen_frame.present_done = Check<"create frame generation fence">(
+        device.createFence({.flags = vk::FenceCreateFlagBits::eSignaled}));
     TlgOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
 
     // tlg: first-run shader compilation (vk_precompile.h): the job file the launcher wrote from
@@ -257,6 +262,7 @@ Presenter::~Presenter() {
         device.destroyImageView(frame.image_view);
         device.destroyFence(frame.present_done);
     }
+    device.destroyFence(frame_gen_frame.present_done);
 }
 
 bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const {
@@ -925,6 +931,85 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     free_frame();
     if (!is_reusing_frame && is_game_frame) {
         DebugState.IncFlipFrameNum();
+    }
+}
+
+void Presenter::PresentGameFrame(Frame* frame) {
+    using Clock = std::chrono::steady_clock;
+    auto& settings = TlgSettings::Get();
+    const auto now = Clock::now();
+    bool stale_history = true;
+    if (last_game_flip != Clock::time_point{}) {
+        const double ms = std::chrono::duration<double, std::milli>(now - last_game_flip).count();
+        // A pause or a loading screen says nothing about the frame rate, and the frame before it
+        // is no neighbour of this one: nothing is generated across it.
+        if (ms < 100.0) {
+            flip_interval_ms += (ms - flip_interval_ms) * 0.2;
+            stale_history = false;
+        }
+    }
+    last_game_flip = now;
+
+    if (!settings.frame_gen.load(std::memory_order_relaxed)) {
+        frame_gen_pass.Reset();
+        frame_gen_rate_on = false;
+        settings.frame_gen_active.store(false, std::memory_order_relaxed);
+        Present(frame);
+        return;
+    }
+
+    // Above ~45 FPS a generated frame would need a faster display than the usual 60 Hz. Two
+    // thresholds, so a rate around them (cutscenes, menus) does not switch it on and off.
+    if (frame_gen_rate_on ? flip_interval_ms < 20.0 : flip_interval_ms > 24.0) {
+        frame_gen_rate_on = !frame_gen_rate_on;
+    }
+    if (stale_history) {
+        frame_gen_pass.Reset();
+    }
+    bool generated = false;
+    if (frame_gen_rate_on && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        const vk::Device device = instance.GetDevice();
+        // The previous generated frame's blit must be done before its image is rewritten.
+        (void)device.waitForFences(frame_gen_frame.present_done, true, 100'000'000);
+        if (frame_gen_pass.Generate(present_scheduler.CommandBuffer(), frame->image,
+                                    frame->image_view, frame->width, frame->height)) {
+            frame_gen_frame.width = frame->width;
+            frame_gen_frame.height = frame->height;
+            frame_gen_frame.image = frame_gen_pass.Output();
+            frame_gen_frame.image_view = frame_gen_pass.OutputView();
+            // Its commands read this frame: the same wait as the frame's own present.
+            frame_gen_frame.ready_semaphore = frame->ready_semaphore;
+            frame_gen_frame.ready_tick = frame->ready_tick;
+            frame_gen_frame.is_hdr = frame->is_hdr;
+            Present(&frame_gen_frame, true, false);
+            frame_gen_shown = Clock::now();
+            generated = true;
+        }
+    }
+    frame_gen_pass.Remember(present_scheduler.CommandBuffer(), frame->image, frame->width,
+                            frame->height);
+    if (generated && !settings.vsync.load(std::memory_order_relaxed)) {
+        // Without VSync nothing spaces the two presents: the game frame half a frame later, at
+        // most one 60 Hz vblank so a slow game does not also wait here for its next flip. With
+        // VSync the queue shows them on consecutive vblanks by itself.
+        const double wait_ms = std::min(flip_interval_ms * 0.5 - 2.0, 15.0);
+        const auto half = std::chrono::duration<double, std::milli>(wait_ms);
+        std::this_thread::sleep_until(frame_gen_shown +
+                                      std::chrono::duration_cast<Clock::duration>(half));
+    }
+    settings.frame_gen_active.store(generated, std::memory_order_relaxed);
+    Present(frame);
+
+    // Every 5 s: how many game frames got a generated one (the log's FPS counts game frames).
+    ++(generated ? frame_gen_count : frame_gen_skipped);
+    if (now - frame_gen_report >= std::chrono::seconds(5)) {
+        if (frame_gen_report != Clock::time_point{}) {
+            std::fprintf(stderr, "Frame generation: %u generated, %u game frames without one "
+                                 "(game frame every %.1f ms)\n",
+                         frame_gen_count, frame_gen_skipped, flip_interval_ms);
+        }
+        frame_gen_report = now;
+        frame_gen_count = frame_gen_skipped = 0;
     }
 }
 
