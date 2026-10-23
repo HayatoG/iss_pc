@@ -22,6 +22,7 @@
 #include <SDL3/SDL.h>
 #include "mouse_stick.h"
 #include "iss_mouse_aim.h"
+#include "gyro_aim.h"
 #include "mouse_touch.h"
 #include "rumble_gate.h"
 #include "mouse_shake.h"
@@ -725,6 +726,35 @@ static void apply_mouse_touch(PadData *d) {
 static void key_axis(uint8_t *axis, bool negative, bool positive) {
     if (negative || positive) *axis=(uint8_t)(128-(negative ? 128 : 0)+(positive ? 127 : 0));
 }
+static GyroAim gyro_aim;
+static SDL_JoystickID gyro_device;
+static uint64_t gyro_last_us;
+
+/* Real gyro only: never reuse the simulated graffiti angular velocity. Read once per pad
+ * sample and add to the physical stick after all keyboard/mouse/touchpad mapping. */
+static void sample_gyro_aim(PadData *d, SDL_Gamepad *g, int blocked) {
+    TlgGpuInputSettings settings;
+    tlggpu_input_settings(&settings);
+    const SDL_JoystickID id=g ? SDL_GetGamepadID(g) : 0;
+    if (id!=gyro_device) { gyro_aim_reset(&gyro_aim); gyro_last_us=0; gyro_device=id; }
+    const uint64_t now=d->timestamp;
+    const float dt=gyro_last_us ? (float)(now-gyro_last_us)*1e-6f : 0;
+    gyro_last_us=now;
+    const int touch=d->touch_count || (d->buttons & (CLICK_LEFT|CLICK_RIGHT|BTN_TOUCHPAD));
+    int active=settings.gyro_aim && settings.gyro_focused && g && motion.sensors &&
+               !motion.mode && !blocked && !touch && (d->buttons & BTN_L2);
+    float velocity[3]={0,0,0};
+    if (active) {
+        active=SDL_GamepadHasSensor(g,SDL_SENSOR_GYRO) &&
+               (SDL_GamepadSensorEnabled(g,SDL_SENSOR_GYRO) || SDL_SetGamepadSensorEnabled(g,SDL_SENSOR_GYRO,true)) &&
+               SDL_GetGamepadSensorData(g,SDL_SENSOR_GYRO,velocity,3);
+    }
+    const GyroAimParams p={settings.gyro_sensitivity,settings.gyro_smoothing,
+                          settings.gyro_noise,settings.gyro_deadzone,settings.gyro_invert_y};
+    gyro_aim_update(&gyro_aim,&p,velocity[0],velocity[1],dt,active);
+    d->right_x=gyro_aim_add(d->right_x,gyro_aim_axis(&gyro_aim,&p,0));
+    d->right_y=gyro_aim_add(d->right_y,gyro_aim_axis(&gyro_aim,&p,1));
+}
 static void sample_host(PadData *d) {
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
@@ -732,7 +762,10 @@ static void sample_host(PadData *d) {
     d->connected=1; d->connected_count=connected_count ? connected_count : 1;
     d->timestamp=now_us();
     SDL_Gamepad *g=current_gamepad();
-    if (tlggpu_overlay_captures_input()) return; /* settings menu open: neutral input */
+    if (tlggpu_overlay_captures_input()) {
+        gyro_aim_reset(&gyro_aim); gyro_last_us=0;
+        return; /* settings menu open: neutral input */
+    }
     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     load_button_maps();
     if (g) {
@@ -761,7 +794,7 @@ static void sample_host(PadData *d) {
     sample_motion(d,g,k);
     /* The keyboard works with or without a gamepad: its buttons add to the pad's, and a stick
      * follows the keys only while one of them is held. */
-    if (!k) return;
+    if (!k) { sample_gyro_aim(d,g,0); return; }
     const uint32_t mouse=sample_mouse(d,motion.mode || k[SDL_SCANCODE_T] || k[SDL_SCANCODE_G],k); /* adds to the right stick */
     for (size_t i=0;i<key_map.count;++i) {
         const int source=key_map.entries[i].source;
@@ -778,6 +811,7 @@ static void sample_host(PadData *d) {
     if (k[SDL_SCANCODE_T] || k[SDL_SCANCODE_G]) d->right_x=d->right_y=128; /* the arrows point the can */
     apply_swipe(d,g,k);
     apply_mouse_touch(d);
+    sample_gyro_aim(d,g,k[SDL_SCANCODE_T] || k[SDL_SCANCODE_G] || mouse_pad.active);
 }
 
 /* TLG_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated

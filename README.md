@@ -321,6 +321,8 @@ By default saves and settings live in `user/`, next to the game. **Updating dele
 
 ## Motion sensor and touchpad
 
+**Optional gyro aiming:** real controller gyro can supplement the right stick while holding L2. It is off by default; enable it in Launcher > Controls or Insert > Controls. Graffiti motion is unchanged. See [gyro aiming settings and limitations](docs/GYRO_AIM.md).
+
 The game asks for the motion sensor and the touchpad in many scenes: graffiti, absorbing powers (smoke, neon...), opening doors and other interactions. On a **DualShock 4 or DualSense** the gyro and the touchpad work as is, with nothing to turn on. On other controllers and on the keyboard, the port simulates both.
 
 **Controller guides** (the same images are on the launcher's **Controller guides** screen, with buttons to save and copy):

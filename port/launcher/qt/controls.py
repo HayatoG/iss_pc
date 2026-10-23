@@ -71,6 +71,17 @@ class Controls(QObject):
         rows.append(self._row(item.id, self.backend.t_.pair(item.name), self.backend.t_.pair(item.what), 'slider',
                               True, self.backend.fix_states.get(item.id) is not None, lo=item.lo, hi=item.hi,
                               step=5, unit=item.unit, value=value, valueText=f'{value}{item.unit}'))
+        gyro_on = backports_table.effective(gfxlogic.item_by_id('menu:gyro_aim'), self.backend.fix_states) == '1'
+        for key in ('gyro_aim', 'gyro_sensitivity', 'gyro_invert_y', 'gyro_smoothing', 'gyro_noise', 'gyro_deadzone'):
+            item = gfxlogic.item_by_id('menu:' + key)
+            value = backports_table.effective(item, self.backend.fix_states)
+            extra = {'on': value == '1'} if item.vtype == 'bool' else {
+                'lo': item.lo, 'hi': item.hi, 'step': 0.005 if key in ('gyro_smoothing','gyro_noise') else 0.05,
+                'unit': item.unit, 'value': float(value), 'valueText': f'{float(value):.3g}{item.unit}', 'decimals': 3}
+            rows.append(self._row(item.id, self.backend.t_.pair(item.name), self.backend.t_.pair(item.what),
+                                  'switch' if item.vtype == 'bool' else 'slider', True,
+                                  self.backend.fix_states.get(item.id) is not None,
+                                  disabled=key != 'gyro_aim' and not gyro_on, **extra))
         return rows
 
     def _mouse_rows(self):

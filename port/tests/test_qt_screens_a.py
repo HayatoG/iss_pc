@@ -676,6 +676,22 @@ class ControllerTests(unittest.TestCase):
         self.controls.setValue('m:mouse_invert_y', '0')
         self.assertNotIn('mouse_', self.ini_text())
 
+    def test_gyro_controls_are_opt_in_and_roundtrip_without_changing_graffiti(self):
+        self.assertFalse(self.controls.pad_model.get('menu:gyro_aim')['on'])
+        self.assertTrue(self.controls.pad_model.get('menu:gyro_sensitivity')['disabled'])
+        self.controls.setValue('menu:sensor_aim', '150')
+        self.controls.setValue('menu:gyro_aim', '1')
+        self.controls.setValue('menu:gyro_sensitivity', '2')
+        self.controls.setValue('menu:gyro_noise', '0.025')
+        self.assertTrue(self.controls.pad_model.get('menu:gyro_aim')['on'])
+        self.assertFalse(self.controls.pad_model.get('menu:gyro_sensitivity')['disabled'])
+        self.assertEqual(2.0, self.controls.pad_model.get('menu:gyro_sensitivity')['value'])
+        self.assertIn('gyro_noise=0.025', self.ini_text())
+        self.assertIn('sensor_aim=150', self.ini_text())
+        self.controls.setValue('menu:gyro_aim', '0')
+        self.assertNotIn('gyro_aim=', self.ini_text())
+        self.assertIn('sensor_aim=150', self.ini_text())
+
     def test_the_other_keys_of_tlg_ini_survive(self):
         self.ini.parent.mkdir(parents=True)
         self.ini.write_text('# tlg settings\nbp01=0\nfps_limit=60\n')

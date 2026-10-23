@@ -652,6 +652,29 @@ void OpenGuide(); // the graffiti guide (below, with the save dialogs)
 extern "C" int runtime_mouse_aim_installed(void);
 void ControlsTab() {
     auto& s = TlgSettings::Get();
+    ImGui::SeparatorText(TL("Gyro aiming", "Mira por giroscopio"));
+    if (BeginRows("##gyroaim")) {
+        CheckRow(TL("Gyro while holding L2", "Giroscopio ao segurar L2"), s.gyro_aim,
+                 TL("Adds the controller's real gyro to the right stick only while L2 is held. Off by default; graffiti motion is unchanged.",
+                    "Soma o giroscopio real ao analogico direito so ao segurar L2. Desligado por padrao; nao altera o grafite."));
+        ImGui::BeginDisabled(!s.gyro_aim);
+        FloatRow(TL("Gyro sensitivity", "Sensibilidade do giroscopio"), s.gyro_sensitivity, 0.1f, 5.0f, "%.2f",
+                 TL("Recommended starting range: 2-2.5 (default 2.5). At 1x, 180 degrees/second maps to a full stick. The game's stick response and speed limit still apply.",
+                    "Faixa inicial recomendada: 2-2,5 (padrao 2,5). Em 1x, 180 graus/segundo vira analogico no maximo. A resposta e o limite do jogo continuam valendo."));
+        CheckRow(TL("Invert gyro Y", "Inverter Y do giroscopio"), s.gyro_invert_y,
+                 TL("Reverse the vertical aiming direction.", "Inverte a direcao vertical da mira."));
+        FloatRow(TL("Gyro smoothing (seconds)", "Suavizacao do giroscopio (segundos)"), s.gyro_smoothing, 0, 0.2f, "%.3f",
+                 TL("0 disables smoothing. Higher values reduce jitter but add latency.",
+                    "0 desliga a suavizacao. Valores altos reduzem tremor mas aumentam o atraso."));
+        FloatRow(TL("Gyro noise threshold (rad/s)", "Limiar de ruido (rad/s)"), s.gyro_noise, 0, 0.1f, "%.3f",
+                 TL("Ignore tiny sensor movements at rest. Increase if the aim drifts; decrease for finer movement.",
+                    "Ignora movimentos minimos em repouso. Aumente se a mira deslizar; reduza para movimentos mais finos."));
+        FloatRow(TL("Gyro anti-dead zone", "Anti-zona morta do giroscopio"), s.gyro_deadzone, 0, 0.5f, "%.3f",
+                 TL("Raise if slow gyro movements do not overcome the game's stick dead zone.",
+                    "Aumente se movimentos lentos nao ultrapassarem a zona morta do jogo."));
+        ImGui::EndDisabled();
+        ImGui::EndTable();
+    }
     // Mouse (src/runtime_pad.c): the camera settings apply at once. The buttons and the touchpad
     // mode are fixed unless TLG_KEY_MAP / TLG_MOUSE_PAD_* (or tlg.ini key_map) change them.
     ImGui::SeparatorText(TL("Mouse", "Mouse"));

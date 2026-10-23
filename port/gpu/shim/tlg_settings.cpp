@@ -6,6 +6,7 @@
 #include "tlg_view.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -137,6 +138,18 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.mouse_accel = Clamp(f, 0.0f, 2.0f);
     } else if (key == "mouse_deadzone") {
         v.mouse_deadzone = Clamp(f, 0.0f, 0.5f);
+    } else if (key == "gyro_aim") {
+        v.gyro_aim = i != 0;
+    } else if (key == "gyro_invert_y") {
+        v.gyro_invert_y = i != 0;
+    } else if (key == "gyro_sensitivity") {
+        v.gyro_sensitivity = std::isfinite(f) ? Clamp(f, 0.1f, 5.0f) : 2.5f;
+    } else if (key == "gyro_smoothing") {
+        v.gyro_smoothing = std::isfinite(f) ? Clamp(f, 0.0f, 0.2f) : 0.025f;
+    } else if (key == "gyro_noise") {
+        v.gyro_noise = std::isfinite(f) ? Clamp(f, 0.0f, 0.1f) : 0.01f;
+    } else if (key == "gyro_deadzone") {
+        v.gyro_deadzone = std::isfinite(f) ? Clamp(f, 0.0f, 0.5f) : 0.1f;
     } else if (key == "sensor_aim") {
         v.sensor_aim = std::clamp(i, 25, 200);
     } else if (key == "graffiti_guide_seen") {
@@ -259,6 +272,9 @@ void Load() {
         {"TLG_MOUSE_INVERT_Y", "mouse_invert_y"}, {"TLG_MOUSE_SMOOTHING", "mouse_smoothing"},
         {"TLG_MOUSE_ACCEL", "mouse_accel"},       {"TLG_MOUSE_DEADZONE", "mouse_deadzone"},
         {"TLG_RUMBLE", "rumble"},
+        {"TLG_GYRO_AIM", "gyro_aim"},             {"TLG_GYRO_INVERT_Y", "gyro_invert_y"},
+        {"TLG_GYRO_SENS", "gyro_sensitivity"},     {"TLG_GYRO_SMOOTHING", "gyro_smoothing"},
+        {"TLG_GYRO_NOISE", "gyro_noise"},          {"TLG_GYRO_DEADZONE", "gyro_deadzone"},
         {"TLG_LOD_SCALE", "lod_scale"},           {"TLG_LOD_BANDS", "lod_bands"},
         {"TLG_REGION_LOD", "region_lod"},         {"TLG_REGION_FADE", "region_fade"},
         {"TLG_NEAR_CLIP", "near_clip"},           {"TLG_FAR_CLIP", "far_clip"},
@@ -414,6 +430,11 @@ void Save() {
                  v.mouse_smoothing.load(), v.mouse_accel.load(), v.mouse_deadzone.load(),
                  int(v.rumble.load()), v.key_map.c_str());
     // Read by run.sh at start.
+    std::fprintf(file,
+                 "gyro_aim=%d\ngyro_sensitivity=%.3f\ngyro_invert_y=%d\ngyro_smoothing=%.3f\n"
+                 "gyro_noise=%.3f\ngyro_deadzone=%.3f\n",
+                 int(v.gyro_aim.load()), v.gyro_sensitivity.load(), int(v.gyro_invert_y.load()),
+                 v.gyro_smoothing.load(), v.gyro_noise.load(), v.gyro_deadzone.load());
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");
     std::fclose(file);

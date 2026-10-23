@@ -161,6 +161,9 @@ struct Values {
     std::string key_map;
     // Append experimental settings so established renderer field offsets stay stable.
     std::atomic<int> iss_native_ui_16_9{0};
+    // Opt-in real gyro -> right stick, only while L2 is held; independent of graffiti motion.
+    std::atomic<bool> gyro_aim{false}, gyro_invert_y{false};
+    std::atomic<float> gyro_sensitivity{2.5f}, gyro_smoothing{0.025f}, gyro_noise{0.01f}, gyro_deadzone{0.1f};
 };
 
 Values& Get();
