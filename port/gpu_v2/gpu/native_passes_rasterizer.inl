@@ -1219,7 +1219,19 @@ static np::DrawResult Record(np::Segment& s, void* regs_ptr, u64 key, const u32*
     VertexInputs<AmdGpu::Buffer> guest_buffers;
     pipeline->GetVertexInputs(attributes, bindings, divisors, guest_buffers,
                               regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
-    cmd.setVertexInputEXT(bindings, attributes);
+    // Without VK_EXT_vertex_input_dynamic_state (AMD's Windows driver on Polaris, RX 580) the
+    // pipeline bakes the vertex formats (its key) and only the strides are dynamic: the draw is
+    // recorded only when its formats are the baked ones, as the command processor would draw it.
+    const bool dynamic_vertex_input = g.instance->IsVertexInputDynamicState();
+    if (dynamic_vertex_input) {
+        cmd.setVertexInputEXT(bindings, attributes);
+    } else {
+        const auto& baked = pipeline->GetGraphicsKey().vertex_buffer_formats;
+        if (attributes.size() > baked.size()) return fail(MissPipeline);
+        for (const auto& attribute : attributes) {
+            if (baked[attribute.binding] != attribute.format) return fail(MissPipeline);
+        }
+    }
     if (!guest_buffers.empty()) {
         VertexInputs<vk::Buffer> handles;
         VertexInputs<vk::DeviceSize> offsets;
@@ -1232,7 +1244,14 @@ static np::DrawResult Record(np::Segment& s, void* regs_ptr, u64 key, const u32*
             handles.push_back(handle);
             offsets.push_back(offset);
         }
-        cmd.bindVertexBuffers(0, u32(handles.size()), handles.data(), offsets.data());
+        if (dynamic_vertex_input) {
+            cmd.bindVertexBuffers(0, u32(handles.size()), handles.data(), offsets.data());
+        } else {
+            VertexInputs<vk::DeviceSize> strides;
+            for (const auto& binding : bindings) strides.push_back(binding.stride);
+            cmd.bindVertexBuffers2(0, u32(handles.size()), handles.data(), offsets.data(), nullptr,
+                                   strides.data());
+        }
     }
     if (!d.autod) {
         const bool index16 = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16;
@@ -1504,6 +1523,10 @@ void Rasterizer::NativePassesSetup() {
     done = true;
     if (!np::Enabled() || !NativeMaterial::Enabled()) return;
     g.instance = &instance;
+    if (!instance.IsVertexInputDynamicState()) {
+        std::fprintf(stderr, "NATIVE_PASSES: no VK_EXT_vertex_input_dynamic_state, recording with the "
+                             "pipelines' baked vertex formats and dynamic strides\n");
+    }
     g.scheduler = &scheduler;
     g.buffer_cache = &buffer_cache;
     g.texture_cache = &texture_cache;
@@ -1550,7 +1573,7 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
         iss::command_trace::enabled || IsDumping() || host_markers_enabled ||
         guest_markers_enabled || GpuCrashDiag::Enabled() || EmulatorSettings.IsPatchShaders() ||
         occlusion.HasOpen() || buffer_cache.HasComputeQueue() ||
-        !instance.IsVertexInputDynamicState() || iss::hazard_probe::Enabled())
+        iss::hazard_probe::Enabled())
         return reject(RejectEnv);
     if (auto& m = Misses(); m.pending.load(std::memory_order_acquire)) {
         std::vector<std::pair<VAddr, u32>> ranges;

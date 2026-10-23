@@ -184,6 +184,14 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
     if (gpu_enabled) tlggpu_dump_guest_writes(info);
+    /* The top of the stack: after a call through a null or bad pointer, [rsp] is the caller. */
+    for (int slot=0; slot<8; ++slot) {
+        uintptr_t value=0;
+        SIZE_T got=0;
+        if (!ReadProcessMemory(GetCurrentProcess(),(void *)(uintptr_t)(c->Rsp+8*slot),&value,sizeof(value),&got) || got!=sizeof(value)) break;
+        describe_address(where,sizeof(where),value);
+        fprintf(stderr,"  [rsp+%02x] %016llx %s\n",slot*8,(unsigned long long)value,where);
+    }
     /* rbp chain (guest and host code keep frame pointers). */
     uintptr_t rbp=(uintptr_t)c->Rbp;
     for (int depth=0; depth<24 && rbp; ++depth) {
