@@ -11,7 +11,7 @@ static void move(MouseStick *s, const MouseStickParams *p, float speed, float se
 }
 
 int main(void) {
-    MouseStickParams p={1.0f,0.0f,0.0f,0.0f,0};
+    MouseStickParams p={1.0f,0.0f,0.0f,0.0f,0,1.0f};
     MouseStick s={0};
 
     /* Linear: half the full speed is half a deflection; full speed and more clamp to 1. */
@@ -102,6 +102,18 @@ int main(void) {
     s=(MouseStick){0};
     mouse_stick_update(&s,&p,MOUSE_STICK_FULL_SPEED*0.5f,0,1.0f);
     assert(fabsf(mouse_stick_axis(&s,&p,0)-0.5f)<0.01f);
+
+    /* Vertical: y alone is scaled (the game pitches slower than it yaws, #435); 0 (a zeroed
+     * TlgGpuInputSettings) counts as 1, and the factor is clamped to 0.25 .. 4. */
+    const float speed=MOUSE_STICK_FULL_SPEED*0.25f;
+    for (int c=0; c<4; ++c) {
+        const float vertical[]={2.0f,0.0f,100.0f,0.01f}, want_y[]={0.5f,0.25f,1.0f,0.0625f};
+        p=(MouseStickParams){1.0f,0.0f,0.0f,0.0f,0,vertical[c]};
+        s=(MouseStick){0};
+        for (float t=0; t<0.1f; t+=frame) mouse_stick_update(&s,&p,speed*frame,speed*frame,frame);
+        assert(fabsf(mouse_stick_axis(&s,&p,0)-0.25f)<0.01f);
+        assert(fabsf(mouse_stick_axis(&s,&p,1)-want_y[c])<0.01f);
+    }
     puts("PASS: mouse stick");
     return 0;
 }

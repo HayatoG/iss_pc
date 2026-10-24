@@ -226,6 +226,7 @@ extern "C" void tlggpu_input_settings(TlgGpuInputSettings* out) {
     out->mouse_enabled = s.mouse_enabled ? 1 : 0;
     out->invert_y = s.mouse_invert_y ? 1 : 0;
     out->sensitivity = s.mouse_sensitivity;
+    out->vertical = s.mouse_sensitivity_y;
     out->smoothing = s.mouse_smoothing;
     out->accel = s.mouse_accel;
     out->deadzone = s.mouse_deadzone;
