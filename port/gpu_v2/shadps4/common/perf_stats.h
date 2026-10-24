@@ -576,6 +576,13 @@ inline std::atomic<u64>& GuestFrameCounter() {
     return counter;
 }
 
+/// Benchmark window (tlggpu_bench_mark, gpu_host.cpp): bit 0 set inside it, the upper bits count
+/// its starts and ends. The frame CSV's bench column marks it.
+inline std::atomic<u32>& BenchWindowState() {
+    static std::atomic<u32> state{0};
+    return state;
+}
+
 inline std::atomic<u32>& GpuThreadCpu() {
     static std::atomic<u32> cpu{~0U};
     return cpu;
@@ -681,6 +688,7 @@ inline void CaptureFrameCsv(float draws_per_frame, float dispatches_per_frame) {
         std::array<u64, 18> previous{};
         std::array<u64, std::size(FrameCsvDetails)> detail_previous{};
         u64 last_flush{};
+        u32 bench_state{};
         Capture() {
             if (const char* path = std::getenv("SHADPS4_FRAME_CSV"); path && *path) {
                 file = std::fopen(path, "wb");
@@ -692,7 +700,7 @@ inline void CaptureFrameCsv(float draws_per_frame, float dispatches_per_frame) {
                     for (const auto& field : FrameCsvDetails) {
                         std::fprintf(file, ",%s", field.name);
                     }
-                    std::fputs(",gpu_profile_enabled\n", file);
+                    std::fputs(",gpu_profile_enabled,bench\n", file);
                 }
             }
         }
@@ -748,8 +756,14 @@ inline void CaptureFrameCsv(float draws_per_frame, float dispatches_per_frame) {
         capture.detail_previous[i] = total;
     }
     if (capture.last != 0) {
-        std::fprintf(capture.file, ",%u\n",
-                     GetTuning().gpu_profile.load(std::memory_order_relaxed) != 0 ? 1u : 0u);
+        // bench: 0 outside the benchmark window, 1 inside; bench_start on its first row and
+        // bench_end on the first row after it.
+        const u32 bench = BenchWindowState().load(std::memory_order_relaxed);
+        const char* mark = bench != capture.bench_state ? ((bench & 1) ? "bench_start" : "bench_end")
+                                                        : ((bench & 1) ? "1" : "0");
+        capture.bench_state = bench;
+        std::fprintf(capture.file, ",%u,%s\n",
+                     GetTuning().gpu_profile.load(std::memory_order_relaxed) != 0 ? 1u : 0u, mark);
     }
     // Bounded live visibility without flushing for each frame.
     if (now - capture.last_flush >= 1'000'000'000ULL) {

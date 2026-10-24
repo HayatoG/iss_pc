@@ -21,6 +21,7 @@ void tlggpu_mouse_pad_hud(int active, float x, float y, int touching, int clicki
 }
 uint64_t tlggpu_total_draws(void) { return 0; }
 void tlggpu_frame_counters(TlgGpuFrameCounters *out) { memset(out,0,sizeof(*out)); }
+void tlggpu_bench_mark(int phase) { (void)phase; }
 int tlggpu_overlay_captures_input(void) { return 0; }
 void tlggpu_overlay_notice(const char *text, float seconds) { (void)text; (void)seconds; }
 void tlggpu_graffiti_guide(int force) { (void)force; }

@@ -433,6 +433,11 @@ extern "C" uint64_t tlggpu_total_draws(void) {
     return TlgStats::draws.load(std::memory_order_relaxed);
 }
 
+extern "C" void tlggpu_bench_mark(int) {
+    // The benchmark window is timed by renderer v2 (gpu_v2/gpu/gpu_host.cpp); here the
+    // "Frame stats" lines (TLG_FRAME_STATS) cover the route.
+}
+
 extern "C" unsigned tlggpu_symbol_count(void) {
     return unsigned(g_symbols.size());
 }

@@ -23,11 +23,15 @@ public:
     using CsState = AmdGpu::ComputeProgram;
     bool is_using_fsr{};
     std::pair<u32,u32> game_resolution{},output_resolution{};
-    std::atomic<u64> draws{},dispatches{};
+    // total_draws: every recorded guest draw packet since start, never reset (one counter for
+    // every draw path: full, fast, native runs/segments/batches, indirect), so a reader on another
+    // thread (tlggpu_total_draws) never sees it go back; the flip takes its frame's share.
+    std::atomic<u64> total_draws{},dispatches{};
     std::atomic<u64> flip_count{};
-    u64 frame_draws{},frame_dispatches{};
-    void IncFlipFrameNum() {flip_count.fetch_add(1,std::memory_order_relaxed);frame_draws=draws.exchange(0,std::memory_order_relaxed);frame_dispatches=dispatches.exchange(0,std::memory_order_relaxed);}
-    void IncDrawCall() noexcept {draws.fetch_add(1,std::memory_order_relaxed);}
+    u64 frame_draws{},frame_dispatches{},flip_total_draws{};
+    void IncFlipFrameNum() {flip_count.fetch_add(1,std::memory_order_relaxed);const u64 total=total_draws.load(std::memory_order_relaxed);frame_draws=total-flip_total_draws;flip_total_draws=total;frame_dispatches=dispatches.exchange(0,std::memory_order_relaxed);}
+    void IncDrawCall() noexcept {total_draws.fetch_add(1,std::memory_order_relaxed);}
+    u64 TotalDraws() const {return total_draws.load(std::memory_order_relaxed);}
     void IncDispatch() noexcept {dispatches.fetch_add(1,std::memory_order_relaxed);}
     u64 GetDrawCallsAvg() const {return frame_draws;}
     u64 GetDispatchesAvg() const {return frame_dispatches;}
