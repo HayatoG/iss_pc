@@ -249,7 +249,7 @@ class Bench(unittest.TestCase):
         self.assertEqual([x["drift"] for x in d["drift"]["runs"]], [False] * 6)
         # compare.csv keeps its columns, the new ones at the end; the per-run block is its own file
         self.assertTrue((self.root / "t.csv").read_text().startswith(
-            "variant,runs,avg_fps,low1_fps,p99_ms,worst_ms,over33,over50,compiles,draws/frame,drift,unreliable\n"))
+            "variant,runs,avg_fps,low1_fps,p99_ms,worst_ms,over33,over50,compiles,draws/frame,drift,unreliable,failed_runs\n"))
         self.assertIn("draws_dev_pct", (self.root / "t_runs.csv").read_text())
         self.assertEqual(len(d["run_files"]), 6)
         self.assertEqual(d["kept_run_files"], d["run_files"])
@@ -400,7 +400,7 @@ class Bench(unittest.TestCase):
         out = self.bench_drift(files, exclude_drift=True, json=str(self.root / "t.json"))
         self.assertIn("B: all 1 runs excluded (drift), no comparison", out)
         d = json.loads((self.root / "t.json").read_text())
-        self.assertEqual(d["excluded_variants"], [{"variant": "B", "runs": 1}])
+        self.assertEqual(d["excluded_variants"], [{"variant": "B", "runs": 1, "reason": "drift"}])
         self.assertEqual(len(d["run_files"]), 5)
         self.assertEqual(len(d["kept_run_files"]), 4)
         # an unknown control is that error, not "every run of the control drifted"
@@ -424,6 +424,69 @@ class Bench(unittest.TestCase):
         self.assertNotIn("diffs of  are", out)
         # and the count-diff branch of fmt_cell marks an unreliable cell too
         self.assertEqual(ra.fmt_cell(dict(mean=2.0, sd=None, diff_abs=2.0, unreliable=True), "over33"), "2 (+2 !)")
+
+    # ---------------------------------------------------------------- failed runs
+    def bench_run(self, rel, label, avg, status="ok"):
+        self.write(f"{rel}/run.json", dict(status=status, variant=label))
+        return self.write(f"{rel}/bench.json", bench(label, avg))
+
+    def crashed_run(self, rel, label, status="exit 3, no bench result"):
+        """bench.ps1 run that crashed before its window: run.json, a game.log of loading frames only."""
+        self.write(f"{rel}/run.json", dict(status=status, variant=label))
+        return self.write(f"{rel}/game.log", "Frame stats: 240.0 FPS, worst frame 9.0 ms, x; "
+                                             "4 shader/pipeline compiles, 12.0 ms, 0 pending draws\n")
+
+    def test_failed_runs_left_out(self):
+        files = [self.bench_run("01-A", "A", 50.0), self.bench_run("02-B", "B", 55.0),
+                 self.crashed_run("03-B", "B"), self.bench_run("04-A", "A", 51.0),
+                 self.bench_run("05-B", "B", 56.0)]
+        out = self.bench_drift(files, csv=str(self.root / "c.csv"), json=str(self.root / "c.json"))
+        fps = next(line for line in out.splitlines() if line.startswith("B "))
+        self.assertIn("55.5 +-0.7", fps)                    # 240 FPS of the loading screens not counted
+        self.assertRegex(fps, r"^B\s+2\s")
+        self.assertIn("WARNING: 1 of 5 runs failed", out)
+        self.assertIn("03-B (B): status 'exit 3, no bench result'; no bench summary or window (read as log_stats)", out)
+        self.assertNotIn("read as log_stats", out.split("WARNING")[0])
+        d = json.loads((self.root / "c.json").read_text())
+        self.assertEqual([(f["run"], f["variant"]) for f in d["failed_runs"]], [("03-B", "B")])
+        self.assertEqual(len(d["run_files"]), 5)
+        self.assertEqual(len(d["kept_run_files"]), 4)
+        self.assertEqual(d["runs"]["B"], 2)
+        runs_csv = (self.root / "c_runs.csv").read_text().splitlines()
+        self.assertTrue(runs_csv[0].endswith(",excluded,failed"))
+        row = next(line for line in runs_csv if line.startswith("03-B"))
+        self.assertIn("failed,true,", row)
+        self.assertIn("status 'exit 3", row)
+        head, *rows = (self.root / "c.csv").read_text().splitlines()
+        self.assertTrue(head.endswith(",unreliable,failed_runs"))
+        self.assertEqual([r.rsplit(",", 1)[1] for r in rows], ["0", "1"])
+
+    def test_failed_status_with_bench_json_and_ok_log_stats(self):
+        # status not ok excludes a run even with a bench.json; a log with run.json status ok but
+        # no Bench line is failed too (no window), while a log outside a bench.ps1 folder is kept
+        files = [self.bench_run("01-A", "A", 50.0), self.bench_run("02-A", "A", 51.0),
+                 self.bench_run("03-A", "A", 90.0, status="timeout"), self.crashed_run("04-A", "A", status="ok"),
+                 self.write("loose/game.log", "Frame stats: 60.0 FPS, worst frame 20.0 ms, x; "
+                                              "0 shader/pipeline compiles, 0.0 ms, 0 pending draws\n")]
+        out = self.bench_drift(files, json=str(self.root / "c.json"))
+        d = json.loads((self.root / "c.json").read_text())
+        self.assertEqual({f["run"]: f["reason"] for f in d["failed_runs"]},
+                         {"03-A": "status 'timeout'",
+                          "04-A": "no bench summary or window (read as log_stats)"})
+        self.assertEqual(d["runs"], {"A": 2, "loose": 1})
+        self.assertIn("loose/game.log: no bench summary, read as log_stats", out.replace("\\", "/"))
+
+    def test_every_run_of_a_variant_or_the_control_failed(self):
+        files = [self.bench_run("01-A", "A", 50.0), self.crashed_run("02-B", "B"), self.bench_run("03-A", "A", 51.0)]
+        out = self.bench_drift(files, json=str(self.root / "c.json"))
+        self.assertIn("B: all 1 runs excluded (failed), no comparison", out)
+        d = json.loads((self.root / "c.json").read_text())
+        self.assertEqual(d["excluded_variants"], [{"variant": "B", "runs": 1, "reason": "failed"}])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+            self.bench_drift(files, control="B")
+        self.assertIn("every run of the control 'B' failed", err.getvalue())
+        self.assertIn("02-B: status", err.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

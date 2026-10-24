@@ -38,6 +38,11 @@ get '!' (unreliable). --exclude-drift leaves those runs out of the table.
 Half the runs or more off = inconclusive (no flags); a variant off the control in
 every run but tight within itself changes the draw count itself (a note, no '!').
 The per-run check goes to <csv>_runs.csv and the JSON's 'drift'.
+Failed runs: a bench.ps1 run (a folder with run.json) whose status is not ok, or
+that has no bench summary or window (read from its whole log or CSV: loading
+screens, not the route), is left out of the table and the drift check: a
+WARNING with the reason, the JSON's 'failed_runs', the CSV's 'failed_runs' count
+and the 'failed' column of <csv>_runs.csv.
 """
 import argparse, csv, glob, json, math, os, re, statistics as st, sys
 
@@ -531,6 +536,25 @@ def load_bench(path, skip_ms=1000.0):
     return d
 
 
+def run_failure(d):
+    """Why a bench.ps1 run (a folder with run.json) failed, else None: its run.json status is not
+    'ok' (crash, timeout...), or it has no bench summary or window (no bench.json, no 'Bench:'
+    line, a CSV without its 'bench' column), so only the whole log or CSV could be read: loading
+    screens and menus, not the route. A file outside such a folder (a log of an older build,
+    passed by hand) keeps that fallback."""
+    meta = os.path.join(os.path.dirname(os.path.abspath(d["path"])), "run.json")
+    if not os.path.isfile(meta): return None
+    try:
+        with open(meta, encoding="utf-8-sig") as f: m = json.load(f)
+    except (OSError, ValueError) as e: return f"unreadable run.json ({e})"
+    why = []
+    status = m.get("status") if isinstance(m, dict) else None
+    if status is not None and status != "ok": why.append(f"status '{status}'")
+    if d.get("source") == "log_stats" or (d.get("source") == "frame_csv" and d.get("csv_window") != "bench"):
+        why.append(f"no bench summary or window (read as {d['source']})")
+    return "; ".join(why) or None
+
+
 def stats_of(values):
     v = [x for x in values if x is not None]
     if not v: return None, None, 0
@@ -629,13 +653,24 @@ def drift_column(g, check, runs):
 
 
 def cmd_bench(a):
-    runs = []
+    loaded = []
     for p in a.runs:
-        try: runs.append(draws_fingerprint(load_bench(p, a.skip_ms)))
+        try: loaded.append(draws_fingerprint(load_bench(p, a.skip_ms)))
         except (OSError, ValueError) as e: print(f"error: {e}", file=sys.stderr); sys.exit(2)
+    # a failed run (run_failure) measured no route: out of the drift check and the table
+    for x in loaded: x["failed"] = run_failure(x)
+    failed = [x for x in loaded if x["failed"]]
+    runs = [x for x in loaded if not x["failed"]]
+    for x in failed:
+        x["drift"] = x["draws_dev_pct"] = x["draws_off_pct"] = None
+        x["drift_state"] = "failed"
     drift_pct = getattr(a, "drift_pct", DRIFT_PCT)
     exclude = getattr(a, "exclude_drift", False)
-    control = a.control or (runs[0]["name"] if runs else None)
+    control = a.control or (loaded[0]["name"] if loaded else None)
+    if any(x["name"] == control for x in failed) and not any(x["name"] == control for x in runs):
+        print(f"error: every run of the control '{control}' failed: nothing to compare with", file=sys.stderr)
+        for x in failed: print(f"  {run_tag(x)}: {x['failed']}", file=sys.stderr)
+        sys.exit(2)
     # drift is judged against every run of the session, before any is left out
     check = check_drift(runs, drift_pct, control)
     med = check["median"]
@@ -647,8 +682,11 @@ def cmd_bench(a):
         sys.exit(2)
     try: t = bench_table(used, control, a.noise_k, all_runs=runs)
     except ValueError as e: print(f"error: {e}", file=sys.stderr); sys.exit(2)
-    gone = [g for g in dict.fromkeys(x["name"] for x in runs) if g not in t["groups"]]
-    t["excluded_variants"] = [dict(variant=g, runs=sum(1 for x in runs if x["name"] == g)) for g in gone]
+    gone = [g for g in dict.fromkeys(x["name"] for x in loaded) if g not in t["groups"]]
+    why = lambda g: ", ".join(w for w, ok in (("failed", any(x["name"] == g for x in failed)),
+                                              ("drift", any(x["name"] == g for x in runs))) if ok)
+    t["excluded_variants"] = [dict(variant=g, runs=sum(1 for x in loaded if x["name"] == g), reason=why(g))
+                              for g in gone]
     # new columns at the end: compare.csv keeps its earlier layout
     hdr = ["variant", "runs"] + [row["metric"] for row in t["rows"]] + ["draws/frame", "drift"]
     rows = [[g + (" (control)" if g == t["control"] else ""), str(t["runs"][g])]
@@ -661,9 +699,15 @@ def cmd_bench(a):
           + f"\ndraws/frame: mean of each run's Frame stats lines in the window; drift = runs more than "
           f"{drift_pct:g}% off the median of all runs ('?N': N runs unknown)."
           + (" '!' = unreliable: a drift run in this variant or the control." if t["unreliable"] else ""))
-    for g in gone:
-        print(f"{g}: all {sum(1 for x in runs if x['name'] == g)} runs excluded (drift), no comparison")
+    for v in t["excluded_variants"]:
+        print(f"{v['variant']}: all {v['runs']} runs excluded ({v['reason']}), no comparison")
     bar = "!" * 78
+    if failed:
+        left = ", ".join(f"{g} {t['runs'][g]}" for g in t["groups"])
+        print(f"\n{bar}\nWARNING: {len(failed)} of {len(loaded)} runs failed and are left out of the table "
+              f"and the drift check ({left} remain):")
+        for x in failed: print(f"  {run_tag(x)} ({x['name']}): {x['failed']}")
+        print(f"See run.json and game.log in each run's folder.\n{bar}")
     if drifted:
         print(f"\n{bar}\nWARNING: scene drift: {len(drifted)} of {len(runs)} runs rendered another scene "
               f"(mean draws/frame more than {drift_pct:g}% off the median of all runs, {med:.0f}):")
@@ -709,20 +753,21 @@ def cmd_bench(a):
                   + (" (whole file: no 'bench' column)" if x.get("source") == "frame_csv" else ""))
     if a.csv:
         with open(a.csv, "w", newline="") as f:
-            w = csv.writer(f); w.writerow(hdr + ["unreliable"])
-            w.writerows(rw + [str(g in t["unreliable"]).lower()] for rw, g in zip(rows, t["groups"]))
+            w = csv.writer(f); w.writerow(hdr + ["unreliable", "failed_runs"])
+            w.writerows(rw + [str(g in t["unreliable"]).lower(), sum(1 for x in failed if x["name"] == g)]
+                        for rw, g in zip(rows, t["groups"]))
         # one line per run, the drift check in machine-readable form: compare_runs.csv next to it
         base, ext = os.path.splitext(a.csv)
         runs_csv = f"{base}_runs{ext or '.csv'}"
         with open(runs_csv, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["run", "variant", "draws_mean", "draws_dev_pct", "draws_off_pct", "draws_samples",
-                        "drift", "drift_state", "excluded"])
-            for x in runs:
+                        "drift", "drift_state", "excluded", "failed"])
+            for x in loaded:
                 w.writerow([run_tag(x), x["name"], r(x["draws_mean"], 1), r(x["draws_dev_pct"]),
                             r(x["draws_off_pct"], 1), len(x["draws"] or []),
                             "unknown" if x["drift"] is None else str(x["drift"]).lower(), x["drift_state"],
-                            str(bool(exclude and x["drift"])).lower()])
+                            str(bool(x["failed"] or (exclude and x["drift"]))).lower(), x["failed"] or ""])
         print(f"written: {a.csv}, {runs_csv}")
     if a.json:
         drift = dict(drift_pct=drift_pct, median_draws=r(med, 1), min_runs=DRIFT_MIN_RUNS, state=check["state"],
@@ -732,10 +777,12 @@ def cmd_bench(a):
                                 draws=x["draws"], draws_mean=r(x["draws_mean"], 1),
                                 draws_dev_pct=r(x["draws_dev_pct"]), draws_off_pct=r(x["draws_off_pct"], 1),
                                 drift=x["drift"], drift_state=x["drift_state"],
-                                excluded=bool(exclude and x["drift"])) for x in runs])
+                                excluded=bool(x["failed"] or (exclude and x["drift"])), failed=x["failed"])
+                          for x in loaded])
         with open(a.json, "w") as f:
-            json.dump(dict(t, run_files=[x["path"] for x in runs], kept_run_files=[x["path"] for x in used],
-                           drift=drift), f, indent=2)
+            json.dump(dict(t, run_files=[x["path"] for x in loaded], kept_run_files=[x["path"] for x in used],
+                           failed_runs=[dict(run=run_tag(x), variant=x["name"], path=x["path"], reason=x["failed"])
+                                        for x in failed], drift=drift), f, indent=2)
         print(f"written: {a.json}")
 
 

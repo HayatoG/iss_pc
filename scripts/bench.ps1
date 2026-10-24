@@ -1407,11 +1407,16 @@ function Invoke-Compare([string]$sessionDir) {
     foreach ($d in Get-ChildItem -LiteralPath $sessionDir -Directory | Where-Object { $_.Name -match '^\d+-' } | Sort-Object Name) {
         $meta = Join-Path $d.FullName 'run.json'
         $variant = $d.Name -replace '^\d+-', ''
-        if (Test-Path -LiteralPath $meta) { $m = Read-Json $meta; if ($m.PSObject.Properties['variant']) { $variant = $m.variant } }
+        $status = 'ok'
+        if (Test-Path -LiteralPath $meta) {
+            $m = Read-Json $meta
+            if ($m.PSObject.Properties['variant']) { $variant = $m.variant }
+            if ($m.PSObject.Properties['status']) { $status = "$($m.status)" }
+        }
         $bj = Join-Path $d.FullName 'bench.json'
         $log = Join-Path $d.FullName 'game.log'
         $csv = Join-Path $d.FullName 'frames.csv'
-        if (Test-Path -LiteralPath $bj) { $runs.Add(@{ Variant = $variant; File = $bj; Data = (Read-Json $bj) }) }
+        if (Test-Path -LiteralPath $bj) { $runs.Add(@{ Variant = $variant; File = $bj; Data = (Read-Json $bj); Status = $status }) }
         elseif (Test-Path -LiteralPath $csv) { $runs.Add(@{ Variant = $variant; File = $csv; Data = $null }) }
         elseif (Test-Path -LiteralPath $log) { $runs.Add(@{ Variant = $variant; File = $log; Data = $null }) }
         else { $missing += $d.Name }
@@ -1453,7 +1458,9 @@ function Invoke-Compare([string]$sessionDir) {
     } else {
         if (Test-Path -LiteralPath $analyzer) { Note 'Python 3 not found: internal table (bench.json files only, no scene drift check).' }
         if ($ExcludeDrift) { Note 'note: -ExcludeDrift is ignored without Python (no drift check): every run is in the table' }
-        $withData = @($runs | Where-Object { $null -ne $_.Data })
+        # a failed run (run.json status not ok) is left out, as round_analyze.py does
+        foreach ($r in @($runs | Where-Object { $null -ne $_.Data -and $_.Status -ne 'ok' })) { Note "warning: $($r.File): run failed (status '$($r.Status)'), left out of the table" }
+        $withData = @($runs | Where-Object { $null -ne $_.Data -and $_.Status -eq 'ok' })
         if (-not @($withData | Where-Object { $_.Variant -eq $ctrl }).Count) { Fail "no bench.json for the control '$ctrl' (Python is needed to read logs / CSVs)" }
         Show-InternalTable $withData @($order | Where-Object { $v = $_; @($withData | Where-Object { $_.Variant -eq $v }).Count }) $ctrl
         foreach ($r in $withData) {

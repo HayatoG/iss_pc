@@ -227,6 +227,15 @@ standard deviation of 0 (identical control runs), there is no noise estimate and
 `compare.json` in the session. Without Python the script prints the same table itself from the
 `bench.json` files. A warning flags a measured run that still compiled shaders.
 
+**Failed runs.** A measured run whose `run.json` status is not `ok` (crash, timeout, exit code 3),
+or that has no bench summary or window (no `bench.json`, no `Bench:` line, so only its whole
+`game.log` could be read: loading screens at hundreds of FPS, not the route), is left out of the
+table and the drift check. A WARNING block lists each one with the reason; `compare.json` has
+`failed_runs` (run, variant, reason), `compare.csv` a `failed_runs` count per variant and
+`compare_runs.csv` a `failed` column. A variant whose runs all failed is listed as excluded, and
+if every control run failed `compare` stops. A game log passed to `round_analyze.py bench` by hand,
+outside a session folder (no `run.json`), is still read from its `Frame stats` lines.
+
 **Scene drift.** The replay is time-based pad input, so past ~20 s a run can diverge (the camera
 or the player ends up elsewhere) and render a lighter or heavier scene; its FPS then differs for
 reasons that have nothing to do with the variant. `compare` therefore fingerprints each run by
@@ -250,7 +259,7 @@ control's runs as tight) draws differently by itself (culling, LOD...): a note s
 `!`, since that is the change under test, but its FPS deltas are then not like-for-like.
 `compare.json` (`drift`: threshold, median, state, each run's series, mean, deviation, flag;
 `run_files` lists every input, `kept_run_files` those in the table; `excluded_variants`) and
-`compare.csv` (its earlier columns, then `draws/frame`, `drift`, `unreliable`) carry the same
+`compare.csv` (its earlier columns, then `draws/frame`, `drift`, `unreliable`, `failed_runs`) carry the same
 information, and `compare_runs.csv` has one line per run. Excluding
 is a stopgap (fewer runs, more noise). Frequent drift means the route is too long or too
 dependent on timing: re-record a shorter, simpler one (stand still or walk straight, fewer camera
