@@ -91,6 +91,16 @@ static uint8_t axis(int16_t v) {
     return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x);
 }
 static uint8_t trigger(int16_t v) { int x=v>>7; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
+/* Gain after the dead zone: neutral remains exactly neutral and the default is byte-identical.
+ * This reaches the existing stick limit earlier; it cannot exceed the game's maximum speed. */
+static uint8_t stick_look_axis(uint8_t value, float sensitivity) {
+    if (!isfinite(sensitivity) || sensitivity<=0) sensitivity=1;
+    if (sensitivity<0.25f) sensitivity=0.25f;
+    if (sensitivity>3.f) sensitivity=3.f;
+    if (value==128 || sensitivity==1.f) return value;
+    const int scaled=128+(int)lroundf(((float)value-128.f)*sensitivity);
+    return (uint8_t)(scaled<0 ? 0 : scaled>255 ? 255 : scaled);
+}
 static uint16_t touch_axis(float v, int max) {
     return (uint16_t)(v<=0.0f ? 0 : v>=1.0f ? max : (int)(v*max+0.5f));
 }
@@ -759,6 +769,15 @@ static void sample_host(PadData *d) {
         }
     }
     sample_motion(d,g,k);
+    /* Physical free-look only, before keyboard, mouse and gyro are added. Sensor mode owns
+     * the sticks for graffiti; L2 keeps the game's original aiming response. */
+    if (g && !(d->buttons & (BTN_L2|BTN_TOUCHPAD|CLICK_LEFT|CLICK_RIGHT)) &&
+        !d->touch_count && !motion.mode && !(k && (k[SDL_SCANCODE_T] || k[SDL_SCANCODE_G]))) {
+        TlgGpuInputSettings settings;
+        tlggpu_input_settings(&settings);
+        d->right_x=stick_look_axis(d->right_x,settings.stick_look_sensitivity);
+        d->right_y=stick_look_axis(d->right_y,settings.stick_look_sensitivity);
+    }
     /* The keyboard works with or without a gamepad: its buttons add to the pad's, and a stick
      * follows the keys only while one of them is held. */
     if (!k) return;

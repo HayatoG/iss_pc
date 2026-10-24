@@ -242,6 +242,7 @@ extern "C" void tlggpu_input_settings(TlgGpuInputSettings* out) {
     out->accel = s.mouse_accel;
     out->deadzone = s.mouse_deadzone;
     std::snprintf(out->key_map, sizeof(out->key_map), "%s", s.key_map.c_str());
+    out->stick_look_sensitivity = s.stick_look_sensitivity;
 }
 extern "C" void tlggpu_mouse_pad_hud(int active, float x, float y, int touching, int clicking) {
     TlgOverlay::SetMousePad(active != 0, x, y, touching != 0, clicking != 0);

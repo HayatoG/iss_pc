@@ -179,6 +179,10 @@ jobs:
           trap 'kill "$progress_pid" 2>/dev/null || true' EXIT
           # TLG_RENDERER_V2=1: renderer v2 too (port/gpu_v2, out/tlg-probe-v2.exe), shipped in the package.
           TLG_RENDERER_V2=1 TLG_LTO=ON bash build.sh
+      - name: Free-look input tests
+        run: |
+          cmake --build out/gpu --target stick-look-test
+          out/gpu/stick-look-test.exe
       - name: Package
         env:
           MSYS2_ROOT: ${{ runner.temp }}/msys64
