@@ -51,7 +51,8 @@ class ReleaseNotesTests(unittest.TestCase):
 - English (#12)
 <!-- /notes:en-US -->''')
         self.assertEqual(result.returncode, 0, result.stderr)
-        pt, en = result.stdout.split("## What's new")
+        # English first, then Portuguese (#517).
+        en, pt = result.stdout.split("## Novidades")
         self.assertNotIn('- English', pt)
         self.assertNotIn('- Português', en)
         self.assertIn('#12 (@reporter)', pt)
