@@ -9,6 +9,8 @@ import time
 import urllib.error
 import urllib.request
 
+from . import cacerts
+
 API_URL = 'https://api.github.com/repos/HayatoG/iss_pc/releases/latest'
 RELEASES_URL = 'https://github.com/HayatoG/iss_pc/releases/latest'
 RELEASE_PREFIX = 'https://github.com/HayatoG/iss_pc/releases/'
@@ -16,7 +18,7 @@ TIMEOUT = 10
 
 
 class UpdateError(Exception):
-    """kind: offline | timeout | limit | http | bad | none (the key suffix of the friendly message).
+    """kind: offline | tls | timeout | limit | http | bad | none (the key suffix of the friendly message).
     reset: for 'limit', when GitHub takes requests again (Unix time), None when it did not say."""
 
     def __init__(self, kind, detail='', reset=None):
@@ -149,7 +151,7 @@ def user_agent(version=''):
     return f'iss_pc-launcher/{version or "unknown"} (+https://github.com/HayatoG/iss_pc)'
 
 
-def fetch_latest(version='', opener=urllib.request.urlopen, url=API_URL, timeout=TIMEOUT, etag=''):
+def fetch_latest(version='', opener=None, url=API_URL, timeout=TIMEOUT, etag=''):
     """The one request the launcher makes: GET the latest release. Sends no data of the player,
     only the User-Agent that names the port. Returns {'tag','name','url','body','published','assets',
     'etag'} (assets: [{'name','url','size'}] of the files whose download URL is HTTPS on our own
@@ -160,6 +162,7 @@ def fetch_latest(version='', opener=urllib.request.urlopen, url=API_URL, timeout
     if etag:
         headers['If-None-Match'] = etag
     request = urllib.request.Request(url, headers=headers)
+    opener = opener or urllib.request.build_opener(cacerts.https_handler()).open
     try:
         with opener(request, timeout=timeout) as response:
             raw = response.read(2 * 1024 * 1024)
@@ -179,8 +182,12 @@ def fetch_latest(version='', opener=urllib.request.urlopen, url=API_URL, timeout
     except urllib.error.URLError as error:
         if isinstance(error.reason, (socket.timeout, TimeoutError)):
             raise UpdateError('timeout') from error
+        if cacerts.is_cert_error(error):
+            raise UpdateError('tls', str(error.reason)) from error
         raise UpdateError('offline', str(error.reason)) from error
     except OSError as error:
+        if cacerts.is_cert_error(error):
+            raise UpdateError('tls', str(error)) from error
         raise UpdateError('offline', str(error)) from error
     try:
         data = json.loads(raw.decode('utf-8'))
