@@ -19,7 +19,8 @@ static size_t handler_count, handler_capacity, calls_init, calls_atexit, calls_c
 static uint64_t capabilities;
 static _Atomic size_t guards_acquired, guards_released;
 static uint64_t stack_canary;
-static _Atomic size_t memory_calls;
+static _Atomic size_t memory_calls;   /* only counted with runtime_counters */
+int runtime_counters;
 /* Dynamic TLS of linked modules: module IDs 2..7 (1 is the eboot's static TLS). */
 #define TLS_MODULES 8
 static struct { const void *data; uint64_t filesz, memsz; } tls_modules[TLS_MODULES];
@@ -53,6 +54,9 @@ static ABI void *guest_tls_get_addr(const uint64_t *index) {
 
 void runtime_start(uint64_t flags) {
     capabilities = flags;
+    const char *counters = getenv("TLG_RUNTIME_COUNTERS");
+    runtime_counters = counters && counters[0] == '1';
+    if (runtime_counters) puts("Runtime: hot-path counters on (TLG_RUNTIME_COUNTERS)");
     if (!(flags & 1)) return;
 #ifdef _WIN32
     unsigned int halves[2];
@@ -84,7 +88,8 @@ void runtime_report(void) {
     runtime_pad_report();
     runtime_savedata_report();
     runtime_file_report();
-    printf("Runtime: memory operations=%zu\n", (size_t)memory_calls);
+    if (runtime_counters) printf("Runtime: memory operations=%zu\n", (size_t)memory_calls);
+    else puts("Runtime: memory operations=off (ISS_RUNTIME_COUNTERS=1 to count)");
     if (report_hook) report_hook();
 }
 void runtime_set_report_hook(void (*hook)(void)) { report_hook = hook; }
@@ -184,17 +189,17 @@ static size_t write_merge_min(void) {
  * tlggpu_cpu_write (no fault and no GPU wait with TLG_WRITE_MERGE=1); smaller ones and other
  * memory write normally. */
 static ABI void *guest_memset(void *dst, int value, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    if (runtime_counters) atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
     if (size >= write_merge_min() && tlggpu_cpu_write(dst, NULL, value, size)) return dst;
     return memset(dst, value, size);
 }
 static ABI void *guest_memcpy(void *dst, const void *src, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    if (runtime_counters) atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
     if (size >= write_merge_min() && tlggpu_cpu_write(dst, src, -1, size)) return dst;
     return memcpy(dst, src, size);
 }
 static ABI void *guest_memmove(void *dst, const void *src, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    if (runtime_counters) atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
     /* Same write merge as memcpy when the ranges cannot overlap; an overlapping move keeps
        memmove's semantics (the merge path copies forward). */
     if (size >= write_merge_min()) {
@@ -205,7 +210,8 @@ static ABI void *guest_memmove(void *dst, const void *src, size_t size) {
     return memmove(dst, src, size);
 }
 static ABI int guest_memcmp(const void *a, const void *b, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed); return memcmp(a, b, size);
+    if (runtime_counters) atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    return memcmp(a, b, size);
 }
 static ABI size_t guest_strlen(const char *text) { return strlen(text); }
 static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {

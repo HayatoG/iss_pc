@@ -27,6 +27,9 @@ typedef struct {
     /* Set before isa_rewrite_apply: a JMP_RELOCATE stub runs its relocated instruction 128 bytes
      * below the guest rsp when that instruction can fault (IsaSite.mem_flags & ISA_MEM_RELOCATED_FAULTABLE). */
     int protect_red_zone;
+    /* Set before isa_rewrite_apply: the stubs do not count hits (no shared hits[] writes from
+     * every thread); the report says "off". 0, the zero-initialized default, counts. */
+    int no_hits;
 } IsaTable;
 enum { ISA_MEM_RELOCATED_FAULTABLE = 2 };
 typedef struct { uint32_t groups, protected_instructions, short_relays, skipped; } IsaRedZoneReport;
@@ -61,7 +64,8 @@ IsaRedZoneReport isa_red_zone_apply(IsaTable *t, unsigned char *image, unsigned 
 /* 1 and *site (image offset of the protected instruction) when rip is inside an applied red-zone stub. */
 int isa_red_zone_site_of_stub(const IsaTable *t, uintptr_t rip, uint64_t *site);
 /* "ISA: most executed sites:" then up to 10 lines "  0x<offset> <mnemonic> <hits>" (hits > 0 only),
- * descending hits, ties by ascending offset. */
+ * descending hits, ties by ascending offset; " none" when no site was hit, " off (...)" when
+ * no_hits is set. */
 void isa_rewrite_report(const IsaTable *t, FILE *out);
 /* "movbe", "lzcnt", "tzcnt", "andn", "bextr", "blsi", "blsmsk", "blsr", "vcvtph2ps", "vcvtps2ph", "extrq",
  * "insertq", "movntss", "movntsd"; "?" otherwise. */

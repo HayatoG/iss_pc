@@ -1309,6 +1309,7 @@ int main(int argc, char **argv) {
 #endif
     if (isa_table) {
         isa_table->protect_red_zone = red_zone_on;
+        isa_table->no_hits = !runtime_counters;   /* TLG_RUNTIME_COUNTERS, read by runtime_start */
         IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
         if (r.unsupported_needed) {
             printf("STOP: this CPU lacks %s and %u sites use encodings the rewrite cannot emulate\n", missing, r.unsupported_needed);

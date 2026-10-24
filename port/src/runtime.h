@@ -27,6 +27,10 @@ void runtime_restart(void);
 #define ABI __attribute__((sysv_abi))
 typedef void (ABI *GuestCallback)(void);
 void runtime_start(uint64_t capabilities);
+/* Hot-path counters (ISS_RUNTIME_COUNTERS=1 -> TLG_RUNTIME_COUNTERS, default 0): the libc memory
+ * calls, the mutex and condition variable counts and the ISA stub hits. Off, the exit report says
+ * "off" for them. Set once by runtime_start, before the guest threads start. */
+extern int runtime_counters;
 uintptr_t runtime_resolve(const char *name, int is_data);
 void runtime_report(void);
 /* Called at the end of runtime_report (the loader adds its own counters). */

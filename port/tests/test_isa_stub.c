@@ -136,6 +136,56 @@ static void test_relocated_site(void) {
     assert(buffer == 0x44332211 && result == 0x11223344);
 }
 
+static int stub_counts_hits(const unsigned char *stub) {
+    static const uint8_t inc_rax[] = {0x48, 0xff, 0x00};   /* inc qword [rax] */
+    for (size_t i = 0; i + sizeof inc_rax <= ISA_STUB_BYTES; i++)
+        if (memcmp(stub + i, inc_rax, sizeof inc_rax) == 0) return 1;
+    return 0;
+}
+
+/* no_hits (ISS_RUNTIME_COUNTERS off): the stubs leave out the hit count and still run the sites;
+ * the report says "off". With counting on and no hits, it says "none". */
+static void test_no_hits_stub(void) {
+    reset_region();
+    IsaTable *t = snippet_table();
+    isa_rewrite_apply(t, image, stubs, 0xffffffffu);
+    assert(stub_counts_hits(stubs) && stub_counts_hits(stubs + ISA_STUB_BYTES));
+    reset_region();
+    t = snippet_table();
+    t->no_hits = 1;
+    IsaReport r = isa_rewrite_apply(t, image, stubs, 0xffffffffu);
+    assert(r.rewritten == 5 && r.jmp == 3 && r.relocated == 1 && r.int3 == 1 && r.skipped == 0);
+    assert(!stub_counts_hits(stubs) && !stub_counts_hits(stubs + ISA_STUB_BYTES));
+    Snippet s1 = (Snippet)(void *)(image + S1);
+    static const uint32_t inputs[] = {0, 1, 0xf0, 0x80000000};
+    for (size_t i = 0; i < sizeof inputs / sizeof inputs[0]; i++) {
+        uint64_t out[2] = {0, 0};
+        assert(s1(inputs[i], out) == _blsr_u32(inputs[i]));
+        assert(((out[0] ^ native_blsr_flags(inputs[i])) & isa_defined_flags(ISA_BLSR)) == 0);
+        assert(out[1] == 0xffffffffdeadbeefull);
+    }
+    uint32_t buffer = 0;
+    Snippet s2 = (Snippet)(void *)(image + S2);
+    assert(s2((uint64_t)(uintptr_t)&buffer, (uint64_t *)(uintptr_t)0x11223344) == 0x11223344);
+    assert(buffer == 0x44332211);
+    Snippet s3 = (Snippet)(void *)(image + S3);
+    assert(s3(0xf0, NULL) == 0xc0);   /* two adjacent stubs */
+    for (uint32_t i = 0; i < t->count; i++) assert(t->hits[i] == 0);
+    char text[128];
+    for (int counting = 0; counting < 2; counting++) {
+        t->no_hits = !counting;
+        FILE *f = tmpfile();
+        assert(f != NULL);
+        isa_rewrite_report(t, f);
+        rewind(f);
+        size_t n = fread(text, 1, sizeof text - 1, f);
+        text[n] = 0;
+        fclose(f);
+        assert(strcmp(text, counting ? "ISA: most executed sites: none\n"
+                                     : "ISA: most executed sites: off (ISS_RUNTIME_COUNTERS=1 to count)\n") == 0);
+    }
+}
+
 /* Red-zone protection on: a relocated instruction that can fault (mem_flags bit 1) runs between
  * lea rsp,[rsp-0x80] and lea rsp,[rsp+0x80]; without the bit, or with protection off, it does not. */
 static void test_relocated_fault_steps_over_red_zone(void) {
@@ -458,6 +508,7 @@ int main(int argc, char **argv) {
     memcpy(pristine + ANDN_AT, ANDN_CODE, sizeof ANDN_CODE);
     test_jmp_site();
     test_relocated_site();
+    test_no_hits_stub();
     test_adjacent_sites();
     test_relocated_fault_steps_over_red_zone();
     test_xmm_preserved();
