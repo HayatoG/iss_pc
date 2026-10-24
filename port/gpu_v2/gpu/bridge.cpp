@@ -50,6 +50,7 @@ namespace iss { extern std::atomic<unsigned> g_preload_entries, g_preload_total;
 #include <boost/asio/executor_work_guard.hpp>
 #include <xxhash.h>
 #include "common/elf_info.h"
+#include "common/memory_patcher.h"
 #include "common/thread.h"
 #include "common/path_util.h"
 #include "common/perf_stats.h"
@@ -388,6 +389,9 @@ extern "C" void IssPreciseSleepUs(unsigned us){
 // loaded and relocated, before the guest threads start.
 extern "C" void iss_gpu_install_image(uint64_t image_base){
     host.image_base=image_base;
+    // The eboot's base for the renderer's guest-code lookups: relaxed readback sites
+    // (BufferCache::IsRelaxedSite) and the fault-burst attribution (page_manager.cpp).
+    MemoryPatcher::g_eboot_address=image_base;
     // The executing image (as native/engine_draw.cpp patches it), not a backing view.
     if(iss::native_shadow::Enabled())
         iss::native_shadow::Install(host.image_base,reinterpret_cast<const unsigned char*>(host.image_base+0x43D590));
