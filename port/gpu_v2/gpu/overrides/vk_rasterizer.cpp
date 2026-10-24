@@ -1351,11 +1351,8 @@ void Rasterizer::BindPipelineLazy(Scheduler& on, vk::PipelineBindPoint bind_poin
     });
 }
 
-// Linux host (gpu_host.cpp): draws recorded so far, for the scripted routes' gameplay check.
-std::atomic<u64> g_iss_total_draws{0};
 std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
                              std::span<const u32> following_commands, std::size_t native_packet_budget) {
-    g_iss_total_draws.fetch_add(1, std::memory_order_relaxed);
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::Draw};
     ObserveNativeVisualDraw();
     if (g_draw_cycles.enabled) g_draw_cycles.Mark(13);

@@ -22,6 +22,13 @@
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
+// gpu_host.cpp: the counters of tlggpu_frame_counters (as port/gpu's driver counts them), and
+// the per-flip "Frame stats" lines and benchmark window.
+namespace IssFrames {
+extern std::atomic<u64> submitted, shown, presented, vblanks;
+void OnFlip(u32 vblank_hz);
+} // namespace IssFrames
+
 namespace Libraries::VideoOut {
 
 namespace {
@@ -259,7 +266,10 @@ void VideoOutDriver::Flip(const Request& req, u64 vblank_count) {
     presenter->SetHDR(req.port->is_hdr);
 
     // Present the frame.
+    IssFrames::shown.fetch_add(1, std::memory_order_relaxed);
     presenter->Present(req.frame);
+    IssFrames::presented.fetch_add(1, std::memory_order_relaxed);
+    IssFrames::OnFlip(EmulatorSettings.GetVblankFrequency());
     if (iss::timeline::enabled) {
         iss::timeline::Emit("vo_present_return", req.trace_id, vblank_count,
                             frame_address, frame_ready_tick,
@@ -349,6 +359,7 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
         if (is_eop) {
             ++port->flip_status.gc_queue_num;
         }
+        IssFrames::submitted.fetch_add(1, std::memory_order_relaxed);
         ++port->flip_status.flip_pending_num; // integral GPU and CPU pending flips counter
         port->flip_status.submit_tsc = Libraries::Kernel::sceKernelReadTsc();
         trace_id = next_trace_id.fetch_add(1, std::memory_order_relaxed);
@@ -534,6 +545,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
             // Update vblank status
             vblank_status.count++;
+            IssFrames::vblanks.fetch_add(1, std::memory_order_relaxed);
             vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
             vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
             main_port.vblank_cv.notify_all();

@@ -73,6 +73,8 @@ namespace Vulkan{class Presenter;}
 extern std::unique_ptr<Vulkan::Presenter> presenter; // gnmdriver.cpp
 // The process ends (window closed, ISS_STOP_FILE): the host's exit report first (gpu_host.cpp).
 [[noreturn]] void IssHostExit();
+// A benchmark window ended with ISS_BENCH_EXIT=1 (gpu_host.cpp, any thread): stops as ISS_STOP_FILE.
+bool IssHostStopRequested();
 extern "C" void iss_gpu_install_image(uint64_t image_base);
 
 Frontend::WindowSDL *g_window=nullptr;
@@ -610,6 +612,7 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
             for(;;){
                 bool stop=!g_window->PollEvents();auto now=std::chrono::steady_clock::now();
                 if(stop_path&&now-last_stop_check>std::chrono::milliseconds(100)){std::error_code ec;stop|=std::filesystem::exists(stop_path,ec);last_stop_check=now;}
+                stop|=IssHostStopRequested();
                 if(stop){
                     if(renderer&&checkpoints)renderer->GetPipelineCache().CheckpointDriverCache();
                     // Our atomic checkpoint replaces the old destructor-only snapshot.
