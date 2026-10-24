@@ -219,8 +219,10 @@ calling shell is restored afterwards, also after Ctrl+C.
 
 **compare.** For the newest session (or `-Session <name|folder>`) it runs
 `python -I scripts\round_analyze.py bench` on the runs and prints, per variant, the mean and
-sample standard deviation of `avg_fps`, `low1_fps`, `p99_ms`, `worst_ms`, `over33`, `over50` and
-`compiles`, and the difference from the control in percent. `~` marks a difference within twice
+sample standard deviation of `avg_fps`, `low1_fps`, `p99_ms`, `worst_ms`, `over33`, `over50`,
+`compiles` and `cpu_ms/f`, and the difference from the control in percent. `cpu_ms/f` (last
+column, lower is better) is the process's CPU time (user + kernel, all threads) per frame of the
+window: on a GPU-bound machine a CPU-side change does not move the FPS, but it shows here. `~` marks a difference within twice
 the control's standard deviation (`-NoiseK`): probably noise. With a single control run, or a
 standard deviation of 0 (identical control runs), there is no noise estimate and no `~`.
 `-Detail` adds the per-run `compare` table. The table is also written to `compare.csv` and
@@ -259,7 +261,8 @@ control's runs as tight) draws differently by itself (culling, LOD...): a note s
 `!`, since that is the change under test, but its FPS deltas are then not like-for-like.
 `compare.json` (`drift`: threshold, median, state, each run's series, mean, deviation, flag;
 `run_files` lists every input, `kept_run_files` those in the table; `excluded_variants`) and
-`compare.csv` (its earlier columns, then `draws/frame`, `drift`, `unreliable`, `failed_runs`) carry the same
+`compare.csv` (its earlier columns, then `draws/frame`, `drift`, `unreliable`, `failed_runs`,
+`cpu_ms/f`; `-` for runs of a build without it) carry the same
 information, and `compare_runs.csv` has one line per run. Excluding
 is a stopgap (fewer runs, more noise). Frequent drift means the route is too long or too
 dependent on timing: re-record a shorter, simpler one (stand still or walk straight, fewer camera
@@ -320,7 +323,7 @@ Variables of the route and the summary (the game copies `ISS_X` to `TLG_X` at st
 | `ISS_PAD_REPLAY_AUTO=1` | Taps Cross every 2 s until gameplay is detected, then replays the route (wall-clock timed). |
 | `ISS_PAD_FILE=<txt>` | Manual alternative: held button names, stick values, or `replay`. |
 | `ISS_FRAME_STATS=1` | `Frame stats` / `Frame pacing` log lines every 5 s (the launcher's default). |
-| `ISS_BENCH_JSON=<path>` | When the replay ends, writes `frames, seconds, avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles, label`. The log always gets `Bench: frames=... label=...`. |
+| `ISS_BENCH_JSON=<path>` | When the replay ends, writes `frames, seconds, avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles, cpu_ms_per_frame, cpu_s, cpu_util, label`. The log always gets `Bench: frames=... label=...`. `cpu_s` is the process CPU time (user + kernel, all threads; `GetProcessTimes`, Linux `CLOCK_PROCESS_CPUTIME_ID`) over the counted window, `cpu_ms_per_frame` = `cpu_s` per frame, `cpu_util` = `cpu_s` / `seconds` (CPU cores busy on average). |
 | `ISS_BENCH_LABEL=<text>` | `label` of the summary (`bench.ps1`: the variant name). |
 | `ISS_BENCH_SKIP_MS=<ms>` | Start of the replay window left out of the summary (default 1000; `bench.ps1 -SkipMs`). |
 | `ISS_BENCH_EXIT=1` | The game exits cleanly after the summary. |

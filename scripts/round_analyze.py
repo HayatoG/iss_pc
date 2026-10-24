@@ -22,8 +22,10 @@ fica dentro do ruido. Aceita tambem o JSON do benchmark (ISS_BENCH_JSON).
         [--drift-pct 5] [--exclude-drift]
 
 bench (automated benchmark, scripts/bench.ps1): one row per variant, mean +-
-sample stdev of avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles
-and the % diff vs the control variant (the first one, or --control). A RUN is
+sample stdev of avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles,
+cpu_ms/f (the process's CPU time, all threads, per frame of the window: lower is
+better; the last column: a game-side cost the FPS of a GPU-bound run hides) and
+the % diff vs the control variant (the first one, or --control). A RUN is
 a bench JSON (ISS_BENCH_JSON), a summary.json of 'summarize', a game log (its
 last 'Bench:' line, else its Frame stats/pacing lines) or a SHADPS4_FRAME_CSV
 file (only its benchmark window when it has the 'bench' column). Runs are
@@ -269,11 +271,14 @@ def load_run(p):
 # ------------------------------------------------------------------ bench (scripts/bench.ps1)
 # The game's summary when a TLG_PAD_REPLAY route ends: the 'Bench:' log line and ISS_BENCH_JSON.
 BENCH_KEYS = ("frames", "seconds", "avg_fps", "low1_fps", "p99_ms", "worst_ms",
-              "over33", "over50", "compiles")
+              "over33", "over50", "compiles", "cpu_ms_per_frame", "cpu_s", "cpu_util")
 BENCH_INT = {"frames", "over33", "over50", "compiles"}
 # metric, higher is better
 BENCH_CMP = [("avg_fps", True), ("low1_fps", True), ("p99_ms", False), ("worst_ms", False),
              ("over33", False), ("over50", False), ("compiles", False)]
+# compared like BENCH_CMP, but shown after the drift columns (and at the end of compare.csv) so the
+# earlier columns keep their positions: metric -> (column, higher is better, decimals)
+BENCH_EXTRA = {"cpu_ms_per_frame": ("cpu_ms/f", False, 2)}
 RE_BENCH = re.compile(r"Bench: (.*?)(?:\s+label=(.*?))?\s*$")
 
 
@@ -587,7 +592,7 @@ def bench_table(runs, control=None, noise_k=2.0, all_runs=None):
                         unknown=sum(1 for x in (all_runs or runs) if x["name"] == g and x.get("draws_mean") is None),
                         total=sum(1 for x in (all_runs or runs) if x["name"] == g))
     out["draws"] = draws
-    for key, better in BENCH_CMP:
+    for key, better in BENCH_CMP + [(k, v[1]) for k, v in BENCH_EXTRA.items()]:
         cells = {}
         for g in groups:
             m, sd, n = stats_of([x.get(key) for x in runs if x["name"] == g])
@@ -605,14 +610,16 @@ def bench_table(runs, control=None, noise_k=2.0, all_runs=None):
             v["noise"] = bool(d is not None and noise and abs(d) <= noise_k * noise)
             v["unreliable"] = g in unreliable
             v["better"] = None if (d is None or d == 0 or v["noise"] or v["unreliable"]) else ((d > 0) == better)
-        out["rows"].append(dict(metric=key, higher_is_better=better, noise_pct=noise, groups=cells))
+        out["rows"].append(dict(metric=key, higher_is_better=better, noise_pct=noise, groups=cells,
+                                extra=key in BENCH_EXTRA))
     return out
 
 
 def fmt_cell(c, key):
     if c["mean"] is None: return "-"
     # counts: whole numbers stay whole; a mean between two counts keeps one decimal
-    nd = 0 if key in BENCH_INT and float(c["mean"]).is_integer() else 1
+    nd = (BENCH_EXTRA[key][2] if key in BENCH_EXTRA else
+          0 if key in BENCH_INT and float(c["mean"]).is_integer() else 1)
     s = f"{c['mean']:.{nd}f}"
     if c["sd"] is not None: s += f" +-{c['sd']:.{max(nd, 1)}f}"
     if c.get("diff_pct") is not None:
@@ -688,14 +695,23 @@ def cmd_bench(a):
     t["excluded_variants"] = [dict(variant=g, runs=sum(1 for x in loaded if x["name"] == g), reason=why(g))
                               for g in gone]
     # new columns at the end: compare.csv keeps its earlier layout
-    hdr = ["variant", "runs"] + [row["metric"] for row in t["rows"]] + ["draws/frame", "drift"]
+    main = [row for row in t["rows"] if not row["extra"]]
+    extra = {row["metric"]: row for row in t["rows"] if row["extra"]}
+    hdr = ["variant", "runs"] + [row["metric"] for row in main] + ["draws/frame", "drift"]
     rows = [[g + (" (control)" if g == t["control"] else ""), str(t["runs"][g])]
-            + [fmt_cell(row["groups"][g], row["metric"]) for row in t["rows"]]
+            + [fmt_cell(row["groups"][g], row["metric"]) for row in main]
             + [fmt_draws(t["draws"][g]), drift_column(g, check, runs)] for g in t["groups"]]
-    print_table(hdr, rows)
+    # the extra metrics: on the table when a run has them; always at the end of compare.csv
+    extra_hdr = [col for col, _, _ in BENCH_EXTRA.values()]
+    extra_cells = {g: [fmt_cell(extra[k]["groups"][g], k) if k in extra else "-" for k in BENCH_EXTRA]
+                   for g in t["groups"]}
+    shown = [i for i, k in enumerate(BENCH_EXTRA) if k in extra]
+    print_table(hdr + [extra_hdr[i] for i in shown],
+                [rw + [extra_cells[g][i] for i in shown] for rw, g in zip(rows, t["groups"])])
     print(f"\nmean +-stdev per variant; % = diff vs '{t['control']}'; '~' = within {a.noise_k:g}x the "
           "control's stdev when above 0 (likely noise)."
           + (" One control run only: no noise estimate." if t["runs"][t["control"]] < 2 else "")
+          + (" cpu_ms/f: process CPU ms per frame (lower is better)." if extra else "")
           + f"\ndraws/frame: mean of each run's Frame stats lines in the window; drift = runs more than "
           f"{drift_pct:g}% off the median of all runs ('?N': N runs unknown)."
           + (" '!' = unreliable: a drift run in this variant or the control." if t["unreliable"] else ""))
@@ -753,9 +769,9 @@ def cmd_bench(a):
                   + (" (whole file: no 'bench' column)" if x.get("source") == "frame_csv" else ""))
     if a.csv:
         with open(a.csv, "w", newline="") as f:
-            w = csv.writer(f); w.writerow(hdr + ["unreliable", "failed_runs"])
+            w = csv.writer(f); w.writerow(hdr + ["unreliable", "failed_runs"] + extra_hdr)
             w.writerows(rw + [str(g in t["unreliable"]).lower(), sum(1 for x in failed if x["name"] == g)]
-                        for rw, g in zip(rows, t["groups"]))
+                        + extra_cells[g] for rw, g in zip(rows, t["groups"]))
         # one line per run, the drift check in machine-readable form: compare_runs.csv next to it
         base, ext = os.path.splitext(a.csv)
         runs_csv = f"{base}_runs{ext or '.csv'}"
