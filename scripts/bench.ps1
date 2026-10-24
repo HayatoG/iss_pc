@@ -36,7 +36,8 @@ Layout of -BenchDir (default %USERPROFILE%\iss-bench):
   cache\<variant>\             the variant's own caches (seed.json: seeded from where, when)
   cache\_record\               the recording's own caches
   cache\_shared\               -SharePlayerCache: the caches the player's folder does not have
-  runs\<session>\variants.json the variants of the session, control first
+  runs\<session>\variants.json the variants of the session, control first, and 'build': the git
+                               commit/branch/dirty state of this tree and the probe exe (time, SHA256)
   runs\<session>\NN-<variant>\ bench.json, game.log, launcher-*.txt, env.txt, run.json
   bench.lock                   held while record/run is active (one session per bench folder)
 
@@ -58,6 +59,11 @@ param(
     # The player's data folder the save is copied from (record) and the caches are seeded from.
     # Default: the launcher's rules (ISS_USER_DIR, %APPDATA%\inFAMOUS-PC\launcher.json, <exe>\user).
     [string]$UserDir,
+    # The game folder (ISS_GAME_DIR for every run). Default: ISS_GAME_DIR, else the launcher's settings.
+    [string]$GameDir,
+    # Source tree (port\launcher\infamous_run.py): the MSYS2 folder with the probe's DLLs, put in
+    # front of PATH for this process when SDL3.dll is not on PATH yet.
+    [string]$MsysBin = 'C:\msys64\clang64\bin',
     [int]$Seconds = 90,
     [int]$Rounds = 3,
     # Variant name -> @{ VAR = 'value' }; '' or $null unsets VAR. Keys 'ini:<key>' set tlg.ini keys.
@@ -131,6 +137,8 @@ Usage: scripts\bench.ps1 <record|run|compare> [options]   (Get-Help scripts\benc
   compare [-Session <name|folder>] [-Control <variant>] [-Detail] [-Python <exe>] [-NoiseK 2]
   caches  (record/run) [-ResetBenchCache] (delete and seed again the bench's own copies)
           [-SharePlayerCache] (use the player's real caches; refuses profile-changing variants)
+  source  (record/run with port\launcher\infamous_run.py) [-GameDir <folder with eboot.bin>]
+          [-MsysBin C:\msys64\clang64\bin] (added to PATH when SDL3.dll is not on it)
   common  [-BenchDir %USERPROFILE%\iss-bench] [-Ini @{ key='value' }] [-DryRun]
           (-Ini is merged over vsync=0 fps_limit=0; '' drops a key)
   exit    0 ok, 1 error, 2 usage, 3 a measured run did not end cleanly
@@ -270,6 +278,101 @@ function Resolve-SourceUserDir($launcher) {
 }
 
 function Get-LauncherSettingsPath { Join-Path $env:APPDATA 'infamous-launcher\settings.json' }
+
+# PATH and ISS_GAME_DIR as they were before Initialize-LaunchEnv (restored at the very end: a
+# script run from a prompt shares that prompt's environment). Not part of Save-Env/Restore-Env,
+# which reset to this baseline before every run.
+$script:LaunchEnvSaved = $null
+function Restore-LaunchEnv {
+    if (-not $script:LaunchEnvSaved) { return }
+    foreach ($k in @($script:LaunchEnvSaved.Keys)) { [Environment]::SetEnvironmentVariable($k, $script:LaunchEnvSaved[$k], 'Process') }
+    $script:LaunchEnvSaved = $null
+}
+
+# The game folder and (source tree) the probe's DLLs, so a run starts without any manual setup:
+# -GameDir, else ISS_GAME_DIR, else the launcher's settings game_dir, else <repo>\game\CUSA00223.
+function Initialize-LaunchEnv($launcher) {
+    $script:LaunchEnvSaved = @{ PATH = $env:PATH; ISS_GAME_DIR = $env:ISS_GAME_DIR }
+    $game = $GameDir; $from = '-GameDir'
+    if (-not $game -and $env:ISS_GAME_DIR) { $game = $env:ISS_GAME_DIR; $from = 'ISS_GAME_DIR' }
+    if (-not $game) {
+        $settings = Get-LauncherSettingsPath
+        if (Test-Path -LiteralPath $settings) {
+            try { $game = "$((Read-Json $settings).game_dir)"; $from = $settings } catch { }
+        }
+    }
+    if (-not $game -and $launcher.Kind -eq 'py') {
+        $tree = Join-Path (Split-Path $launcher.PortDir -Parent) 'game\CUSA00223'
+        if (Test-Path -LiteralPath (Join-Path $tree 'eboot.bin')) { $game = $tree; $from = 'source tree default' }
+    }
+    if (-not $game) {
+        $msg = "no game folder: pass -GameDir '<folder with eboot.bin>' or set ISS_GAME_DIR (or pick it once in the launcher)"
+        if ($DryRun) { Note "warning: $msg" } else { Fail $msg }
+    } else {
+        if (-not (Test-Path -LiteralPath (Join-Path $game 'eboot.bin'))) {
+            $msg = "the game folder $game ($from) has no eboot.bin"
+            if ($DryRun) { Note "warning: $msg" } else { Fail $msg }
+        }
+        $env:ISS_GAME_DIR = $game
+        $script:GameDirUsed = "$game ($from)"
+    }
+    if ($launcher.Kind -ne 'py') { return }
+    $onPath = $false
+    foreach ($d in "$env:PATH".Split(';')) { if ($d -and (Test-Path -LiteralPath (Join-Path $d 'SDL3.dll'))) { $onPath = $true; break } }
+    if ($onPath) { return }
+    if (Test-Path -LiteralPath (Join-Path $MsysBin 'SDL3.dll')) {
+        $env:PATH = "$MsysBin;$env:PATH"
+        Info "  PATH     : $MsysBin added in front (the probe's DLLs; this process only)"
+    } else {
+        $msg = "SDL3.dll is neither on PATH nor in ${MsysBin}: the probe would not start. Pass -MsysBin <msys2>\clang64\bin."
+        if ($DryRun) { Note "warning: $msg" } else { Fail $msg }
+    }
+}
+$script:GameDirUsed = "(not set)"
+
+# What is being measured: the git state of this tree (commit, branch, uncommitted changes other
+# than the submodules under port/gpu/third_party) and the probe executables (time, SHA256).
+function Get-BuildInfo($launcher) {
+    $root = Split-Path $PSScriptRoot -Parent
+    $b = [ordered]@{ commit = $null; branch = $null; dirty = $null; dirty_files = @(); probes = @() }
+    $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($git) {
+        $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try {
+            $c = & $git.Source -C $root rev-parse HEAD 2>$null
+            if ($LASTEXITCODE -eq 0 -and $c) {
+                $b.commit = "$c".Trim()
+                $b.branch = "$(& $git.Source -C $root rev-parse --abbrev-ref HEAD 2>$null)".Trim()
+                $changes = @(& $git.Source -C $root status --porcelain 2>$null | Where-Object { $_ } |
+                        Where-Object { $_.Substring(3).Trim('"') -notlike 'port/gpu/third_party/*' })
+                $b.dirty = ($changes.Count -gt 0)
+                $b.dirty_files = @($changes | Select-Object -First 20 | ForEach-Object { $_.Substring(3) })
+            }
+        } catch { } finally { $ErrorActionPreference = $old }
+    }
+    if ($launcher.Missing) { return $b }
+    foreach ($n in 'tlg-probe-v2.exe', 'tlg-probe.exe') {
+        $p = Join-Path $launcher.PortDir "out\$n"
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { continue }
+        $f = Get-Item -LiteralPath $p
+        $hash = $null; try { $hash = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower() } catch { }
+        $b.probes += , ([ordered]@{ path = $f.FullName; modified = $f.LastWriteTime.ToString('s'); bytes = $f.Length; sha256 = $hash })
+    }
+    return $b
+}
+
+function Format-BuildInfo($b) {
+    $lines = @()
+    if ($b.commit) {
+        $state = if ($b.dirty) { "DIRTY ($(@($b.dirty_files).Count) changed: $((@($b.dirty_files) | Select-Object -First 5) -join ', '))" } else { 'clean' }
+        $lines += "  commit   : $($b.commit) ($($b.branch)), tree $state"
+    } else { $lines += '  commit   : unknown (not a git checkout, or git not found)' }
+    foreach ($p in @($b.probes)) {
+        $sha = if ($p.sha256) { $p.sha256.Substring(0, 16) } else { '?' }
+        $lines += "  probe    : $($p.path) ($($p.modified), sha256 $sha...)"
+    }
+    return ($lines -join "`n")
+}
 
 # save\: the player's savedata, tlg.ini and launcher settings, as the route starts from them.
 function New-SaveSnapshot([string]$source, [string]$dest) {
@@ -965,6 +1068,8 @@ function Invoke-Record {
     if ($Seconds -lt 10) { Fail '-Seconds must be at least 10' }
     $launcher = Resolve-Launcher
     $source = Resolve-SourceUserDir $launcher
+    Initialize-LaunchEnv $launcher
+    $build = Get-BuildInfo $launcher
     $route = Join-Path $BenchDir 'route.txt'
     $save = Join-Path $BenchDir 'save'
     if (((Test-Path -LiteralPath $route) -or (Test-Path -LiteralPath $save)) -and -not $Force) {
@@ -991,6 +1096,8 @@ function Invoke-Record {
     Info @"
 Recording a $Seconds s benchmark route.
   launcher : $($launcher.Exe)
+  game     : $script:GameDirUsed
+$(Format-BuildInfo $build)
   saves of : $source
   bench    : $BenchDir
   caches   : $cacheLine
@@ -1031,6 +1138,7 @@ Your own saves and settings are not touched: the game runs on a copy in $recDir.
         $r = Invoke-Game $launcher $recDir $vars.ISS_STOP_FILE $timeout 'record'
     } finally { Invoke-RunCleanup }
     if ($r.log) { Copy-Item -LiteralPath $r.log -Destination (Join-Path $recDir 'game.log') -Force -ErrorAction SilentlyContinue }
+    $r['build'] = $build
     Write-Json (Join-Path $recDir 'run.json') $r
     $newRoute = $vars.ISS_PAD_RECORD
     if (-not (Test-Path -LiteralPath $newRoute) -or (Get-Item -LiteralPath $newRoute).Length -eq 0) {
@@ -1062,6 +1170,8 @@ function Invoke-Run {
     $source = Resolve-SourceUserDir $launcher
     Assert-Separate $source
     $mods = Get-ModsVars $source
+    Initialize-LaunchEnv $launcher
+    $build = Get-BuildInfo $launcher
     $set = Get-VariantSet
     $names = @($set.Keys)
     Assert-CacheMode $set $source
@@ -1084,6 +1194,9 @@ function Invoke-Run {
     $measured = @($plan | Where-Object { -not $_.Warmup }).Count
     Info "Benchmark session $sessionDir"
     Info "  launcher : $($launcher.Exe)"
+    Info "  game     : $script:GameDirUsed"
+    Info (Format-BuildInfo $build)
+    if ($build.dirty) { Note '  note: uncommitted changes: this session is not tied to the commit alone (dirty_files in variants.json)' }
     Info "  route    : $route"
     if ($SharePlayerCache) { Info "  caches   : SHARED with $source (-SharePlayerCache: the runs write into the player's caches)" }
     else { Info "  caches   : own copy per variant in $BenchDir\cache\<variant> (seeded from $source)" }
@@ -1097,7 +1210,8 @@ function Invoke-Run {
     }
     $info = [ordered]@{ variants = $names; control = $names[0]; rounds = $Rounds; route = $route; launcher = $launcher.Exe;
         source_user_dir = $source; ini = $Ini; started = (Get-Date).ToString('s'); env = [ordered]@{}; ini_variants = [ordered]@{}
-        cache_mode = $(if ($SharePlayerCache) { 'shared' } else { 'bench' }); caches = [ordered]@{} }
+        cache_mode = $(if ($SharePlayerCache) { 'shared' } else { 'bench' }); caches = [ordered]@{};
+        game_dir = $env:ISS_GAME_DIR; build = $build }
     foreach ($v in $names) {
         $info.env[$v] = $set[$v].Env; $info.ini_variants[$v] = $set[$v].Ini
         $info.caches[$v] = if ($SharePlayerCache) { $source } else { Get-BenchCacheRoot $v }
@@ -1294,6 +1408,8 @@ function Invoke-Compare([string]$sessionDir) {
         else { $missing += $d.Name }
     }
     Info "Session $sessionDir"
+    if ($info.PSObject.Properties['build'] -and $info.build) { Info (Format-BuildInfo $info.build) }
+    else { Info '  commit   : not recorded (session made before bench.ps1 recorded the build)' }
     if ($missing.Count) { Note "no result in: $($missing -join ', ')" }
     $present = @($order | Where-Object { $v = $_; @($runs | Where-Object { $_.Variant -eq $v }).Count -gt 0 })
     if ($present -notcontains $ctrl) { Fail "the control variant '$ctrl' has no results in $sessionDir" }
@@ -1364,5 +1480,8 @@ try {
     # cleanups: the game, the environment and every junction this process made.
     try { Invoke-RunCleanup }
     catch { try { Write-Host "bench.ps1: cleanup error: $($_.Exception.Message)" -ForegroundColor Red } catch { } }
-    finally { if ($script:Lock) { $script:Lock.Dispose(); $script:Lock = $null } }
+    finally {
+        try { Restore-LaunchEnv } catch { }
+        if ($script:Lock) { $script:Lock.Dispose(); $script:Lock = $null }
+    }
 }

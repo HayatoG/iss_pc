@@ -226,6 +226,38 @@ standard deviation of 0 (identical control runs), there is no noise estimate and
 `compare.json` in the session. Without Python the script prints the same table itself from the
 `bench.json` files. A warning flags a measured run that still compiled shaders.
 
+**Source tree (local MSYS2 build).** `scripts\play_dev.ps1 [-GameDir <folder with eboot.bin>]`
+plays the game from the tree (`py -3 port\launcher\infamous_run.py`; extra arguments go to the
+launcher): it puts `-MsysBin` (default `C:\msys64\clang64\bin`, the probe's SDL3/FFmpeg/libc++
+DLLs) in front of `PATH` for that process and sets `ISS_GAME_DIR` from `-GameDir`, else
+`ISS_GAME_DIR`, else the launcher's saved `game_dir`, else `game\CUSA00223`. Saves and caches go
+to `port\user` (unless `ISS_USER_DIR`), logs to `port\out\logs`. The launcher builds
+`out\isa-rewrite.bin` with `iced-x86` (`py -3 -m pip install --user iced-x86==1.21.0`), which
+every Intel CPU needs (no SSE4A). `bench.ps1 record`/`run` do the same when they fall back to the
+source-tree launcher (`-GameDir`, `-MsysBin`; PATH only when `SDL3.dll` is not on it yet) and
+restore both variables when they end.
+
+**Commits.** Every session records in `variants.json` (`build`), and `record` in its `run.json`,
+the commit (`git rev-parse HEAD`), branch, whether the tree had uncommitted changes (`dirty`,
+`dirty_files`; changes inside the `port/gpu/third_party/*` submodules are ignored) and each probe
+exe (`tlg-probe-v2.exe`, `tlg-probe.exe`: path, time, size, SHA256). `run` prints it at the start
+and `compare` in its header. To compare commits, run one session per build with the variant
+named after the commit, from the same route and save:
+
+```text
+git checkout <commit A>; <build>; .\scripts\bench.ps1 run -Session c-A -Variants ([ordered]@{ A = @{} })
+git checkout <commit B>; <build>; .\scripts\bench.ps1 run -Session c-B -Variants ([ordered]@{ B = @{} })
+py -3 -I scripts\round_analyze.py bench (Get-ChildItem $env:USERPROFILE\iss-bench\runs\c-A\[0-9]*\bench.json,
+    $env:USERPROFILE\iss-bench\runs\c-B\[0-9]*\bench.json).FullName --control A
+```
+
+`compare` reads one session only; `round_analyze.py bench` takes run files from any number of
+sessions and groups them by label (the variant name), so give each commit its own variant name.
+Each variant name gets its own cache copy (`cache\<variant>\`, seeded from the player's caches on
+first use), so keep the warm-up: a build that changes shaders compiles them again there. Runs of different sessions are not interleaved, so drift
+between them (temperature, background load) is not cancelled out: repeat the first session last
+(A B A) to see it.
+
 `round_analyze.py bench` reads bench JSON, `summary.json` from `summarize`, a game log (its last
 `Bench:` line, else its `Frame stats`/`Frame pacing` lines) or a `SHADPS4_FRAME_CSV` file, and groups
 runs by label, else by folder name without the `NN-` prefix. `compare --control ... --variant ...`
