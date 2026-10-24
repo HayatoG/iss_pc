@@ -10,7 +10,8 @@ Automated, repeatable A/B benchmark of inFAMOUS Second Son on Windows (renderer 
            The whole savedata folder of the player's data folder is copied into the bench folder
            first: every later run starts from that same copy, never from the player's saves (the
            game's Continue loads the newest save in it).
-  run      Replays the route: one warm-up run per variant (discarded, unless -NoWarmup), then
+  run      Replays the route: up to -WarmupRuns (2) warm-up runs per variant (discarded; they stop
+           early once a run compiled no shaders; none with -NoWarmup), then
            -Rounds rounds (default 3), each variant once per round, the order reversed every
            other round (A B, B A, A B). Each run gets its own data folder (a copy of the save) and
            its own launcher settings; the shader/pipeline caches are linked (junctions) to the
@@ -19,7 +20,10 @@ Automated, repeatable A/B benchmark of inFAMOUS Second Son on Windows (renderer 
   compare  Table of the session: per variant mean +- stdev of avg_fps, low1_fps, p99_ms,
            over33..., % diff vs the control variant and '~' when the diff is within 2x the
            control's stdev (noise; only when that stdev is above 0). Uses
-           scripts\round_analyze.py when Python is present.
+           scripts\round_analyze.py when Python is present, which also checks scene drift: a run
+           whose mean draws/frame is more than -DriftPct (5) off the median of all runs rendered
+           another scene (the replay diverged); its variant's diffs are marked unreliable ('!'),
+           -ExcludeDrift leaves such runs out.
 
 Caches: by default the benchmark never writes into the player's caches. Each variant (and the
 recording, as '_record') has its own copy under <BenchDir>\cache\<variant>\, seeded on first use
@@ -74,7 +78,7 @@ param(
     [string]$Control,
     [switch]$NoWarmup,
     # Warm-up runs per variant at most; they stop early once a run compiled no shaders.
-    [int]$WarmupRuns = 1,
+    [int]$WarmupRuns = 2,
     [int]$TimeoutSec = 600,
     # run: the session folder name under <BenchDir>\runs (default: a timestamp).
     # compare: a session name or folder (default: the newest session).
@@ -94,6 +98,10 @@ param(
     # compare: also print round_analyze.py's per-run 'compare' table for each variant.
     [switch]$Detail,
     [double]$NoiseK = 2.0,
+    # compare: a run whose mean draws/frame is more than this % off the median of all runs drifted.
+    [double]$DriftPct = 5.0,
+    # compare: leave the drift runs out of the table (round_analyze.py --exclude-drift).
+    [switch]$ExcludeDrift,
     # record/run: link the runs to the player's real caches instead of the bench's own copies.
     [switch]$SharePlayerCache,
     # record/run: delete the bench's cache copies this command uses and seed them again.
@@ -133,8 +141,9 @@ function Show-Usage {
 Usage: scripts\bench.ps1 <record|run|compare> [options]   (Get-Help scripts\bench.ps1 -Detailed)
   record  [-Exe <launcher>] [-UserDir <data folder>] [-Seconds 90] [-Force] [-KeepOpen]
   run     [-Exe <launcher>] [-Variants @{...} | -VariantFile <json>] [-Rounds 3] [-NoWarmup]
-          [-WarmupRuns 1] [-TimeoutSec 600] [-Session <name>] [-FrameCsv] [-SkipMs <ms>]
+          [-WarmupRuns 2] [-TimeoutSec 600] [-Session <name>] [-FrameCsv] [-SkipMs <ms>]
   compare [-Session <name|folder>] [-Control <variant>] [-Detail] [-Python <exe>] [-NoiseK 2]
+          [-DriftPct 5] [-ExcludeDrift]
   caches  (record/run) [-ResetBenchCache] (delete and seed again the bench's own copies)
           [-SharePlayerCache] (use the player's real caches; refuses profile-changing variants)
   source  (record/run with port\launcher\infamous_run.py) [-GameDir <folder with eboot.bin>]
@@ -1301,7 +1310,7 @@ function Invoke-Run {
                 foreach ($s in $plan) { if ($s.Variant -eq $v -and $s.Warmup -gt $step.Warmup) { $s.Skip = $true } }
             }
             if ((-not $step.Warmup) -and $b.PSObject.Properties['compiles'] -and [double]$b.compiles -gt 0) {
-                Note "  warning: $($b.compiles) shader/pipeline compiles during the measurement (more warm-up: -WarmupRuns 2)"
+                Note "  warning: $($b.compiles) shader/pipeline compiles during the measurement (more warm-up: -WarmupRuns $($WarmupRuns + 1))"
             }
         }
         $results.Add($r)
@@ -1419,7 +1428,8 @@ function Invoke-Compare([string]$sessionDir) {
     if (Test-Path -LiteralPath $analyzer) { $py = Find-Python }
     # round_analyze.py groups by label; files without one (a log, a CSV) by folder name minus 'NN-'.
     $files = @(); foreach ($g in $order) { $files += @($runs | Where-Object { $_.Variant -eq $g } | ForEach-Object { $_.File }) }
-    $common = @('--control', $ctrl, '--noise-k', (Fmt '{0}' $NoiseK))
+    $common = @('--control', $ctrl, '--noise-k', (Fmt '{0}' $NoiseK), '--drift-pct', (Fmt '{0}' $DriftPct))
+    if ($ExcludeDrift) { $common += '--exclude-drift' }
     if ($SkipMs -ge 0) { $common += @('--skip-ms', "$SkipMs") }
     $pyArgs = @('-I', $analyzer, 'bench') + $files + $common + @('--csv', (Join-Path $sessionDir 'compare.csv'), '--json', (Join-Path $sessionDir 'compare.json'))
     if ($DryRun) {
@@ -1430,6 +1440,7 @@ function Invoke-Compare([string]$sessionDir) {
         & $py.Exe @($py.Pre) @pyArgs
         if ($LASTEXITCODE -ne 0) { Fail "round_analyze.py bench failed (exit $LASTEXITCODE)" }
         if ($Detail) {
+            if ($ExcludeDrift) { Note 'note: -ExcludeDrift is ignored by the -Detail per-run tables (every run is listed)' }
             $ctrlFiles = @($runs | Where-Object { $_.Variant -eq $ctrl -and $_.File -like '*.json' } | ForEach-Object { $_.File })
             foreach ($g in $order) {
                 if ($g -eq $ctrl) { continue }
@@ -1440,7 +1451,8 @@ function Invoke-Compare([string]$sessionDir) {
             }
         }
     } else {
-        if (Test-Path -LiteralPath $analyzer) { Note 'Python 3 not found: internal table (bench.json files only).' }
+        if (Test-Path -LiteralPath $analyzer) { Note 'Python 3 not found: internal table (bench.json files only, no scene drift check).' }
+        if ($ExcludeDrift) { Note 'note: -ExcludeDrift is ignored without Python (no drift check): every run is in the table' }
         $withData = @($runs | Where-Object { $null -ne $_.Data })
         if (-not @($withData | Where-Object { $_.Variant -eq $ctrl }).Count) { Fail "no bench.json for the control '$ctrl' (Python is needed to read logs / CSVs)" }
         Show-InternalTable $withData @($order | Where-Object { $v = $_; @($withData | Where-Object { $_.Variant -eq $v }).Count }) $ctrl

@@ -135,8 +135,9 @@ copy, and records `-Seconds` of pad input into `route.txt` from the moment gamep
 detected. The game closes a few seconds after "Route recorded" (`-KeepOpen` leaves it open).
 An existing route is kept unless `-Force` (then it moves to `old-<time>\`).
 
-**run.** One warm-up run per variant first (discarded; `-WarmupRuns N` allows more, stopping once
-a run compiled nothing; `-NoWarmup` skips them), then `-Rounds` rounds with each variant once,
+**run.** Up to two warm-up runs per variant first (discarded; `-WarmupRuns N`, default 2, stops
+early once a run compiled nothing; `-NoWarmup` skips them: after one warm-up measured runs still
+compiled 2 to 21 shaders), then `-Rounds` rounds with each variant once,
 the order reversed every other round (A B, B A, A B) so slow drift does not favour one side.
 Variants are `-Variants` (name -> `@{ VAR = 'value' }`; use `[ordered]@{}` or `-Control` to pick
 the control, a plain hashtable is sorted by name) or `-VariantFile` with the same JSON
@@ -225,6 +226,35 @@ standard deviation of 0 (identical control runs), there is no noise estimate and
 `-Detail` adds the per-run `compare` table. The table is also written to `compare.csv` and
 `compare.json` in the session. Without Python the script prints the same table itself from the
 `bench.json` files. A warning flags a measured run that still compiled shaders.
+
+**Scene drift.** The replay is time-based pad input, so past ~20 s a run can diverge (the camera
+or the player ends up elsewhere) and render a lighter or heavier scene; its FPS then differs for
+reasons that have nothing to do with the variant. `compare` therefore fingerprints each run by
+the `draws/frame` of the `Frame stats` lines (every ~5 s) inside the benchmark window of its
+`game.log` (from `Bench: window started` to `Runtime: pad replay finished`; a `frames.csv` with
+the `bench` column is the fallback; a window that never ended, after a crash or timeout, counts as
+unknown) and adds a `draws/frame` column (mean +- stdev per variant) and a `drift` column (drift
+runs / runs, `?N` for N runs without draws, `unchecked` with fewer than 3 runs with draws). A run whose mean draws/frame is more than `-DriftPct`
+(default 5, `--drift-pct`) off the median of **all** runs of the session (every variant; at least
+3 runs with draws) is a drift run: a WARNING block lists it with its deviation, and the diffs of
+its variant (of every variant when it is a control run) get `!` (unreliable, whatever `~` says).
+The default comes from an A/A session of identical builds: the good runs stayed within 2.8% of
+the median, the two drift runs were 14% and 22% below it, so 5% sits well clear of both. A run
+without `Frame stats` lines in the window is reported as unknown and not checked. `-ExcludeDrift`
+(`--exclude-drift`) recomputes the table without the drift runs and says how many remain (a
+variant whose runs all drifted is listed as excluded, no comparison; `-Detail` and the no-Python
+table ignore it). When half the runs or more are off the median, the median sits between two
+scenes and means nothing: a WARNING says the check is inconclusive and no run is flagged. A
+variant whose runs are all off the control's on the same side but within 5% of each other (and the
+control's runs as tight) draws differently by itself (culling, LOD...): a note says so, without
+`!`, since that is the change under test, but its FPS deltas are then not like-for-like.
+`compare.json` (`drift`: threshold, median, state, each run's series, mean, deviation, flag;
+`run_files` lists every input, `kept_run_files` those in the table; `excluded_variants`) and
+`compare.csv` (its earlier columns, then `draws/frame`, `drift`, `unreliable`) carry the same
+information, and `compare_runs.csv` has one line per run. Excluding
+is a stopgap (fewer runs, more noise). Frequent drift means the route is too long or too
+dependent on timing: re-record a shorter, simpler one (stand still or walk straight, fewer camera
+swings and no combat or traversal that depends on physics) and run the session again.
 
 **Source tree (local MSYS2 build).** `scripts\play_dev.ps1 [-GameDir <folder with eboot.bin>]`
 plays the game from the tree (`py -3 port\launcher\infamous_run.py`; extra arguments go to the

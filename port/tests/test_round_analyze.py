@@ -209,6 +209,221 @@ class Bench(unittest.TestCase):
         self.assertIn("avg FPS (bench)", out)
         self.assertIn("+13.8%", out)                  # 70 vs mean(61, 62)
 
+    # ---------------------------------------------------------------- scene drift
+    def drift_run(self, rel, label, avg, draws, window=True):
+        """bench.json + game.log whose benchmark window has one Frame stats line per draws value
+        (None: a line broken by another thread's output); lines outside the window must not count."""
+        stats = lambda n: (f"Frame stats: 50.0 FPS, worst frame 30.0 ms; 0 shader/pipeline compiles, 0.0 ms; "
+                           f"0 pending draws; GPU thread 3.50 us/draw, {n} draws/frame, idle 2.0%\n")
+        log = stats(2) + stats(109) + ("Runtime: gameplay detected (scripted route)\n" + stats(140)
+                                       + "Bench: window started (first 1000 ms skipped)\n" if window else "")
+        for n in draws:
+            log += stats(n) if n is not None else "Frame stats: 50.0 FPS, worst frame 3GPU [x] Ensure\n"
+        log += "Runtime: pad replay finished\nBench: frames=4500 seconds=90.00 avg_fps=50.0\n" + stats(9999)
+        self.write(f"{rel}/game.log", log)
+        return self.write(f"{rel}/bench.json", bench(label, avg))
+
+    def bench_drift(self, files, **kw):
+        args = dict(runs=files, control=None, noise_k=2.0, skip_ms=1000.0, csv=None, json=None,
+                    drift_pct=ra.DRIFT_PCT, exclude_drift=False)
+        args.update(kw)
+        return self.run_cmd(ra.cmd_bench, **args)
+
+    def test_draws_from_log_window(self):
+        self.drift_run("01-A", "A", 60.0, [3500, None, 2000])
+        self.assertEqual(ra.draws_from_log(str(self.root / "01-A/game.log")), [3500, None, 2000])
+        self.drift_run("02-A", "A", 60.0, [3500], window=False)   # no window: unknown
+        self.assertIsNone(ra.draws_from_log(str(self.root / "02-A/game.log")))
+
+    def test_no_drift(self):
+        same = [3500, 4400, 2050, 5600, 4000]
+        files = [self.drift_run(f"{i:02d}-{n}", n, 60.0 + i * 0.1, [round(x * (1 + i / 100)) for x in same])
+                 for i, n in enumerate("ABBAAB", 1)]   # at most +6% per line, mean within +-3% of the median
+        out = self.bench_drift(files, json=str(self.root / "t.json"), csv=str(self.root / "t.csv"))
+        self.assertNotIn("WARNING", out)
+        self.assertNotIn("!", out)
+        self.assertIn("draws/frame", out.splitlines()[0])
+        d = json.loads((self.root / "t.json").read_text())
+        self.assertEqual(d["unreliable"], [])
+        self.assertEqual(d["drift"]["drift_runs"], 0)
+        self.assertEqual([x["drift"] for x in d["drift"]["runs"]], [False] * 6)
+        # compare.csv keeps its columns, the new ones at the end; the per-run block is its own file
+        self.assertTrue((self.root / "t.csv").read_text().startswith(
+            "variant,runs,avg_fps,low1_fps,p99_ms,worst_ms,over33,over50,compiles,draws/frame,drift,unreliable\n"))
+        self.assertIn("draws_dev_pct", (self.root / "t_runs.csv").read_text())
+        self.assertEqual(len(d["run_files"]), 6)
+        self.assertEqual(d["kept_run_files"], d["run_files"])
+
+    def test_drift_detected(self):
+        good = [3500, 4400, 2050, 5600, 4400, 4600]
+        light = [3500, 4400, 2050, 5600, 2800, 2900]   # same start, then another scene
+        files = [self.drift_run("01-A", "A", 52.0, good), self.drift_run("02-B", "B", 53.0, light),
+                 self.drift_run("03-B", "B", 52.1, good), self.drift_run("04-A", "A", 52.2, good)]
+        out = self.bench_drift(files, json=str(self.root / "t.json"), csv=str(self.root / "t.csv"))
+        self.assertIn("WARNING: scene drift: 1 of 4 runs", out)
+        self.assertIn("02-B (B)", out)
+        self.assertNotIn("01-A (A)", out)
+        b = next(line for line in out.splitlines() if line.startswith("B "))
+        self.assertIn("!)", b)                          # B's diffs are unreliable
+        self.assertIn("1/2", b)
+        d = json.loads((self.root / "t.json").read_text())
+        self.assertEqual(d["unreliable"], ["B"])
+        runs = {x["run"]: x for x in d["drift"]["runs"]}
+        self.assertTrue(runs["02-B"]["drift"])
+        self.assertLess(runs["02-B"]["draws_dev_pct"], -5)
+        self.assertFalse(runs["01-A"]["drift"])
+        fps = next(r for r in d["rows"] if r["metric"] == "avg_fps")["groups"]["B"]
+        self.assertTrue(fps["unreliable"])
+        self.assertIsNone(fps["better"])
+        self.assertIn("02-B,B,", (self.root / "t_runs.csv").read_text())
+        self.assertIn("B,2,", (self.root / "t.csv").read_text())
+        # a looser threshold lets it pass; a drift run in the control makes every variant unreliable
+        self.assertNotIn("WARNING", self.bench_drift(files, drift_pct=30.0))
+        out = self.bench_drift(files, control="B")
+        self.assertIn("diffs of A are unreliable", out)
+
+    def test_exclude_drift(self):
+        good = [3500, 4400, 2050, 5600, 4400, 4600]
+        light = [3500, 4400, 2050, 5600, 2800, 2900]
+        files = [self.drift_run("01-A", "A", 52.0, good), self.drift_run("02-B", "B", 60.0, light),
+                 self.drift_run("03-B", "B", 52.1, good), self.drift_run("04-A", "A", 52.2, good),
+                 self.drift_run("05-A", "A", 52.1, good), self.drift_run("06-B", "B", 52.0, good)]
+        out = self.bench_drift(files, exclude_drift=True, json=str(self.root / "t.json"))
+        self.assertIn("5 of 6 runs remain (A 3, B 2)", out)
+        self.assertNotIn("!)", out)
+        d = json.loads((self.root / "t.json").read_text())
+        self.assertEqual(d["runs"], {"A": 3, "B": 2})
+        self.assertEqual(d["drift"]["runs_used"], 5)
+        self.assertTrue(next(x for x in d["drift"]["runs"] if x["run"] == "02-B")["excluded"])
+        fps = next(r for r in d["rows"] if r["metric"] == "avg_fps")["groups"]["B"]
+        self.assertAlmostEqual(fps["mean"], 52.05)    # without the 60.0 of the drift run
+        # every control run drifted: an error, not an empty comparison
+        heavy = [x * 2 for x in good]
+        # (B spread over 5%: not a variant of its own draw count, see test_variant_draws)
+        files = [self.drift_run("11-A", "A", 52.0, heavy), self.drift_run("12-B", "B", 52.0, good),
+                 self.drift_run("13-B", "B", 52.0, [round(x * 1.03) for x in good]),
+                 self.drift_run("14-B", "B", 52.0, [round(x * 0.97) for x in good])]
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.bench_drift(files, exclude_drift=True)
+
+    def test_drift_with_different_sample_counts(self):
+        good = [3500, 4400, 2050, 5600, 4400, 4600, 3900]
+        files = [self.drift_run("01-A", "A", 52.0, good), self.drift_run("02-B", "B", 52.0, good[:-1]),
+                 self.drift_run("03-B", "B", 52.0, good + [4100]), self.drift_run("04-A", "A", 52.0, good[:-1])]
+        out = self.bench_drift(files, json=str(self.root / "t.json"))
+        self.assertNotIn("WARNING", out)
+        d = json.loads((self.root / "t.json").read_text())
+        self.assertEqual([len(x["draws"]) for x in d["drift"]["runs"]], [7, 6, 8, 6])
+        self.assertEqual([x["drift"] for x in d["drift"]["runs"]], [False] * 4)
+        # a run one line longer that then drifts is still caught
+        files.append(self.drift_run("05-A", "A", 52.0, good[:4] + [1500, 1500, 1500, 1500]))
+        self.assertIn("05-A (A)", self.bench_drift(files))
+
+    def test_run_without_frame_stats_is_unknown(self):
+        good = [3500, 4400, 2050, 5600]
+        files = [self.drift_run("01-A", "A", 52.0, good), self.drift_run("02-B", "B", 52.0, good),
+                 self.drift_run("03-B", "B", 52.0, good), self.drift_run("04-A", "A", 52.0, [])]
+        files.append(self.write("05-A/bench.json", bench("A", 52.0)))       # no game.log at all
+        out = self.bench_drift(files, json=str(self.root / "t.json"))
+        self.assertNotIn("WARNING", out)
+        self.assertIn("04-A", out)
+        self.assertIn("draws/frame unknown", out)
+        a = next(line for line in out.splitlines() if line.startswith("A (control)"))
+        self.assertIn("0/3 ?2", a)
+        d = json.loads((self.root / "t.json").read_text())
+        runs = {x["run"]: x for x in d["drift"]["runs"]}
+        self.assertIsNone(runs["04-A"]["drift"])
+        self.assertIsNone(runs["05-A"]["draws_mean"])
+        # too few runs with draws: no check, no crash
+        out = self.bench_drift(files[3:] + files[:1])
+        self.assertIn("drift unchecked", out)
+        self.assertIn("unchecked", next(line for line in out.splitlines() if line.startswith("A (control)")))
+        self.assertNotIn("?", next(line for line in out.splitlines() if line.startswith("A (control)")))
+        self.assertNotIn("WARNING", out)
+
+
+    def test_drift_inconclusive(self):
+        # two scenes, half the runs each: the median (3500) flags every run, so no verdict
+        hi, lo = [4000] * 5, [3000] * 5
+        files = [self.drift_run("01-A", "A", 52.0, hi), self.drift_run("02-B", "B", 52.0, lo),
+                 self.drift_run("03-B", "B", 52.0, hi), self.drift_run("04-A", "A", 52.0, lo)]
+        out = self.bench_drift(files, json=str(self.root / "t.json"))
+        self.assertIn("WARNING: drift check inconclusive", out)
+        self.assertNotIn("WARNING: scene drift", out)
+        self.assertNotIn("!)", out)
+        d = json.loads((self.root / "t.json").read_text())
+        self.assertEqual(d["drift"]["state"], "inconclusive")
+        self.assertEqual([x["drift"] for x in d["drift"]["runs"]], [None] * 4)
+        self.assertIn("inconclusive", next(line for line in out.splitlines() if line.startswith("B ")))
+        # --exclude-drift has nothing to leave out then
+        self.assertNotIn("excluded", self.bench_drift(files, exclude_drift=True))
+
+    def test_variant_draws(self):
+        # B draws 25% less in every run and tightly: the variant does it (culling, LOD), not drift
+        files = [self.drift_run(f"0{i}-A", "A", 52.0, [4000 + i] * 5) for i in (1, 4, 5)]
+        files += [self.drift_run(f"0{i}-B", "B", 60.0, [3000 + i] * 5) for i in (2, 3, 6)]
+        out = self.bench_drift(files, json=str(self.root / "t.json"))
+        self.assertNotIn("WARNING", out)
+        self.assertNotIn("!", out)
+        self.assertIn("note: B renders -25.0% draws/frame", out)
+        self.assertIn("not like-for-like", out)
+        self.assertIn("variant", next(line for line in out.splitlines() if line.startswith("B ")))
+        d = json.loads((self.root / "t.json").read_text())
+        self.assertEqual(list(d["drift"]["variant_draws"]), ["B"])
+        self.assertAlmostEqual(d["drift"]["variant_draws"]["B"], -25.0, delta=0.1)
+        self.assertEqual(d["unreliable"], [])
+        # a drift run among the control's runs: the control is no reference, so no variant verdict;
+        # three scenes then, which the median cannot sort out either: inconclusive, never a false '!'
+        files.append(self.drift_run("07-A", "A", 52.0, [2000] * 5))
+        out = self.bench_drift(files)
+        self.assertNotIn("note: B renders", out)
+        self.assertIn("drift check inconclusive", out)
+        self.assertNotIn("!)", out)
+
+    def test_incomplete_window_is_unknown(self):
+        # crash or timeout: the window opened but never ended, so the series is not used
+        self.drift_run("01-A", "A", 52.0, [4000] * 3)
+        log = self.root / "01-A/game.log"
+        text = log.read_text()
+        log.write_text(text[:text.index("Runtime: pad replay finished")])
+        self.assertIsNone(ra.draws_from_log(str(log)))
+        self.assertIsNone(ra.draws_fingerprint(ra.load_bench(str(self.root / "01-A/bench.json")))["draws_mean"])
+
+    def test_exclude_drift_edge_cases(self):
+        good = [3500, 4400, 2050, 5600, 4400, 4600]
+        light = [x // 2 for x in good]
+        files = [self.drift_run("01-A", "A", 52.0, good), self.drift_run("02-B", "B", 52.0, light),
+                 self.drift_run("03-A", "A", 52.0, good), self.drift_run("04-C", "C", 52.0, good),
+                 self.drift_run("05-A", "A", 52.0, good)]
+        # every run of B drifted: listed, also in the JSON, with a drift count over all runs
+        out = self.bench_drift(files, exclude_drift=True, json=str(self.root / "t.json"))
+        self.assertIn("B: all 1 runs excluded (drift), no comparison", out)
+        d = json.loads((self.root / "t.json").read_text())
+        self.assertEqual(d["excluded_variants"], [{"variant": "B", "runs": 1}])
+        self.assertEqual(len(d["run_files"]), 5)
+        self.assertEqual(len(d["kept_run_files"]), 4)
+        # an unknown control is that error, not "every run of the control drifted"
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+            self.bench_drift(files, control="Z", exclude_drift=True)
+        self.assertIn("not one of", err.getvalue())
+        # the drift count of a variant matches the table also under --exclude-drift
+        files.append(self.drift_run("06-C", "C", 52.0, light))
+        self.bench_drift(files, exclude_drift=True, json=str(self.root / "t.json"))
+        d = json.loads((self.root / "t.json").read_text())
+        self.assertEqual((d["draws"]["C"]["drift"], d["draws"]["C"]["total"]), (1, 2))
+        self.assertEqual(d["runs"]["C"], 1)
+
+    def test_control_drift_with_no_other_variant(self):
+        good = [4000] * 5
+        files = [self.drift_run(f"0{i}-A", "A", 52.0, good) for i in (1, 2, 3)]
+        files.append(self.drift_run("04-A", "A", 52.0, [2000] * 5))
+        out = self.bench_drift(files)
+        self.assertIn("in the control's own runs", out)
+        self.assertNotIn("diffs of  are", out)
+        # and the count-diff branch of fmt_cell marks an unreliable cell too
+        self.assertEqual(ra.fmt_cell(dict(mean=2.0, sd=None, diff_abs=2.0, unreliable=True), "over33"), "2 (+2 !)")
 
 if __name__ == "__main__":
     unittest.main()
