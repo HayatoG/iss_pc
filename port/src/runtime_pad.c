@@ -582,7 +582,7 @@ static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
     load_pad_mode();
     if (!was_captured) { m.dx=m.dy=0; was_captured=true; } /* motion from before the game read the pad */
     ++mouse_samples;
-    const MouseStickParams p={in.sensitivity,in.smoothing,in.accel,in.deadzone,in.invert_y};
+    const MouseStickParams p={in.sensitivity,in.smoothing,in.accel,in.deadzone,in.invert_y,in.vertical};
     const uint32_t raw=m.held|m.pressed;
     /* Touchpad mode: the mode key (a keyboard key or a mouse button). */
     bool key_down=false;

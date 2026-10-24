@@ -100,6 +100,8 @@
   "ctl_mouse_build": {"en": "The mouse needs a game build that includes it (the options are saved in tlg.ini; an older build ignores them).", "pt": "O mouse precisa de uma versão do jogo que o inclua (as opções ficam no tlg.ini; uma versão antiga as ignora)."},
   "ctl_mouse_sensitivity": {"en": "Sensitivity", "pt": "Sensibilidade"},
   "ctl_what_mouse_sensitivity": {"en": "How far the camera turns for the same mouse movement.", "pt": "Quanto a câmera gira para o mesmo movimento do mouse."},
+  "ctl_mouse_sensitivity_y": {"en": "Vertical sensitivity", "pt": "Sensibilidade vertical"},
+  "ctl_what_mouse_sensitivity_y": {"en": "Up/down speed relative to left/right. Raise it if looking up and down feels slower.", "pt": "Velocidade para cima/baixo em relação à dos lados. Aumente se olhar para cima e para baixo parecer mais lento."},
   "ctl_mouse_invert_y": {"en": "Invert Y axis", "pt": "Inverter eixo Y"},
   "ctl_what_mouse_invert_y": {"en": "Moving the mouse forward looks down.", "pt": "Empurrar o mouse para frente olha para baixo."},
   "ctl_mouse_smoothing": {"en": "Smoothing", "pt": "Suavização"},

@@ -274,6 +274,7 @@ The finger starts in the middle of the touchpad and stays where you leave it. Th
 |---|---|---|
 | `ISS_MOUSE` | `1` | `0` turns the mouse off (the window no longer captures it) |
 | `ISS_MOUSE_SENS` | `1.0` | camera sensitivity (0.05-10) |
+| `ISS_MOUSE_SENS_Y` | `1.0` | vertical sensitivity, times `ISS_MOUSE_SENS` (0.25-4): raise it if looking up and down is slower than turning |
 | `ISS_MOUSE_INVERT_Y` | `0` | `1` inverts the Y axis |
 | `ISS_MOUSE_SMOOTHING` | `0.5` | smoothing (0-0.95) |
 | `ISS_MOUSE_ACCEL` | `0` | acceleration (0-2) |
@@ -661,6 +662,7 @@ O dedo começa no meio do touchpad e fica onde você o deixou. Os atalhos do tec
 |---|---|---|
 | `ISS_MOUSE` | `1` | `0` desliga o mouse (a janela não prende mais) |
 | `ISS_MOUSE_SENS` | `1.0` | sensibilidade da câmera (0,05–10) |
+| `ISS_MOUSE_SENS_Y` | `1.0` | sensibilidade vertical, vezes `ISS_MOUSE_SENS` (0,25–4): aumente se olhar para cima e para baixo for mais lento que girar |
 | `ISS_MOUSE_INVERT_Y` | `0` | `1` inverte o eixo Y |
 | `ISS_MOUSE_SMOOTHING` | `0.5` | suavização (0–0,95) |
 | `ISS_MOUSE_ACCEL` | `0` | aceleração (0–2) |

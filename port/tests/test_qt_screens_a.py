@@ -119,8 +119,20 @@ class MouseAndEnvironmentTests(unittest.TestCase):
         self.assertTrue(padsettings.mouse_value({}, 'mouse_enabled'))
         self.assertEqual(1.0, padsettings.mouse_value({}, 'mouse_sensitivity'))
         self.assertEqual(10.0, padsettings.mouse_value({'mouse_sensitivity': '99'}, 'mouse_sensitivity'))
+        self.assertEqual(1.0, padsettings.mouse_value({}, 'mouse_sensitivity_y'))
+        self.assertEqual(4.0, padsettings.mouse_value({'mouse_sensitivity_y': '9'}, 'mouse_sensitivity_y'))
         self.assertEqual(0.5, padsettings.mouse_value({'mouse_smoothing': 'abc'}, 'mouse_smoothing'))
         self.assertFalse(padsettings.mouse_value({'mouse_enabled': '0'}, 'mouse_enabled'))
+
+    def test_sensitivity_sliders_reach_the_game_range(self):
+        # #435/#439: the slider stopped at 5 while the game takes up to 10.
+        for key in ('mouse_sensitivity', 'mouse_sensitivity_y'):
+            _, _, _, hard, slide = padsettings.MOUSE_SPEC[key]
+            self.assertEqual(hard[1], slide[1], key)
+        text = SETTINGS_CPP.read_text(encoding='utf-8')
+        self.assertIn('Clamp(value.empty() ? 1.0f : f, 0.05f, 10.0f)', text)
+        self.assertIn('Clamp(value.empty() ? 1.0f : f, 0.25f, 4.0f)', text)
+        self.assertIn('{"TLG_MOUSE_SENS_Y", "mouse_sensitivity_y"}', text)
 
     def test_update_removes_the_key_at_its_default(self):
         self.assertEqual({'mouse_sensitivity': None}, padsettings.mouse_update('mouse_sensitivity', 1.0))

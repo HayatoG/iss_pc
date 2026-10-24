@@ -3,8 +3,8 @@
  * becomes a deflection. Per axis, every pad sample:
  *   1. counts and time add up until a window of MOUSE_STICK_WINDOW_S (mouse reports arrive at
  *      125-1000 Hz, the pad may be sampled faster); the speed of the window is the target;
- *   2. target = speed * sensitivity / MOUSE_STICK_FULL_SPEED, times (1 + accel * |target|),
- *      clamped to [-1, 1];
+ *   2. target = speed * sensitivity / MOUSE_STICK_FULL_SPEED (times vertical on y), times
+ *      (1 + accel * |target|), clamped to [-1, 1];
  *   3. smoothing: the deflection moves toward the target with an exponential filter, the same
  *      per second at any sample rate (0 none, 0.9 heavy);
  *   4. once the mouse stops the deflection decays to exactly 0 (below MOUSE_STICK_REST): no
@@ -25,6 +25,7 @@ typedef struct {
     float accel;       /* 0 .. 2 */
     float deadzone;    /* 0 .. 0.5 */
     int invert_y;
+    float vertical;    /* 0.25 .. 4, y's sensitivity over x's (the game pitches slower); 0 = 1 */
 } MouseStickParams;
 
 typedef struct {
@@ -43,8 +44,9 @@ static inline void mouse_stick_update(MouseStick *s, const MouseStickParams *p, 
     s->acc_t+=dt;
     if (s->acc_t>=MOUSE_STICK_WINDOW_S-1e-5f) {
         const float sens=mouse_stick_clamp(p->sensitivity,0.05f,10.0f), accel=mouse_stick_clamp(p->accel,0.0f,2.0f);
+        const float vertical=p->vertical>0.0f ? mouse_stick_clamp(p->vertical,0.25f,4.0f) : 1.0f;
         for (int i=0;i<2;++i) {
-            float t=s->acc[i]/s->acc_t*sens/MOUSE_STICK_FULL_SPEED;
+            float t=s->acc[i]/s->acc_t*sens*(i ? vertical : 1.0f)/MOUSE_STICK_FULL_SPEED;
             t*=1.0f+accel*fabsf(t);
             s->target[i]=mouse_stick_clamp(t,-1.0f,1.0f);
             s->acc[i]=0;

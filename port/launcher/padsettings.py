@@ -6,7 +6,7 @@ Every name here was checked in the game's code:
   - port/src/runtime_pad.c       key_map (default keyboard), ps_names, apply_button_map (TLG_KEY_MAP:
                                  "<ps4 button>=<key>[|<key>...]", comma separated, "none"), the mouse
                                  sources, load_pad_mode (TLG_MOUSE_PAD, _MODE, _SENS, _DRAG, _KEY)
-  - port/gpu/shim/tlg_settings.cpp  the tlg.ini keys mouse_enabled, mouse_sensitivity, mouse_invert_y,
+  - port/gpu/shim/tlg_settings.cpp  the tlg.ini keys mouse_enabled, mouse_sensitivity, mouse_sensitivity_y, mouse_invert_y,
                                  mouse_smoothing, mouse_accel, mouse_deadzone (and their ranges)
 The mouse code is on the feat/mouse-camera branch; with a game build that does not have it the keys
 are written to tlg.ini and the variables are exported, and the game ignores them.
@@ -106,7 +106,8 @@ def effective_keys(spec):
 # key, kind, default text, hard range of the game, range of the sliders
 MOUSE_KEYS = (
     ('mouse_enabled', 'bool', '1', None, None),
-    ('mouse_sensitivity', 'float', '1.00', (0.05, 10.0), (0.1, 5.0)),
+    ('mouse_sensitivity', 'float', '1.00', (0.05, 10.0), (0.1, 10.0)),
+    ('mouse_sensitivity_y', 'float', '1.00', (0.25, 4.0), (0.25, 4.0)),
     ('mouse_invert_y', 'bool', '0', None, None),
     ('mouse_smoothing', 'float', '0.50', (0.0, 0.95), (0.0, 0.9)),
     ('mouse_accel', 'float', '0.00', (0.0, 2.0), (0.0, 2.0)),
