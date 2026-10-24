@@ -12,6 +12,9 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#ifndef _WIN32
+#include <time.h>
+#endif
 #include <imgui.h>
 #include <SDL3/SDL.h>
 #include "iss_gpu.h"
@@ -43,6 +46,10 @@ uint64_t runtime_tsc_frequency(void);
 int32_t* runtime_errno(void);
 // runtime.c
 void runtime_report(void);
+#ifdef _WIN32
+// compat_win.c: GetProcessTimes (who 0) in microseconds
+int compat_cpu_times(int who, int64_t* user_us, int64_t* kernel_us);
+#endif
 // bridge.cpp
 void iss_gpu_install_image(uint64_t image_base);
 }
@@ -255,9 +262,27 @@ struct Bench {
     Clock::time_point count_from;   // the start mark plus ISS_BENCH_SKIP_MS
     Clock::time_point last;         // the previous kept flip
     u64 compiles_at_start{};
+    double cpu_at_start_s{};        // process CPU time (all threads, user + kernel) at counting start
     std::vector<float> intervals_ms;
 };
 Bench g_bench;
+
+// The process's CPU time so far, user + kernel of all its threads, in seconds (0 when unknown).
+double ProcessCpuSeconds() {
+#ifdef _WIN32
+    int64_t user_us = 0, kernel_us = 0;
+    if (compat_cpu_times(0, &user_us, &kernel_us) != 0) {
+        return 0.0;
+    }
+    return static_cast<double>(user_us + kernel_us) / 1e6;
+#else
+    struct timespec t;
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t) != 0) {
+        return 0.0;
+    }
+    return static_cast<double>(t.tv_sec) + static_cast<double>(t.tv_nsec) / 1e9;
+#endif
+}
 
 // Shader and pipeline compiles, as the "Frame stats" line counts them (port/gpu counts both).
 u64 BenchCompiles() {
@@ -275,6 +300,7 @@ void BenchFrame(Clock::time_point now) {
         g_bench.counting = true;
         g_bench.last = now;
         g_bench.compiles_at_start = BenchCompiles();
+        g_bench.cpu_at_start_s = ProcessCpuSeconds();
         return;
     }
     if (g_bench.intervals_ms.size() < BenchMaxFrames) {
@@ -331,6 +357,7 @@ void BenchEnd() {
     std::vector<float> intervals;
     bool counting = false, truncated = false;
     u64 compiles_at_start = 0;
+    double cpu_at_start_s = 0;
     {
         std::scoped_lock lock{g_bench.mutex};
         if (!g_bench.active.load(std::memory_order_relaxed)) {
@@ -341,10 +368,13 @@ void BenchEnd() {
         counting = g_bench.counting;
         truncated = g_bench.truncated;
         compiles_at_start = g_bench.compiles_at_start;
+        cpu_at_start_s = g_bench.cpu_at_start_s;
         BenchCsvMark(false);
     }
     const u64 compiles =
         counting ? BenchCompiles() - compiles_at_start : 0;
+    // process CPU time over the counted window (the same span as the kept intervals)
+    const double cpu_s = counting ? std::max(0.0, ProcessCpuSeconds() - cpu_at_start_s) : 0.0;
     const size_t frames = intervals.size();
     double sum_ms = 0;
     u32 over33 = 0, over50 = 0;
@@ -359,24 +389,29 @@ void BenchEnd() {
     const double p99_ms = frames ? intervals[std::min(frames - 1, frames * 99 / 100)] : 0.0;
     const double low1_fps = p99_ms > 0 ? 1e3 / p99_ms : 0.0;
     const double worst_ms = frames ? intervals.back() : 0.0;
+    const double cpu_ms_per_frame = frames ? cpu_s * 1e3 / frames : 0.0;
+    const double cpu_util = seconds > 0 ? cpu_s / seconds : 0.0; // CPU-seconds per wall second
     const char* label_env = std::getenv("ISS_BENCH_LABEL");
     const char* label = label_env && *label_env ? label_env : "-";
     if (truncated) {
         std::printf("Bench: the window was cut at %zu frames\n", BenchMaxFrames);
     }
     std::printf("Bench: frames=%zu seconds=%.2f avg_fps=%.1f low1_fps=%.1f p99_ms=%.1f "
-                "worst_ms=%.1f over33=%u over50=%u compiles=%llu label=%s\n",
+                "worst_ms=%.1f over33=%u over50=%u compiles=%llu cpu_ms_per_frame=%.2f cpu_s=%.2f "
+                "cpu_util=%.2f label=%s\n",
                 frames, seconds, avg_fps, low1_fps, p99_ms, worst_ms, over33, over50,
-                static_cast<unsigned long long>(compiles), label);
+                static_cast<unsigned long long>(compiles), cpu_ms_per_frame, cpu_s, cpu_util, label);
     // ISS_BENCH_JSON=path: the same values as one JSON object (more decimals).
     if (const char* path = std::getenv("ISS_BENCH_JSON"); path && *path) {
         if (std::FILE* f = std::fopen(path, "w")) {
             std::fprintf(f,
                          "{\"frames\": %zu, \"seconds\": %.3f, \"avg_fps\": %.3f, \"low1_fps\": %.3f, "
                          "\"p99_ms\": %.3f, \"worst_ms\": %.3f, \"over33\": %u, \"over50\": %u, "
-                         "\"compiles\": %llu, \"label\": %s}\n",
+                         "\"compiles\": %llu, \"cpu_ms_per_frame\": %.3f, \"cpu_s\": %.3f, "
+                         "\"cpu_util\": %.3f, \"label\": %s}\n",
                          frames, seconds, avg_fps, low1_fps, p99_ms, worst_ms, over33, over50,
-                         static_cast<unsigned long long>(compiles), JsonString(label).c_str());
+                         static_cast<unsigned long long>(compiles), cpu_ms_per_frame, cpu_s, cpu_util,
+                         JsonString(label).c_str());
             std::fclose(f);
         } else {
             std::printf("Bench: cannot write %s (ISS_BENCH_JSON)\n", path);

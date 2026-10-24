@@ -119,7 +119,7 @@ $GraceSec = 30
 $Reserved = @('ISS_PAD_REPLAY', 'ISS_PAD_REPLAY_AUTO', 'ISS_PAD_RECORD', 'ISS_PAD_RECORD_SECONDS', 'ISS_PAD_FILE',
     'ISS_BENCH_JSON', 'ISS_BENCH_LABEL', 'ISS_BENCH_EXIT', 'ISS_BENCH_SKIP_MS', 'ISS_STOP_FILE', 'ISS_FRAME_STATS',
     'ISS_USER_DIR', 'ISS_GPU_USER_DIR', 'SHADPS4_FRAME_CSV', 'APPDATA')
-$Metrics = @('avg_fps', 'low1_fps', 'p99_ms', 'worst_ms', 'over33', 'over50', 'compiles')
+$Metrics = @('avg_fps', 'low1_fps', 'p99_ms', 'worst_ms', 'over33', 'over50', 'compiles', 'cpu_ms_per_frame')
 $IniDefaults = [ordered]@{ vsync = '0'; fps_limit = '0' }
 $LauncherWaitMs = 60000            # the launcher's exit after the game closed (then it is killed)
 $script:Junctions = New-Object Collections.Generic.List[string]   # every junction this process made
@@ -1366,7 +1366,7 @@ function Show-InternalTable($runs, $order, [string]$ctrl) {
         foreach ($m in $cols) {
             $s = $stats[$g][$m]; $c = $stats[$ctrl][$m]
             if ($null -eq $s.Mean) { $row += '-'; continue }
-            $nd = 1; if ($m -in 'over33', 'over50', 'compiles') { $nd = 0 }
+            $nd = 1; if ($m -in 'over33', 'over50', 'compiles') { $nd = 0 } elseif ($m -eq 'cpu_ms_per_frame') { $nd = 2 }
             $cell = Fmt "{0:F$nd}" $s.Mean
             if ($null -ne $s.Sd) { $cell += Fmt " +-{0:F$([Math]::Max($nd,1))}" $s.Sd }
             if ($g -ne $ctrl -and $null -ne $c.Mean) {

@@ -740,9 +740,17 @@ public:
 };
 #endif // __linux__
 
-// ISS_FAULT_BURST_LOG (default on): a guest frame with more than 1000 write faults (each a
+// ISS_FAULT_BURST_LOG=1 (default off): a guest frame with more than 1000 write faults (each a
 // Windows exception, ~10 us) is summarized on stderr: the 1 MB regions, the guest code writing,
-// whether images live there. The periodic 45 ms frames of 2026-10-17 had ~2875 faults each.
+// whether images live there (at most 40 frames). The periodic 45 ms frames of 2026-10-17 had
+// ~2875 faults each. Off, a write fault does no bookkeeping and no stack scan.
+static bool FaultBurstEnabled() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_FAULT_BURST_LOG");
+        return p && p[0] == '1' && p[1] == '\0';
+    }();
+    return enabled;
+}
 struct FaultBurst {
     std::mutex mutex;
     u64 frame{~0ull};
@@ -750,16 +758,16 @@ struct FaultBurst {
     u64 image_pages{}, srt_pages{};
     std::vector<u32> threads; // per fault, parallel to faults
     std::vector<u64> callers; // per fault: [rsp] at the fault (the leaf memcpy's return address)
-    u32 reported{};
+    std::atomic<u32> reported{}; // frames summarized: bookkeeping stops at 40
 };
 static FaultBurst g_fault_burst;
+// The handler's caller scan and NoteWriteFault: only while there is something left to report.
+static bool FaultBurstActive() {
+    return FaultBurstEnabled() && g_fault_burst.reported.load(std::memory_order_relaxed) < 40;
+}
 static void NoteWriteFault(u64 addr, u64 rip, Vulkan::Rasterizer* rasterizer, bool srt,
                            u64 caller) {
-    static const bool enabled = [] {
-        const char* p = std::getenv("ISS_FAULT_BURST_LOG");
-        return !p || p[0] != '0';
-    }();
-    if (!enabled) return;
+    if (!FaultBurstActive()) return;
     auto& b = g_fault_burst;
     const u64 frame = Common::Perf::GuestFrameCounter().load(std::memory_order_relaxed);
     std::scoped_lock lock{b.mutex};
@@ -886,12 +894,18 @@ struct SignalImpl : public PageManager::Impl {
                 Common::Perf::Add(Common::Perf::FaultWrites);
                 u64 caller = 0;
 #ifdef _WIN64
-                if (const auto* ctx = static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord) {
+                const auto* ctx = static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord;
+                // The scans read the faulting thread's stack (the handler runs on it), never past
+                // its top: a fault inside this handler would be fatal.
+                const auto* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+                const auto* stack_low = static_cast<const u64*>(tib->StackLimit);
+                const auto* top = static_cast<const u64*>(tib->StackBase);
+                const auto* sp = ctx ? reinterpret_cast<const u64*>(ctx->Rsp) : nullptr;
+                if (FaultBurstActive() && sp && sp >= stack_low && sp < top) {
                     // The first return address into the eboot's code on the stack (the game's
                     // call goes through the HLE libc to the host memcpy).
                     const u64 eboot = MemoryPatcher::g_eboot_address;
-                    const auto* sp = reinterpret_cast<const u64*>(ctx->Rsp);
-                    for (u32 i = 0; i < 96 && eboot; ++i) {
+                    for (u32 i = 0; i < 96 && sp + i < top && eboot; ++i) {
                         const u64 v = sp[i];
                         if (v > eboot + 0x1000 && v < eboot + 0x1000000) {
                             caller = v;
@@ -903,7 +917,7 @@ struct SignalImpl : public PageManager::Impl {
                     if (!caller && g_fault_burst.faults.size() > 1500 &&
                         dumped.fetch_add(1, std::memory_order_relaxed) < 3) {
                         std::string text;
-                        for (u32 i = 0; i < 160 && text.size() < 900; ++i) {
+                        for (u32 i = 0; i < 160 && sp + i < top && text.size() < 900; ++i) {
                             const u64 v = sp[i];
                             HMODULE module{};
                             if (v < 0x10000 ||

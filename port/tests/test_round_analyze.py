@@ -124,6 +124,38 @@ class Bench(unittest.TestCase):
         fps = next(line for line in out.splitlines() if line.startswith("avg FPS (bench)"))
         self.assertIn("~", fps)
 
+    def test_cpu_ms_per_frame(self):
+        # the game's line and JSON carry the process CPU time; the table shows it last, lower is better
+        d = ra.parse_bench_line("Bench: frames=5000 seconds=90.00 avg_fps=55.6 low1_fps=40.0 p99_ms=25.0 "
+                                "worst_ms=40.0 over33=0 over50=0 compiles=0 cpu_ms_per_frame=31.25 "
+                                "cpu_s=156.25 cpu_util=1.74 label=A\n")
+        self.assertEqual((d["cpu_ms_per_frame"], d["cpu_s"], d["cpu_util"], d["label"]), (31.25, 156.25, 1.74, "A"))
+        cpu = {"A": (30.0, 30.2), "B": (30.1, 30.3), "C": (27.0, 27.1)}
+        files = [self.write(f"{i:02d}-{n}/bench.json", dict(bench(n, 55.0 + i % 2 * 0.1), cpu_ms_per_frame=v))
+                 for i, (n, v) in enumerate([(n, v) for n in "ABC" for v in cpu[n]], 1)]
+        out = self.run_cmd(ra.cmd_bench, runs=files, control=None, noise_k=2.0, skip_ms=1000.0,
+                           csv=str(self.root / "t.csv"), json=str(self.root / "t.json"))
+        head = out.splitlines()[0]
+        self.assertTrue(head.split()[-1] == "cpu_ms/f" and head.index("drift") < head.index("cpu_ms/f"))
+        b = next(line for line in out.splitlines() if line.startswith("B "))
+        c = next(line for line in out.splitlines() if line.startswith("C "))
+        self.assertRegex(b, r"30\.20 \+-0\.14 \(\+0\.3% ~\)$")   # within the control's noise
+        self.assertRegex(c, r"27\.05 \+-0\.07 \(-10\.1%\)$")
+        t = json.loads((self.root / "t.json").read_text())
+        row = next(r for r in t["rows"] if r["metric"] == "cpu_ms_per_frame")
+        self.assertFalse(row["higher_is_better"])
+        self.assertTrue(row["groups"]["C"]["better"])
+        self.assertTrue(row["groups"]["B"]["noise"])
+        head, *rows = (self.root / "t.csv").read_text().splitlines()
+        self.assertTrue(head.endswith(",draws/frame,drift,unreliable,failed_runs,cpu_ms/f"))
+        self.assertTrue(rows[2].endswith(",27.05 +-0.07 (-10.1%)"))
+        # runs of an older build have no CPU time: no column on the table, '-' in compare.csv
+        old = [self.write(f"o{i}/bench.json", bench("A", 55.0)) for i in (1, 2)]
+        out = self.run_cmd(ra.cmd_bench, runs=old, control=None, noise_k=2.0, skip_ms=1000.0,
+                           csv=str(self.root / "o.csv"), json=None)
+        self.assertNotIn("cpu_ms/f", out.splitlines()[0])
+        self.assertTrue((self.root / "o.csv").read_text().splitlines()[1].endswith(",-"))
+
     def test_cmd_bench_prints_table(self):
         files = [self.write(f"{i:02d}-{n}/bench.json", bench(n, v, compiles=3 if i == 1 else 0))
                  for i, (n, v) in enumerate([("A", 60.0), ("B", 66.0), ("A", 61.0), ("B", 67.0)], 1)]
@@ -249,7 +281,8 @@ class Bench(unittest.TestCase):
         self.assertEqual([x["drift"] for x in d["drift"]["runs"]], [False] * 6)
         # compare.csv keeps its columns, the new ones at the end; the per-run block is its own file
         self.assertTrue((self.root / "t.csv").read_text().startswith(
-            "variant,runs,avg_fps,low1_fps,p99_ms,worst_ms,over33,over50,compiles,draws/frame,drift,unreliable,failed_runs\n"))
+            "variant,runs,avg_fps,low1_fps,p99_ms,worst_ms,over33,over50,compiles,draws/frame,drift,unreliable,failed_runs,"
+            "cpu_ms/f\n"))
         self.assertIn("draws_dev_pct", (self.root / "t_runs.csv").read_text())
         self.assertEqual(len(d["run_files"]), 6)
         self.assertEqual(d["kept_run_files"], d["run_files"])
@@ -458,8 +491,8 @@ class Bench(unittest.TestCase):
         self.assertIn("failed,true,", row)
         self.assertIn("status 'exit 3", row)
         head, *rows = (self.root / "c.csv").read_text().splitlines()
-        self.assertTrue(head.endswith(",unreliable,failed_runs"))
-        self.assertEqual([r.rsplit(",", 1)[1] for r in rows], ["0", "1"])
+        self.assertTrue(head.endswith(",unreliable,failed_runs,cpu_ms/f"))
+        self.assertEqual([r.rsplit(",", 2)[1:] for r in rows], [["0", "-"], ["1", "-"]])
 
     def test_failed_status_with_bench_json_and_ok_log_stats(self):
         # status not ok excludes a run even with a bench.json; a log with run.json status ok but
