@@ -14,6 +14,7 @@
 #include "actor_hook.h"
 #include "damage_hook.h"
 #include "view_hook.h"
+#include "spin_hook.h"
 #include "gpu/tlggpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
@@ -742,6 +743,25 @@ static void install_view_tuning(Segment *segments, uint64_t count, uint64_t size
     printf("Draw distance: ready (LOD scale, LOD bands, region LOD_ADJUST and FADE_DISTANCE, near/far clip)\n");
 }
 
+/* PAUSE in the engine's RDTSC busy-waits (src/spin_hook.h). On by default; ISS_SPIN_PAUSE=0
+ * (TLG_SPIN_PAUSE) keeps the original bytes, for A/B runs with the same build. */
+static void install_spin_pause(Segment *segments, uint64_t count, uint64_t size) {
+    const char *policy = getenv("TLG_SPIN_PAUSE");
+    if (policy && !strcmp(policy, "0")) {
+        printf("Spin wait: PAUSE off (TLG_SPIN_PAUSE=0), original busy-wait loops\n");
+        return;
+    }
+    if (!mapped(segments, count, tlg_spin_sites[0], TLG_SPIN_SITE_LENGTH) ||
+        !mapped(segments, count, tlg_spin_sites[1], TLG_SPIN_SITE_LENGTH) ||
+        !tlg_spin_signature_match(image, size)) {
+        return; /* another game or build: silent, like the other hooks of other games */
+    }
+    for (unsigned i = 0; i < 2; ++i)
+        memcpy(image + tlg_spin_sites[i], tlg_spin_paused, TLG_SPIN_SITE_LENGTH);
+    printf("Spin wait: PAUSE added to 2 RDTSC busy-wait loops (guest+0x%x, guest+0x%x)\n",
+           (unsigned)tlg_spin_sites[0], (unsigned)tlg_spin_sites[1]);
+}
+
 /* G3PATCH2 (patches.py): the patches' image base, then byte writes at image offsets, applied
  * after relocation. A write may replace a whole base-relative pointer slot (60/90 FPS++ swap
  * function pointers): the patch holds the address at the patches' base, rebased here. */
@@ -1312,6 +1332,8 @@ int main(int argc, char **argv) {
         runtime_set_report_hook(isa_report_hook);
         protect(stubs, stub_area + red_zone_area, 5);
     }
+    /* After the rewrites: a site they changed no longer matches and is left alone. */
+    install_spin_pause(segments, ns, size);
     protect(traps, round_page((import_count + 1) * 32), 5);
     if (trace_stubs) protect(trace_stubs, round_page((import_count + 1) * TRACE_STUB_SIZE), 5);
     protect(image, round_page(size), 0);
