@@ -15,7 +15,20 @@ imprime o resumo e grava summary.json + summary.csv em --out (se dado).
 --skip SEG     descarta os primeiros SEG segundos (aquecimento), antes da janela.
 compare: tabela controle(s) vs variantes, diferenca em % sobre a media dos
 controles e o desvio entre controles (ruido); marca '~' quando a diferenca
-fica dentro do ruido.
+fica dentro do ruido. Aceita tambem o JSON do benchmark (ISS_BENCH_JSON).
+
+  python3 -I round_analyze.py bench RUN [RUN ...] [--control NOME]
+        [--noise-k 2] [--skip-ms 1000] [--csv saida.csv] [--json saida.json]
+
+bench (automated benchmark, scripts/bench.ps1): one row per variant, mean +-
+sample stdev of avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles
+and the % diff vs the control variant (the first one, or --control). A RUN is
+a bench JSON (ISS_BENCH_JSON), a summary.json of 'summarize', a game log (its
+last 'Bench:' line, else its Frame stats/pacing lines) or a SHADPS4_FRAME_CSV
+file (only its benchmark window when it has the 'bench' column). Runs are
+grouped by their label (ISS_BENCH_LABEL), else by the name of their folder
+without a leading 'NN-'. '~' = the diff is within --noise-k x the control's
+stdev (likely noise); a stdev of 0 (or a single control run) gives no mark.
 """
 import argparse, csv, glob, json, math, os, re, statistics as st, sys
 
@@ -219,13 +232,255 @@ CMP = [("fps_mean", "FPS medio", True), ("fps_min", "FPS minimo", True),
        ("cpu_core_max", "nucleo max %", None), ("clk_sm_mean", "clk SM med MHz", True),
        ("power_mean", "potencia med W", None), ("temp_max", "temp max C", False),
        ("vram_used_max_mib", "VRAM max MiB", False), ("rss_max_mib", "RSS max MiB", False),
-       ("ram_used_max_mib", "RAM usada max MiB", False)]
+       ("ram_used_max_mib", "RAM usada max MiB", False),
+       # bench JSON (ISS_BENCH_JSON): absent in summary.json, so these rows only show for bench runs
+       ("avg_fps", "avg FPS (bench)", True), ("low1_fps", "1% low FPS (bench)", True),
+       ("p99_ms", "p99 ms (bench)", False), ("worst_ms", "worst ms (bench)", False),
+       ("over33", "frames >33 ms (bench)", False), ("over50", "frames >50 ms (bench)", False),
+       ("compiles", "compiles (bench)", False)]
 
 
 def load_run(p):
     with open(p) as f: d = json.load(f)
-    d.setdefault("name", os.path.basename(os.path.dirname(os.path.abspath(p))))
+    folder = os.path.basename(os.path.dirname(os.path.abspath(p)))
+    label = d.get("label") if is_bench(d) else None
+    if label not in (None, "", "-") and "name" not in d:
+        # bench JSON: every run of a variant has the same label, so the column also names its
+        # folder (bench.ps1's 01-A, 03-A...), unless the folder name already contains the label
+        d["name"] = folder if label in folder else f"{label} ({folder})"
+    d.setdefault("name", folder)
     return d
+
+
+# ------------------------------------------------------------------ bench (scripts/bench.ps1)
+# The game's summary when a TLG_PAD_REPLAY route ends: the 'Bench:' log line and ISS_BENCH_JSON.
+BENCH_KEYS = ("frames", "seconds", "avg_fps", "low1_fps", "p99_ms", "worst_ms",
+              "over33", "over50", "compiles")
+BENCH_INT = {"frames", "over33", "over50", "compiles"}
+# metric, higher is better
+BENCH_CMP = [("avg_fps", True), ("low1_fps", True), ("p99_ms", False), ("worst_ms", False),
+             ("over33", False), ("over50", False), ("compiles", False)]
+RE_BENCH = re.compile(r"Bench: (.*?)(?:\s+label=(.*?))?\s*$")
+
+
+def is_bench(d):
+    return isinstance(d, dict) and "avg_fps" in d and "fps_mean" not in d
+
+
+def _num(key, text):
+    try: return int(text) if key in BENCH_INT else float(text)
+    except ValueError:
+        try: return float(text)
+        except ValueError: return None
+
+
+def parse_bench_line(text):
+    """The last 'Bench: frames=... label=...' line of a log (None when there is none)."""
+    found = None
+    for line in text.splitlines():
+        if "Bench: " not in line: continue
+        m = RE_BENCH.search(line)
+        if not m: continue
+        d = {}
+        for tok in m[1].split():
+            k, sep, v = tok.partition("=")
+            if sep: d[k] = _num(k, v)
+        if "avg_fps" not in d: continue
+        d["label"] = "" if m[2] in (None, "-") else m[2]   # '-': ISS_BENCH_LABEL unset
+        found = d
+    return found
+
+
+def bench_from_summary(d):
+    """summary.json (summarize) in bench keys: what the 5 s Frame stats/pacing lines can tell."""
+    return dict(frames=None, seconds=None, avg_fps=d.get("fps_mean"), low1_fps=d.get("fps_1pct_low"),
+                p99_ms=d.get("pacing_p99_mean_ms"), worst_ms=d.get("worst_frame_ms"),
+                over33=None, over50=None, compiles=d.get("shader_compiles"),
+                label=d.get("name") or "", source="summary")
+
+
+def bench_from_frames(times_ms, skip_ms=1000.0):
+    """Bench keys from per-frame present intervals (ms), skipping the first skip_ms of them, with
+    the game's own definitions (gpu_v2/gpu/gpu_host.cpp): p99 = sorted[min(n-1, n*99//100)],
+    low1_fps = 1000 / p99, over33 = frames over 33.4 ms."""
+    t, skipped = [], 0.0
+    for x in times_ms:
+        if x is None or x <= 0: continue
+        if skipped < skip_ms: skipped += x; continue
+        t.append(x)
+    if not t:
+        return dict(frames=0, seconds=0.0, avg_fps=None, low1_fps=None, p99_ms=None,
+                    worst_ms=None, over33=0, over50=0, compiles=None)
+    srt = sorted(t)
+    secs = sum(t) / 1000.0
+    p99 = srt[min(len(srt) - 1, len(srt) * 99 // 100)]
+    return dict(frames=len(t), seconds=r(secs), avg_fps=r(len(t) / secs, 1),
+                low1_fps=r(1000.0 / p99, 1), p99_ms=r(p99, 1), worst_ms=r(srt[-1], 1),
+                over33=sum(1 for x in t if x > 33.4), over50=sum(1 for x in t if x > 50.0), compiles=None)
+
+
+def bench_window_rows(rows):
+    """The rows of the benchmark window of a SHADPS4_FRAME_CSV ('bench' column: 0 outside, 1 inside,
+    'bench_start' on the first row of the window, 'bench_end' on the first row after it): from
+    bench_start (or the first 1) up to before bench_end (or the next 0, or the end of the file: with
+    ISS_BENCH_EXIT the game may exit before the bench_end row). None when the column is absent;
+    [] when the window never opened (or opened and closed between two rows: bench_end alone)."""
+    if not rows or "bench" not in rows[0]: return None
+    out, inside = [], False
+    for x in rows:
+        mark = (x.get("bench") or "").strip()
+        if not inside:
+            if mark in ("bench_start", "1"): inside = True
+            elif mark == "bench_end": break
+            else: continue
+        elif mark in ("bench_end", "0", "bench_start"):
+            break
+        out.append(x)
+    return out
+
+
+def bench_from_csv(path, skip_ms=1000.0):
+    """SHADPS4_FRAME_CSV (renderer v2): present_ms per frame; shader_compiles summed when present.
+    Only the benchmark window when the CSV has the 'bench' column (the game's window starts at the
+    mark, before ISS_BENCH_SKIP_MS, so skip_ms still applies), else the whole file."""
+    rows = read_csv(path)
+    window = bench_window_rows(rows)
+    has_column = window is not None
+    if has_column: rows = window
+    d = bench_from_frames([fnum(x, "present_ms") for x in rows], skip_ms)
+    d["csv_window"] = "bench" if has_column else "whole_file"
+    if rows and "shader_compiles" in rows[0]:
+        acc, skipped = 0, 0.0
+        for x in rows:
+            ms = fnum(x, "present_ms") or 0.0
+            if ms <= 0: continue
+            if skipped < skip_ms: skipped += ms; continue
+            acc += int(fnum(x, "shader_compiles") or 0)
+        d["compiles"] = acc
+    d["label"] = ""
+    d["source"] = "frame_csv"
+    return d
+
+
+def load_bench(path, skip_ms=1000.0):
+    """One benchmark run in bench keys, plus 'name' (its group), 'path' and 'source'."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path, encoding="utf-8") as f: d = json.load(f)
+        if not isinstance(d, dict): raise ValueError(f"{path}: not a JSON object")
+        if is_bench(d):
+            d.setdefault("source", "bench_json")
+        elif "fps_mean" in d or "log" in d:
+            d = bench_from_summary(d)
+        else:
+            raise ValueError(f"{path}: neither a bench JSON nor a summary.json")
+    elif ext == ".csv":
+        d = bench_from_csv(path, skip_ms)
+    else:
+        with open(path, errors="replace") as f: text = f.read()
+        d = parse_bench_line(text)
+        if d is None:
+            d = bench_from_summary(parse_log(path, 0, 0, 5.0, 0))
+            d.update(label="", source="log_stats")
+        else:
+            d["source"] = "log_bench"
+    if d.get("label") == "-": d["label"] = ""   # the game's placeholder for no ISS_BENCH_LABEL
+    folder = os.path.basename(os.path.dirname(os.path.abspath(path)))
+    d["name"] = d.get("label") or re.sub(r"^\d+-", "", folder) or folder
+    d["path"] = path
+    return d
+
+
+def stats_of(values):
+    v = [x for x in values if x is not None]
+    if not v: return None, None, 0
+    return mean(v), (st.stdev(v) if len(v) > 1 else None), len(v)
+
+
+def bench_table(runs, control=None, noise_k=2.0):
+    """{'groups': [names, control first], 'control', 'runs': {name: n}, 'rows': [per metric]}."""
+    groups = []
+    for x in runs:
+        if x["name"] not in groups: groups.append(x["name"])
+    if control is None: control = groups[0] if groups else None
+    if control not in groups: raise ValueError(f"control '{control}' is not one of {groups}")
+    groups.remove(control); groups.insert(0, control)
+    out = dict(groups=groups, control=control, noise_k=noise_k,
+               runs={g: sum(1 for x in runs if x["name"] == g) for g in groups}, rows=[])
+    for key, better in BENCH_CMP:
+        cells = {}
+        for g in groups:
+            m, sd, n = stats_of([x.get(key) for x in runs if x["name"] == g])
+            cells[g] = dict(mean=m, sd=sd, n=n)
+        if all(c["n"] == 0 for c in cells.values()): continue
+        c = cells[control]
+        noise = (100.0 * c["sd"] / abs(c["mean"])) if (c["sd"] is not None and c["mean"]) else None
+        for g in groups[1:]:
+            v = cells[g]
+            d = pct(v["mean"], c["mean"]) if (v["mean"] is not None and c["mean"] is not None) else None
+            v["diff_pct"] = d
+            if d is None and v["mean"] is not None and c["mean"] == 0:
+                v["diff_abs"] = v["mean"]   # control 0 (over33 often is): the absolute difference
+            # a stdev of 0 is no noise estimate: a 0% diff is not "within the noise"
+            v["noise"] = bool(d is not None and noise and abs(d) <= noise_k * noise)
+            v["better"] = None if (d is None or d == 0 or v["noise"]) else ((d > 0) == better)
+        out["rows"].append(dict(metric=key, higher_is_better=better, noise_pct=noise, groups=cells))
+    return out
+
+
+def fmt_cell(c, key):
+    if c["mean"] is None: return "-"
+    # counts: whole numbers stay whole; a mean between two counts keeps one decimal
+    nd = 0 if key in BENCH_INT and float(c["mean"]).is_integer() else 1
+    s = f"{c['mean']:.{nd}f}"
+    if c["sd"] is not None: s += f" +-{c['sd']:.{max(nd, 1)}f}"
+    if c.get("diff_pct") is not None:
+        s += f" ({c['diff_pct']:+.1f}%{' ~' if c['noise'] else ''})"
+    elif "diff_abs" in c:
+        s += f" ({c['diff_abs']:+g})"
+    return s
+
+
+def print_table(hdr, rows):
+    widths = [max(len(str(x)) for x in [h] + [rw[i] for rw in rows]) for i, h in enumerate(hdr)]
+    fmt = lambda rw: "  ".join(str(x).ljust(widths[i]) for i, x in enumerate(rw)).rstrip()
+    print(fmt(hdr)); print(fmt(["-" * w for w in widths]))
+    for rw in rows: print(fmt(rw))
+
+
+def cmd_bench(a):
+    runs = []
+    for p in a.runs:
+        try: runs.append(load_bench(p, a.skip_ms))
+        except (OSError, ValueError) as e: print(f"error: {e}", file=sys.stderr); sys.exit(2)
+    try: t = bench_table(runs, a.control, a.noise_k)
+    except ValueError as e: print(f"error: {e}", file=sys.stderr); sys.exit(2)
+    hdr = ["variant", "runs"] + [row["metric"] for row in t["rows"]]
+    rows = [[g + (" (control)" if g == t["control"] else ""), str(t["runs"][g])]
+            + [fmt_cell(row["groups"][g], row["metric"]) for row in t["rows"]] for g in t["groups"]]
+    print_table(hdr, rows)
+    print(f"\nmean +-stdev per variant; % = diff vs '{t['control']}'; '~' = within {a.noise_k:g}x the "
+          "control's stdev when above 0 (likely noise)."
+          + (" One control run only: no noise estimate." if t["runs"][t["control"]] < 2 else ""))
+    for x in runs:
+        # only the game's own summary covers the replay window alone; a log/CSV/summary.json
+        # fallback counts the loading screens' compiles too, which says nothing about the cache
+        if x.get("compiles") and x.get("source") in ("bench_json", "log_bench"):
+            print(f"warning: {x['path']}: {x['compiles']} shader/pipeline compiles in the window (cache not warm)")
+        if x.get("frames") is not None and x["frames"] < 100:
+            print(f"warning: {x['path']}: only {x['frames']} frames")
+        if x.get("source") == "frame_csv" and x.get("csv_window") == "bench":
+            print(f"note: {x['path']}: no bench summary, read from the CSV's benchmark window")
+        elif x.get("source") not in ("bench_json", "log_bench"):
+            print(f"note: {x['path']}: no bench summary, read as {x['source']}"
+                  + (" (whole file: no 'bench' column)" if x.get("source") == "frame_csv" else ""))
+    if a.csv:
+        with open(a.csv, "w", newline="") as f:
+            w = csv.writer(f); w.writerow(hdr); w.writerows(rows)
+        print(f"written: {a.csv}")
+    if a.json:
+        with open(a.json, "w") as f: json.dump(dict(t, run_files=[x["path"] for x in runs]), f, indent=2)
+        print(f"written: {a.json}")
 
 
 def cmd_compare(a):
@@ -248,7 +503,7 @@ def cmd_compare(a):
             if x is None or cm is None: row.append("-"); continue
             d = pct(x, cm)
             mark = ""
-            if d is not None and noise is not None and abs(d) <= a.noise_k * noise: mark = " ~"
+            if d is not None and noise and abs(d) <= a.noise_k * noise: mark = " ~"
             elif d is not None and cm == 0 and x == 0: d = 0.0
             row.append(f"{x:g} ({d:+.1f}%){mark}" if d is not None else f"{x:g}")
         rows.append(row)
@@ -281,8 +536,12 @@ def main():
     c = sp.add_parser("compare")
     c.add_argument("--control", nargs="+", required=True); c.add_argument("--variant", nargs="+", required=True)
     c.add_argument("--csv"); c.add_argument("--noise-k", type=float, default=2.0)
+    b = sp.add_parser("bench")
+    b.add_argument("runs", nargs="+"); b.add_argument("--control")
+    b.add_argument("--noise-k", type=float, default=2.0); b.add_argument("--skip-ms", type=float, default=1000.0)
+    b.add_argument("--csv"); b.add_argument("--json")
     a = ap.parse_args()
-    (cmd_summarize if a.cmd == "summarize" else cmd_compare)(a)
+    {"summarize": cmd_summarize, "compare": cmd_compare, "bench": cmd_bench}[a.cmd](a)
 
 
 if __name__ == "__main__":

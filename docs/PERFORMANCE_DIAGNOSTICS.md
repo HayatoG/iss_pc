@@ -109,6 +109,158 @@ Reuse `TLG_READBACK_STATS=1` and `TLG_PERF_DIAG=1` in separately measured diagno
 `TLG_GPU_PROFILE=1` already provides delayed GPU timestamps: a separate run can help distinguish
 GPU pass cost from CPU wait time without introducing a GPU-wide wait.
 
+## Automated benchmark (Windows / renderer v2)
+
+`scripts/bench.ps1` (Windows PowerShell 5.1, no modules) repeats one recorded route under several
+variants of environment variables and compares them. It drives the packaged launcher
+(`"inFAMOUS Second Son.exe" --play`, or `port\launcher\infamous_run.py` from a source tree); pass
+`-Exe` unless the script sits next to the executable or the tree has `port\out` built. Hashtable
+arguments need a PowerShell prompt (`.\scripts\bench.ps1 ...`); with `powershell -File` use
+`-VariantFile`. Every mode takes `-DryRun`, which prints the plan, folders and environment and
+launches nothing. Exit codes: 0 ok, 1 error, 2 usage, 3 when a measured run did not end cleanly.
+
+```text
+.\scripts\bench.ps1 record -Exe 'D:\inFAMOUS\inFAMOUS Second Son.exe' -Seconds 90
+.\scripts\bench.ps1 run -Exe 'D:\inFAMOUS\inFAMOUS Second Son.exe' -Rounds 3 `
+    -Variants ([ordered]@{ A = @{}; B = @{ ISS_TUNING = 'x=1' } })
+.\scripts\bench.ps1 compare
+```
+
+**record.** First play to a quiet, repeatable spot and let the game save there: every replay
+presses Cross through the title menus and takes Continue, so the route starts where the newest
+save puts the player. `record` copies the whole `savedata` folder (not only the newest save;
+`savedata*` backup folders are left out), `tlg.ini` and the launcher's `settings.json` into the
+bench folder (`-BenchDir`, default `%USERPROFILE%\iss-bench`, as `save\`), starts the game on a
+copy, and records `-Seconds` of pad input into `route.txt` from the moment gameplay is
+detected. The game closes a few seconds after "Route recorded" (`-KeepOpen` leaves it open).
+An existing route is kept unless `-Force` (then it moves to `old-<time>\`).
+
+**run.** One warm-up run per variant first (discarded; `-WarmupRuns N` allows more, stopping once
+a run compiled nothing; `-NoWarmup` skips them), then `-Rounds` rounds with each variant once,
+the order reversed every other round (A B, B A, A B) so slow drift does not favour one side.
+Variants are `-Variants` (name -> `@{ VAR = 'value' }`; use `[ordered]@{}` or `-Control` to pick
+the control, a plain hashtable is sorted by name) or `-VariantFile` with the same JSON
+(`{"A": {}, "B": {"ISS_TUNING": "x=1"}}`, file order kept). An empty value unsets a variable;
+a key `ini:<key>` sets that `tlg.ini` key for the variant. Without variants it runs an A/A pair,
+which measures the noise. Every run gets:
+
+- its own data folder (`ISS_USER_DIR`): a copy of `save\savedata` and `tlg.ini`, and copies of
+  the small top-level files of the player's folder (`mods.json`...). `-Ini` is merged over the
+  defaults `vsync=0`, `fps_limit=0` (`-Ini @{ fps_limit = '60' }` keeps `vsync=0`; a value `''`
+  drops a key so the save's `tlg.ini` value stays; the launcher's vsync setting follows), then a
+  variant's `ini:` keys the same way;
+- NTFS junctions for the shader/pipeline caches only, so they stay warm from run to run:
+  `cache\` (port renderer), `gpu-0\` to `gpu-19\` (renderer v2) and the old Windows location
+  `user\cache\`. They point into the variant's own cache copy (see *Caches* below). Nothing else
+  is linked: `mods\` is read in place through `ISS_MODS_DIR` (unless the shell sets it), `dlc\`
+  gets a header-only copy (each `.pkg` cut to 4 KB and each `sce_sys\param.sfo`: all the launcher
+  reads for `ISS_ADDCONT_LABELS`), and other folders (screenshots, save backups...) are not
+  visible to the run. Every junction is tracked as it is made and removed after the run, also
+  after an error or Ctrl+C. If PowerShell itself was killed, the next `record`/`run` on the same
+  bench folder finds the leftover junctions under `record-*\user\` and `runs\*\*\user\` and
+  removes them (only the links; a warning lists them). To delete such a folder by hand use
+  `cmd /c rmdir /s /q`, never `Remove-Item -Recurse` (Windows PowerShell 5.1 follows junctions
+  into their targets); the script's own deletes (`save.new\`, `-ResetBenchCache`) refuse a
+  folder that contains a junction or link. The bench folder and the player's data folder may not
+  contain each other, and `bench.lock` keeps a second `record`/`run` off the same bench folder;
+- its own `APPDATA` with a copy of the launcher settings and a pointer file without the extra
+  backup folder: the launcher backs saves up before each start and would otherwise mirror (and
+  prune) the copies into the player's extra backup folder;
+- the variables below, the variant's variables, and the other variables of the shell. A `TLG_`
+  twin of a variable the script or a variant sets is unset for the run, because the game copies
+  `ISS_X` to `TLG_X` only when `TLG_X` is unset.
+
+**Caches.** By default the benchmark never writes into the player's caches. Each variant has its
+own copy in `<BenchDir>\cache\<variant>\` (the recording uses `cache\_record\`). On its first use
+the copy is seeded by copying the player's `cache\`, `gpu-0\`...`gpu-19\` and `user\cache\`
+folders (robocopy, read only on the player's side; nothing is moved, junctions are not followed,
+`<serial>.incompatible` leftovers are skipped); `seed.json` records where from and when, and later
+runs and sessions reuse the copy. Without a player cache the copy starts empty and the warm-up
+builds it. Seeding copies the whole cache once per variant, so it needs that much disk space; a
+copy whose seeding was interrupted (no `seed.json`) is deleted and seeded again. This matters
+because the pipeline cache belongs to one shader profile: the ISS_TUNING keys
+`lds_barriers_multi_wave` and `wave_memory_barriers` are part of it, and a run with another profile
+moves the cache aside to `<serial>.incompatible` after deleting the previous one, so an A/B/A on a
+shared cache would lose it. With per-variant copies that only happens to the bench's copy.
+`-ResetBenchCache` deletes the copies of the variants of this `run` (or `cache\_record\` for
+`record`) and seeds them again from the player's current caches.
+
+`-SharePlayerCache` keeps the earlier behaviour: the junctions point into the player's folder
+(else into `<BenchDir>\cache\_shared\`), so no copy is made, but every run writes into the
+player's real shader and pipeline caches (a warning says so). It refuses, before anything starts,
+a variant (or the shell, for variants that do not override it) that sets one of those profile
+keys in `ISS_TUNING` or sets `ISS_PIPELINE_CACHE_ROOT`. Without it, a variant with its own
+`ISS_PIPELINE_CACHE_ROOT` keeps its pipeline cache there (not seeded; it may not point into the
+player's folder).
+
+A run killed on timeout can leave a cache file half written. The Vulkan driver cache
+(`<serial>.vkcache`) carries a checksum and a damaged one is discarded on load (its periodic
+checkpoints are also replaced atomically), but a truncated shader or pipeline entry (`.key`,
+`.meta`, `.spv`, written in place) is not detected and can make the next start crash while the
+cache loads. By default the benchmark uses its own cache
+copies under `<BenchDir>\cache`, so this never affects your normal game; use `-ResetBenchCache`
+to rebuild them. With `-SharePlayerCache`, use the launcher's **Clear shader cache** (Graphics
+page, or `--clear-shader-cache`) if that happens.
+
+Each run waits up to `-TimeoutSec` (default 600). When the game reports that the route file is
+empty or unreadable (`Runtime: pad replay file empty or missing`, or a replay of 0 samples), the
+run is stopped at once with status `empty-route` and the session ends with an error (every run
+replays the same file: record it again). On timeout, or when the game does not exit
+30 s after its summary or after the route ended without one, the script creates the stop file,
+waits 30 s for the launcher and the `tlg-probe*.exe` it started, then kills what is left. Only
+probes in `<game folder>\out\` started after the run began are ever stopped; a launcher that
+does not exit 60 s after the game closed is killed too (`launcher hung`). A run folder
+`<BenchDir>\runs\<session>\NN-<variant>\` keeps `bench.json`, `game.log` (copied from
+`<game folder>\out\logs\`, which keeps the last 30 logs: benchmark runs push older ones out),
+`launcher-out.txt`/`launcher-err.txt`, `env.txt` and `run.json` (status, exit code, renderer,
+time). A missing `bench.json` is rebuilt from the `Bench:` log line. The environment of the
+calling shell is restored afterwards, also after Ctrl+C.
+
+**compare.** For the newest session (or `-Session <name|folder>`) it runs
+`python -I scripts\round_analyze.py bench` on the runs and prints, per variant, the mean and
+sample standard deviation of `avg_fps`, `low1_fps`, `p99_ms`, `worst_ms`, `over33`, `over50` and
+`compiles`, and the difference from the control in percent. `~` marks a difference within twice
+the control's standard deviation (`-NoiseK`): probably noise. With a single control run, or a
+standard deviation of 0 (identical control runs), there is no noise estimate and no `~`.
+`-Detail` adds the per-run `compare` table. The table is also written to `compare.csv` and
+`compare.json` in the session. Without Python the script prints the same table itself from the
+`bench.json` files. A warning flags a measured run that still compiled shaders.
+
+`round_analyze.py bench` reads bench JSON, `summary.json` from `summarize`, a game log (its last
+`Bench:` line, else its `Frame stats`/`Frame pacing` lines) or a `SHADPS4_FRAME_CSV` file, and groups
+runs by label, else by folder name without the `NN-` prefix. `compare --control ... --variant ...`
+also accepts bench JSON files; its columns name the run folders (`01-A`, `03-A`, or
+`label (folder)`). A `SHADPS4_FRAME_CSV` with the `bench` column is cut to the benchmark window:
+from the `bench_start` row (or the first `1`) up to before `bench_end`, or to the end of the file,
+because with `ISS_BENCH_EXIT` the game may exit before writing the `bench_end` row. `bench_start`
+marks the window's start before `ISS_BENCH_SKIP_MS`, so `--skip-ms` is applied from there. The
+CSV uses the game's p99 and 1% low definitions (`low1_fps = 1000 / p99_ms`). A CSV without the
+column, and the log fallback, cover the whole session, menus and loading included: treat them as
+diagnostics (the "cache not warm" warning is only given for the game's own summary).
+
+Variables of the route and the summary (the game copies `ISS_X` to `TLG_X` at start, only when
+`TLG_X` is unset):
+
+| Variable | Meaning |
+|---|---|
+| `ISS_PAD_RECORD=<file>` | Records pad input (lines `ms buttons lx ly rx ry l2 r2`). Without `ISS_PAD_RECORD_SECONDS`, F9 starts and stops. |
+| `ISS_PAD_RECORD_SECONDS=N` | Records N seconds, starting when gameplay is detected (over 1000 draws per frame twice in a row). |
+| `ISS_PAD_REPLAY=<file>` | The route to replay. Started by `replay` in `ISS_PAD_FILE`, or by `ISS_PAD_REPLAY_AUTO`. |
+| `ISS_PAD_REPLAY_AUTO=1` | Taps Cross every 2 s until gameplay is detected, then replays the route (wall-clock timed). |
+| `ISS_PAD_FILE=<txt>` | Manual alternative: held button names, stick values, or `replay`. |
+| `ISS_FRAME_STATS=1` | `Frame stats` / `Frame pacing` log lines every 5 s (the launcher's default). |
+| `ISS_BENCH_JSON=<path>` | When the replay ends, writes `frames, seconds, avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles, label`. The log always gets `Bench: frames=... label=...`. |
+| `ISS_BENCH_LABEL=<text>` | `label` of the summary (`bench.ps1`: the variant name). |
+| `ISS_BENCH_SKIP_MS=<ms>` | Start of the replay window left out of the summary (default 1000; `bench.ps1 -SkipMs`). |
+| `ISS_BENCH_EXIT=1` | The game exits cleanly after the summary. |
+| `ISS_STOP_FILE=<path>` | The game exits cleanly (caches checkpointed) when the file appears. |
+| `SHADPS4_FRAME_CSV=<path>` | Renderer v2: one CSV row per presented frame from the start of the process (`frame, present_ms, draws, dispatches, shader_compile_ms, ..., shader_compiles, ..., gpu_profile_enabled, bench`; `bench` is `0` outside the benchmark window, `1` inside, `bench_start` on its first row, `bench_end` on the first row after it); its folder also receives the GPU black-box dumps. `bench.ps1 -FrameCsv` sets it per run. `perf_trace_report.py` reads the port renderer's `frames.csv`, not this file. |
+
+Measure with VSync and the FPS limit off (the `-Ini` defaults), the same window mode and resolution,
+nothing else running, and the laptop on mains power. A difference smaller than the noise of three
+rounds needs more rounds, not a conclusion. For a cold-cache variant, point
+`ISS_PIPELINE_CACHE_ROOT` at an empty folder in that variant only (not with `-SharePlayerCache`).
+
 ## Tests and rollout
 
 The standalone recorder test does not need Vulkan or MSYS2:
@@ -120,6 +272,7 @@ ctest --test-dir <build-dir> -C Debug --output-on-failure --timeout 15
 python -m unittest discover -s port/tests -p test_cli_precompile.py -v
 python -m unittest discover -s port/tests -p test_perf_trace_report.py -v
 python -m unittest discover -s port/tests -p test_perf_build_revision.py -v
+python -m unittest discover -s port/tests -p test_round_analyze.py -v
 ```
 
 Tests use temporary synthetic data, not the game. Never publish local captures or game assets
