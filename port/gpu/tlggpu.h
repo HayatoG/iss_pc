@@ -100,6 +100,7 @@ typedef struct {
     int32_t mouse_enabled, invert_y;
     float sensitivity, smoothing, accel, deadzone;
     char key_map[512];
+    float vertical; /* mouse_sensitivity_y: y's sensitivity over x's; 0 (zeroed struct) = 1 */
 } TlgGpuInputSettings;
 void tlggpu_input_settings(TlgGpuInputSettings *settings);
 /* Touchpad mode of the mouse (runtime_pad.c): while active, a small touchpad with the virtual
