@@ -641,8 +641,25 @@ enum Miss : u32 { MissState, MissShape, MissTemplate, MissViews, MissPipeline, M
 constexpr const char* miss_names[MissCount] = {"state", "no_shape", "no_template", "views",
                                                "pipeline", "format", "buffer", "ring", "pool",
                                                "command", "not_ready"};
+// ISS_NATIVE_PASSES_MISS_DETAIL=1 (diagnosis): what the buffer misses were, each checked again
+// on the miss (the residency lock and two heap lookups): the range not resident in the arena, in
+// no arena (or across two), its arena's sparse bind not submitted yet (RequiredSubmittedTick),
+// partly in the imported heap, other (ISS_NATIVE_PASSES_NO_ARENA, or found when checked again).
+// Off by default: then only the buffer total (miss[buffer]) is counted.
+enum BufferMiss : u32 { BufferNotResident, BufferNoArena, BufferSparsePending, BufferUnified,
+                        BufferOther, BufferMissCount };
+constexpr const char* buffer_miss_names[BufferMissCount] = {"not_resident", "no_arena",
+                                                            "sparse_pending", "unified", "other"};
+static bool MissDetail() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_NATIVE_PASSES_MISS_DETAIL");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
 struct EngineStats {
     std::array<std::atomic<u64>, MissCount> miss{};
+    std::array<std::atomic<u64>, BufferMissCount> buffer_miss{};
     std::atomic<u64> draws{}, empty{};
 };
 static EngineStats engine_stats;
@@ -1065,11 +1082,30 @@ static np::DrawResult Record(np::Segment& s, void* regs_ptr, u64 key, const u32*
             const char* p = std::getenv("ISS_NATIVE_PASSES_NO_ARENA");
             return p && p[0] == '1';
         }();
-        if (no_arena) return false;
+        if (no_arena) {
+            if (MissDetail())
+                stats.buffer_miss[BufferOther].fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
         // Read first: an arena created or migrated after it changes the generation.
         const u64 arena_gen = cache.ArenaBindingGeneration();
         const auto arena = cache.PeekPublishedArena(address, u32(size));
         if (!arena) {
+            if (MissDetail()) {
+                using Why = VideoCore::BufferCache::PublishedArenaMiss;
+                BufferMiss why = BufferOther;
+                if (cache.IsUnified(address, 1) || cache.IsUnified(address + size - 1, 1)) {
+                    why = BufferUnified;
+                } else {
+                    switch (cache.PeekPublishedArenaMiss(address, u32(size))) {
+                    case Why::NotResident: why = BufferNotResident; break;
+                    case Why::NoArena: why = BufferNoArena; break;
+                    case Why::SparsePending: why = BufferSparsePending; break;
+                    default: break;
+                    }
+                }
+                stats.buffer_miss[why].fetch_add(1, std::memory_order_relaxed);
+            }
             if (size <= (16u << 20)) {
                 auto& m = Misses();
                 std::scoped_lock lock{m.mutex};
@@ -1454,6 +1490,17 @@ static void Report() {
                       (unsigned long long)e.miss[m].load(std::memory_order_relaxed));
         misses += item;
     }
+    std::string buffer_misses;
+    if (MissDetail()) {
+        buffer_misses = " buffer_miss[";
+        for (u32 m = 0; m < BufferMissCount; ++m) {
+            char item[48];
+            std::snprintf(item, sizeof(item), " %s=%llu", buffer_miss_names[m],
+                          (unsigned long long)e.buffer_miss[m].load(std::memory_order_relaxed));
+            buffer_misses += item;
+        }
+        buffer_misses += " ]";
+    }
     std::string rejects, indirect_rejects;
     for (u32 r = 0; r < 13; ++r) {
         char item[48];
@@ -1474,11 +1521,11 @@ static void Report() {
                      (unsigned long long)cp_stats.synced_reads,
                      (unsigned long long)cp_stats.indirect_draws, indirect_rejects.c_str());
     std::fprintf(stderr,
-                 "NATIVE_PASSES_VK engine draws=%llu empty=%llu miss[%s ] | cp executed=%llu "
+                 "NATIVE_PASSES_VK engine draws=%llu empty=%llu miss[%s ]%s | cp executed=%llu "
                  "draws=%llu learned=%llu learn_mismatch=%llu learn_failed=%llu relearn=%llu merged=%llu "
                  "reject[%s ]\n",
                  (unsigned long long)e.draws.load(), (unsigned long long)e.empty.load(),
-                 misses.c_str(), (unsigned long long)cp_stats.executed,
+                 misses.c_str(), buffer_misses.c_str(), (unsigned long long)cp_stats.executed,
                  (unsigned long long)cp_stats.draws, (unsigned long long)cp_stats.learned,
                  (unsigned long long)cp_stats.learn_mismatch,
                  (unsigned long long)cp_stats.learn_failed,

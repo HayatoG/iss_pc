@@ -3196,6 +3196,23 @@ BufferCache::PublishedArena BufferCache::PeekPublishedArena(VAddr device_addr,
             published_bda_g_tick.load(std::memory_order_acquire)};
 }
 
+BufferCache::PublishedArenaMiss BufferCache::PeekPublishedArenaMiss(VAddr device_addr,
+                                                                    u32 size) const {
+    if (size == 0 || device_addr == 0 || device_addr > std::numeric_limits<u64>::max() - size)
+        return PublishedArenaMiss::Invalid;
+    std::scoped_lock lock{residency_mutex};
+    const u64 first_block = device_addr >> block_shift;
+    const u64 last_block = (device_addr + size - 1) >> block_shift;
+    if (!IsResident(first_block, last_block)) return PublishedArenaMiss::NotResident;
+    const u64 first_page = first_block >> blocks_per_arena_page_shift;
+    const u64 last_page = last_block >> blocks_per_arena_page_shift;
+    const auto* arena = address_space[first_page];
+    if (!arena || address_space[last_page] != arena) return PublishedArenaMiss::NoArena;
+    if (!residency_publication.RequiredSubmittedTick(arena))
+        return PublishedArenaMiss::SparsePending;
+    return PublishedArenaMiss::Found;
+}
+
 std::optional<BufferCache::AscArenaPreflight> BufferCache::PrepareArenaForAsc(
     VAddr device_addr, u32 size) {
     if (!cp_split_enabled || !liverpool || !liverpool->CpSplitActive() ||

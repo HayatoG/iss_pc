@@ -392,6 +392,10 @@ public:
     };
     /// Read-only C preflight. Returns empty while a required bind is still pending.
     [[nodiscard]] PublishedArena PeekPublishedArena(VAddr device_addr, u32 size) const;
+    /// Diagnosis only (ISS_NATIVE_PASSES_MISS_DETAIL): why PeekPublishedArena finds no arena for
+    /// the range (checked again, as it does).
+    enum class PublishedArenaMiss : u8 { Found, Invalid, NotResident, NoArena, SparsePending };
+    [[nodiscard]] PublishedArenaMiss PeekPublishedArenaMiss(VAddr device_addr, u32 size) const;
     /// iss: makes a guest range resident in the arena and current (command processor thread,
     /// not split): the native paths only find ranges already resident, and the small ones the
     /// command processor streams never became resident once the 2.5 GB binding stopped making
