@@ -1278,9 +1278,12 @@ function Get-RunSignature($def, $runIni, $build, $launcher, $mods) {
 }
 
 # <cache copy>\slot.json: the last run that used the copy (written after every run of a session).
+# $null without seed.json too: Initialize-BenchCache (after the warm-up plan) deletes and seeds
+# such a copy again, so its slot.json would describe caches that are gone.
 function Read-SlotState([string]$key) {
-    $p = Join-Path (Get-BenchCacheRoot $key) 'slot.json'
-    if (-not [IO.File]::Exists($p)) { return $null }
+    $root = Get-BenchCacheRoot $key
+    $p = Join-Path $root 'slot.json'
+    if (-not [IO.File]::Exists($p) -or -not [IO.File]::Exists((Join-Path $root 'seed.json'))) { return $null }
     try { $s = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
     if (-not $s -or -not $s.PSObject.Properties['last']) { return $null }
     return $s.last
