@@ -1255,7 +1255,7 @@ void BufferCache::TickFrame() {
     // Hot pages are protected again from time to time, to notice those the guest stopped
     // writing every frame (the others become hot again after one fault).
     const u32 frame = g_tracker_frame.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (SmallReadMemoEnabled() && (frame % 600) == 0) {
+    if (Common::Perf::kStats && SmallReadMemoEnabled() && (frame % 600) == 0) {
         const auto& stats = small_read_memo.Statistics();
         std::fprintf(stderr,
             "SMALL_READ_MEMO checks=%llu matches=%llu hits=%llu hazards=%llu stores=%llu unstable=%llu\n",
@@ -1266,7 +1266,7 @@ void BufferCache::TickFrame() {
             static_cast<unsigned long long>(stats.stores),
             static_cast<unsigned long long>(stats.unstable));
     }
-    if (frame % 1800 == 0 && iss::phase::Enabled()) {
+    if (Common::Perf::kStats && frame % 1800 == 0 && iss::phase::Enabled()) {
         std::fprintf(stderr, "COMPUTE_PHASES barriers_skipped=%llu run_flushes=%llu\n",
                      static_cast<unsigned long long>(iss::phase::g_skipped.exchange(0)),
                      static_cast<unsigned long long>(iss::phase::g_flushed.exchange(0)));
@@ -1667,7 +1667,7 @@ void BufferCache::WaitReadback(VAddr device_addr, Vulkan::Semaphore* semaphore, 
                     scheduler.GetWorkSemaphore()->KnownGpuTick());
         semaphore->Wait(tick);
     }
-    Common::Perf::Add(Common::Perf::ReadbackAsyncWaitNs, Common::Perf::NowNs() - wait_start);
+    Common::Perf::Add(Common::Perf::ReadbackAsyncWaitNs, Common::Perf::StatNowNs() - wait_start);
     iss::timeline::Emit("readback_wait_end",reinterpret_cast<u64>(semaphore),tick,device_addr,
         semaphore->KnownGpuTick(),0,0,Common::Perf::NowNs()-wait_start);
     LogReadbackDiag({.event = "wait_end", .address = device_addr,
@@ -2688,12 +2688,13 @@ void BufferCache::PrefetchStreamSource(VAddr device_addr, u64 size) noexcept {
 // ISS_OBTAIN_CENSUS=1: ObtainBuffer outcomes on the command processor thread (calls, cycles,
 // bytes, and how many addresses lie in the command buffer segment being processed).
 namespace {
+// Read once at load: a function-local static would check its guard at every ObtainBuffer.
+const bool g_obtain_census_enabled = [] {
+    const char* value = std::getenv("ISS_OBTAIN_CENSUS");
+    return value && value[0] == '1';
+}();
 bool ObtainCensusEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("ISS_OBTAIN_CENSUS");
-        return value && value[0] == '1';
-    }();
-    return enabled;
+    return g_obtain_census_enabled;
 }
 enum ObtainOutcome : u32 { OSmallMemo, OStreamReuse, OArenaClean, OStreamCopy, OLarge, ONum };
 struct ObtainCensus {
@@ -2712,10 +2713,13 @@ struct ObtainTimer {
     ObtainTimer(VAddr a, u32 s, bool w, bool enabled)
         : on{enabled},
           start{on ? __rdtsc() : 0}, address{a}, size{s}, is_written{w} {}
+    // The check inline, the census out of line: ObtainBuffer pays no call without ISS_OBTAIN_CENSUS.
     ~ObtainTimer() {
-        if (!on) {
-            return;
+        if (on) [[unlikely]] {
+            Record();
         }
+    }
+    [[gnu::noinline]] void Record() {
         auto& c = g_obtain_census;
         ++c.calls[outcome];
         c.cycles[outcome] += __rdtsc() - start;

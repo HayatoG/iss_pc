@@ -1570,7 +1570,7 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
         for (const auto& [address, size] : ranges)
             (buffer_cache.PrefaultArena(address, size) ? prefaulted : refused)
                 .fetch_add(1, std::memory_order_relaxed);
-        if ((++c.prefault_batches & 255) == 1)
+        if (Common::Perf::kStats && (++c.prefault_batches & 255) == 1)
             std::fprintf(stderr, "NATIVE_ARENA_PREFAULT ranges=%llu refused=%llu\n",
                          (unsigned long long)prefaulted.load(), (unsigned long long)refused.load());
     }
@@ -1785,7 +1785,7 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
         if (alias_depth) g_alias.alias_depth[cls].fetch_add(1, std::memory_order_relaxed);
         if (same) g_alias.same_image[cls].fetch_add(1, std::memory_order_relaxed);
         static std::atomic<u32> indirect_logged{0};
-        if ((alias_color || alias_depth || same) &&
+        if (Common::Perf::kStats && (alias_color || alias_depth || same) &&
             (indirect_first ? indirect_logged.fetch_add(1) < 20 : g_alias.logged.fetch_add(1) < 40)) {
             if (indirect_first) std::fprintf(stderr, "NATIVE_INDIRECT_FEEDBACK ");
             std::string text;

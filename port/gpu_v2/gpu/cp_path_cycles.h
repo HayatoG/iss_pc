@@ -26,12 +26,14 @@ enum Path : std::uint32_t {
     CsTextures, CsReads, CsWrites, CsBarriers, CsRecord, CsAccess, PathCount
 };
 
+// Read once at load: Switch and every Scope check it on the command processor's hot paths (a
+// function-local static would check its guard each time).
+inline const bool g_enabled = [] {
+    const char* value = std::getenv("ISS_CP_PATH_CYCLES");
+    return value && value[0] == '1';
+}();
 inline bool Enabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("ISS_CP_PATH_CYCLES");
-        return value && value[0] == '1';
-    }();
-    return enabled;
+    return g_enabled;
 }
 
 struct Totals {

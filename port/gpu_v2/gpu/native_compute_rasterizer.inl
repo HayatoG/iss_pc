@@ -1071,7 +1071,7 @@ void Rasterizer::NativeComputeLearn(u64 key, const ComputePipeline* pipeline,
         tables.templates[t->key] = std::move(t);
     }
     ++c.learned;
-    {
+    if constexpr (Common::Perf::kStats) { // a log line per learned template (thousands)
         std::fprintf(stderr,
                      "NATIVE_COMPUTE_TEMPLATE order=%u key=%llx program=%llx pgm_hash=%llx walker=%d "
                      "flat_words=%u buffers=%zu written=%u images=%zu samplers=%zu\n",

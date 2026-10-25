@@ -1373,12 +1373,14 @@ std::optional<u32> DynamicState::BindCache::SelectDescriptorDeltas(
     descriptors[index].num_writes = ~0U;
     Common::Perf::Add(Common::Perf::DescriptorPushes);
     if (*count == 0) Common::Perf::Add(Common::Perf::DescriptorPushesSkipped);
-    static thread_local u64 calls{}, input_writes{}, emitted_writes{};
-    ++calls; input_writes += writes.size(); emitted_writes += *count;
-    if ((calls & 0x3ffff) == 0) std::fprintf(stderr,
-        "DESCRIPTOR_DELTAS calls=%llu input=%llu emitted=%llu\n",
-        static_cast<unsigned long long>(calls), static_cast<unsigned long long>(input_writes),
-        static_cast<unsigned long long>(emitted_writes));
+    if constexpr (Common::Perf::kStats) {
+        static thread_local u64 calls{}, input_writes{}, emitted_writes{};
+        ++calls; input_writes += writes.size(); emitted_writes += *count;
+        if ((calls & 0x3ffff) == 0) std::fprintf(stderr,
+            "DESCRIPTOR_DELTAS calls=%llu input=%llu emitted=%llu\n",
+            static_cast<unsigned long long>(calls), static_cast<unsigned long long>(input_writes),
+            static_cast<unsigned long long>(emitted_writes));
+    }
     return u32(*count);
 }
 

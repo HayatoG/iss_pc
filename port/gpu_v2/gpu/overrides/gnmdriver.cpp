@@ -480,12 +480,14 @@ u32 PS4_SYSV_ABI sceGnmDispatchInitDefaultHardwareState(u32* cmdbuf, u32 size) {
 #ifdef _WIN32
 extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId();
 #endif
+// Read once at load: the draw calls of the game's threads check it (a function-local static
+// would check its guard at every call).
+static const bool g_gnm_census_enabled = [] {
+    const char* value = std::getenv("ISS_GNM_CENSUS");
+    return value && value[0] == '1';
+}();
 static bool GnmCensusEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("ISS_GNM_CENSUS");
-        return value && value[0] == '1';
-    }();
-    return enabled;
+    return g_gnm_census_enabled;
 }
 struct GnmCensus {
     std::mutex lock;

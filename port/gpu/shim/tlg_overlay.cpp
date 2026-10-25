@@ -140,6 +140,10 @@ std::vector<TlgPng::Image> choice_pictures;
 std::vector<ImTextureData*> choice_textures, choice_retired;
 std::atomic<bool> choice_retiring{false};
 float base_scale = 1.0f;
+// The style at scale 1: every scale change starts from it. Scaling the current style again
+// truncated its sizes each time (4, 3, 3, 2... px between 1080 and 900 lines) until
+// WindowBorderHoverPadding reached 0 and ImGui's sanity check aborted the game.
+ImGuiStyle unscaled_style;
 
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
@@ -1622,6 +1626,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     style.FrameRounding = 4.0f;
     style.GrabRounding = 4.0f;
     style.Colors[ImGuiCol_WindowBg].w = 0.92f;
+    unscaled_style = style;
 
     ImFontConfig font_config;
     font_config.FontDataOwnedByAtlas = false;
@@ -2167,7 +2172,8 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     const float scale = std::max(float(extent.height) / 1080.0f, 0.75f);
     if (std::abs(scale - base_scale) > 0.01f) {
         ImGuiStyle& style = ImGui::GetStyle();
-        style.ScaleAllSizes(scale / base_scale);
+        style = unscaled_style;
+        style.ScaleAllSizes(scale);
         style.FontScaleMain = scale;
         base_scale = scale;
     }

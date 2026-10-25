@@ -4282,7 +4282,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                                      static_cast<unsigned long long>(observed ? observed->address_reuses : 0));
                     }
                 }
-                if (size >= (256ull << 20)) {
+                if (Common::Perf::kStats && size >= (256ull << 20)) {
                     static std::atomic<u32> huge_logged{};
                     if (huge_logged.fetch_add(1, std::memory_order_relaxed) < 40)
                         std::fprintf(stderr,
