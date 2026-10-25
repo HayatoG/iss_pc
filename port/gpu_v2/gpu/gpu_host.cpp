@@ -337,6 +337,8 @@ void BenchFrame(Clock::time_point now) {
         g_bench.compiles_at_start = BenchCompiles();
         g_bench.cpu_at_start_s = ProcessCpuSeconds();
         g_bench.cpu_threads_at_start = IssBenchCpu::Take();
+        // the thread list takes 1-5 ms on this thread: the first kept interval starts after it
+        g_bench.last = Clock::now();
         return;
     }
     if (g_bench.intervals_ms.size() < BenchMaxFrames) {

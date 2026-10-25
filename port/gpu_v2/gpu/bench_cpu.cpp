@@ -31,6 +31,8 @@ Category Classify(const std::string& name, bool guest) {
     static constexpr const char* helpers[] = {
         "GpuCommandRecorder", "VkRecorder", "NativePasses", "Scout", "GpuUploadWorker",
         "PresentThread", "tlg:Present", "DrawStage", "PendingOpsRunner", "AscCP", "Uffd"};
+    // a thread of the runtime's guest registry is the game's, whatever its name
+    if (guest) return Guest;
     for (const char* part : compile) {
         if (Has(name, part)) return Compile;
     }
@@ -38,7 +40,7 @@ Category Classify(const std::string& name, bool guest) {
     for (const char* part : helpers) {
         if (Has(name, part)) return GpuHelpers;
     }
-    return guest ? Guest : Other;
+    return Other;
 }
 
 #ifdef _WIN32
@@ -62,6 +64,11 @@ Sample Take() {
         if (!thread) {
             continue;
         }
+        // the snapshot is older than the handle: the id may belong to another process's thread now
+        if (GetProcessIdOfThread(thread) != pid) {
+            CloseHandle(thread);
+            continue;
+        }
         ThreadSample t;
         t.tid = entry.th32ThreadID;
         ULONG64 cycles = 0;
@@ -72,6 +79,7 @@ Sample Take() {
         if (GetThreadTimes(thread, &created, &exited, &kernel, &user)) {
             t.ticks_100ns = ((uint64_t(kernel.dwHighDateTime) << 32) | kernel.dwLowDateTime) +
                             ((uint64_t(user.dwHighDateTime) << 32) | user.dwLowDateTime);
+            t.created = (uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime;
         }
         PWSTR wide = nullptr;
         if (SUCCEEDED(GetThreadDescription(thread, &wide)) && wide) {
@@ -119,13 +127,12 @@ Split Diff(const Sample& a, const Sample& b, size_t top_threads) {
     double threads_s = 0;
     for (const ThreadSample& t : b.threads) {
         uint64_t cycles = t.cycles, ticks = t.ticks_100ns;
-        if (const auto it = before.find(t.tid); it != before.end()) {
+        // the same thread: its id and creation time (an id reused after its first owner exited is a
+        // new thread, from zero; the first owner stays in before: exited)
+        if (const auto it = before.find(t.tid); it != before.end() && it->second->created == t.created) {
             const ThreadSample& old = *it->second;
-            // a thread id reused after its first owner exited starts over from zero
-            if (old.cycles <= cycles) {
-                cycles -= old.cycles;
-                ticks -= std::min(ticks, old.ticks_100ns);
-            }
+            cycles -= std::min(cycles, old.cycles);
+            ticks -= std::min(ticks, old.ticks_100ns);
             before.erase(it);
         }
         ThreadSplit ts;

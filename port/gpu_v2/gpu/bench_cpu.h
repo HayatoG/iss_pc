@@ -24,6 +24,7 @@ struct ThreadSample {
     uint64_t tid{};
     uint64_t cycles{};   // QueryThreadCycleTime
     uint64_t ticks_100ns{}; // GetThreadTimes user + kernel (tick sampled; for comparison)
+    uint64_t created{};  // GetThreadTimes creation time (FILETIME): tells a reused id apart
     std::string name;    // GetThreadDescription (UTF-8; empty when unnamed)
     bool guest{};        // in the runtime's guest thread registry
 };
@@ -51,8 +52,8 @@ struct Split {
     std::vector<ThreadSplit> top; // the busiest threads, most cycles first
 };
 
-// The category of a thread by its name, or Guest for a registered guest thread that has no
-// renderer name.
+// The category of a thread: Guest for a thread of the runtime's guest registry, else by its name.
+// The conversion assumes an invariant TSC (constant rate across cores and power states).
 Category Classify(const std::string& name, bool guest);
 // The process's threads now (Windows; elsewhere an invalid sample: no split).
 Sample Take();
