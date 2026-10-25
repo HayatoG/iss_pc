@@ -5470,6 +5470,21 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     return true;
 }
 
+void Rasterizer::DiscardOverwrite(VAddr addr, u64 size) {
+    const VAddr lo = Common::AlignUp(addr, VideoCore::BYTES_PER_PAGE);
+    const VAddr hi = Common::AlignDown(addr + size, VideoCore::BYTES_PER_PAGE);
+    if (lo >= hi) return;
+    // Left to the write faults: the G4 split (paused readback path), the command processor's own
+    // writes, memory not GPU mapped or without GPU data.
+    if (cp_split_enabled && liverpool->CpSplitActive()) return;
+    if (liverpool->IsCurrentCpThread()) return;
+    if (!IsMapped(lo, hi - lo) || !buffer_cache.IsRegionGpuModified(lo, hi - lo)) return;
+    BumpBindEpoch();
+    DrainDrawPipe(5);
+    buffer_cache.DiscardOverwrite(lo, hi - lo);
+    texture_cache.InvalidateMemory(lo, hi - lo);
+}
+
 void Rasterizer::BeforeGpuThreadWrite(VAddr addr, u64 size) {
     BumpBindEpoch();
     if (!size) return;

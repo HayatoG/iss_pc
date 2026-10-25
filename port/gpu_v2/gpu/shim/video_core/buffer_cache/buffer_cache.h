@@ -307,6 +307,10 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
 
+    /// ISS_READBACK_DISCARD: a guest thread is about to overwrite the whole pages of the range
+    /// (page aligned): their GPU data is dropped instead of read back first.
+    void DiscardOverwrite(VAddr device_addr, u64 size);
+
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     /// guest_rip: the faulting instruction of a guest read (readback_relaxed_sites), 0 if none.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false,

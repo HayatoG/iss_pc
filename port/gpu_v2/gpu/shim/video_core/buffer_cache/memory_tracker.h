@@ -268,6 +268,14 @@ public:
     /// A write fault (is_fault) also counts towards making the page hot, see RegionManager.
     bool InvalidateRegion(VAddr cpu_addr, u64 size, bool is_fault, bool from_gpu_thread,
                           auto&& on_flush) noexcept {
+        return InvalidateRegion(cpu_addr, size, is_fault, from_gpu_thread, false, on_flush);
+    }
+
+    /// overwrite: the CPU is about to overwrite the whole range (whole pages, see
+    /// BufferCache::DiscardOverwrite): its GPU data is discarded as with readback_write_discard
+    /// (still read back when a readback is pending on it).
+    bool InvalidateRegion(VAddr cpu_addr, u64 size, bool is_fault, bool from_gpu_thread,
+                          bool overwrite, auto&& on_flush) noexcept {
         const u32 hot_threshold =
             is_fault ? Common::Perf::GetTuning().hot_page_faults.load(std::memory_order_relaxed)
                      : 0;
@@ -292,7 +300,8 @@ public:
         bool discarded = false;
         const bool discard =
             readbacks_mode == GpuReadbacksMode::Precise &&
-            Common::Perf::GetTuning().readback_write_discard.load(std::memory_order_relaxed);
+            (overwrite ||
+             Common::Perf::GetTuning().readback_write_discard.load(std::memory_order_relaxed));
         // Only small invalidations (write faults) keep the content of the pages they discard.
         const bool merge =
             discard && size <= MaxSnapshotPages * BYTES_PER_PAGE &&

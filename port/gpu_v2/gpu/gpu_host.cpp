@@ -20,6 +20,7 @@
 #include <SDL3/SDL.h>
 #include "bench_cpu.h"
 #include "iss_gpu.h"
+#include "readback_stats.h"
 #include "tlggpu.h"
 #include "common/perf_stats.h"
 #include "common/types.h"
@@ -158,7 +159,13 @@ extern "C" int tlggpu_handle_fault(void* ucontext, void* address) {
     return handled;
 }
 
-extern "C" int tlggpu_cpu_write(void*, const void*, int, uint64_t) {
+extern "C" int tlggpu_cpu_write(void* dst, const void*, int, uint64_t size) {
+    // ISS_READBACK_DISCARD=1: the whole pages of the range lose their GPU data now instead of
+    // being read back by their write faults (every byte of the range is written next).
+    if (size >= 4096 && iss::readback_stats::DiscardEnabled()) {
+        if (auto* r = Core::Memory::Instance()->GetRasterizer())
+            r->DiscardOverwrite(reinterpret_cast<uintptr_t>(dst), size);
+    }
     return 0; // the runtime writes normally (faults reach tlggpu_handle_fault)
 }
 
@@ -254,6 +261,28 @@ void FrameStats(Clock::time_point now, double frame_ms, u32 vblank_hz) {
                     delta[4] / 1e6 / n, delta[5] / 1e6 / n, delta[6] / 1e6 / n,
                     delta[7] / 1e6 / n, delta[9] != 0 ? delta[8] / delta[9] : 0.0,
                     delta[10] / 1e6 / n);
+    }
+    {
+        // Readback stats (readback_stats.h): per frame over the window.
+        namespace rs = iss::readback_stats;
+        static std::array<u64, rs::Num> last_rb{};
+        std::array<double, rs::Num> d{};
+        for (unsigned i = 0; i < rs::Num; ++i) {
+            const u64 v = rs::counters[i].load(std::memory_order_relaxed);
+            d[i] = double(v - last_rb[i]);
+            last_rb[i] = v;
+        }
+        const double n = frames ? double(frames) : 1.0;
+        std::printf("Readback stats: per frame: write faults %.2f (%.3f ms), write ranges %.2f, "
+                    "reads %.2f, KB %.1f; GPU idle waits %.2f (%.3f ms), tick waits %.2f "
+                    "(%.3f ms); stream entries %.2f, likely whole-page overwrites %.2f; "
+                    "discard: calls %.2f, discarded %.2f (KB %.1f), read back anyway %.2f\n",
+                    d[rs::WriteFault] / n, d[rs::WriteFaultNs] / 1e6 / n, d[rs::WriteRange] / n,
+                    d[rs::Read] / n, d[rs::Bytes] / 1024.0 / n, d[rs::IdleWaits] / n,
+                    d[rs::IdleNs] / 1e6 / n, d[rs::SemWaits] / n, d[rs::SemNs] / 1e6 / n,
+                    d[rs::StreamEntry] / n, d[rs::StreamInterior] / n, d[rs::DiscardCalls] / n,
+                    d[rs::DiscardHits] / n, d[rs::DiscardBytes] / 1024.0 / n,
+                    d[rs::DiscardBlocked] / n);
     }
     // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
     if (intervals.size() > 2) {

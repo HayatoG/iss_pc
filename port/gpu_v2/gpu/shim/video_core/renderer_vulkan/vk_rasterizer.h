@@ -537,6 +537,10 @@ public:
     void DumpAfter(const Pipeline* pipeline);
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// ISS_READBACK_DISCARD: a guest thread is about to write every byte of [addr, addr + size)
+    /// (memcpy, memset, file reads): the GPU data of the whole pages inside is dropped instead
+    /// of read back by their write faults. The partly written pages at the ends fault as usual.
+    void DiscardOverwrite(VAddr addr, u64 size);
     /// The command processor wrote guest memory directly (see BufferCache::OnGpuThreadWrite).
     void BeforeGpuThreadWrite(VAddr addr, u64 size);
     void OnGpuThreadWrite(VAddr addr, u64 size);
