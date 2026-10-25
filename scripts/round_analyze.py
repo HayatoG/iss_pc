@@ -19,7 +19,7 @@ fica dentro do ruido. Aceita tambem o JSON do benchmark (ISS_BENCH_JSON).
 
   python3 -I round_analyze.py bench RUN [RUN ...] [--control NOME]
         [--noise-k 2] [--skip-ms 1000] [--csv saida.csv] [--json saida.json]
-        [--drift-pct 5] [--exclude-drift]
+        [--drift-pct 5] [--exclude-drift] [--cpu-split]
 
 bench (automated benchmark, scripts/bench.ps1): one row per variant, mean +-
 sample stdev of avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles,
@@ -30,8 +30,12 @@ from their cycle times: the background shader compiles and the rest left out;
 lower is better; the last columns: a game-side cost the FPS of a GPU-bound run
 hides) and the % diff vs the control variant (the first one, or --control).
 compare.json also compares each category (cpu_guest/cp/gpu_helpers/compile/
-other/cycles_ms_per_frame) and compare_runs.csv lists them per run. A RUN is
-a bench JSON (ISS_BENCH_JSON), a summary.json of 'summarize', a game log (its
+other/cycles_ms_per_frame) and compare_runs.csv lists them per run;
+--cpu-split adds guest/cp/gpu_helpers ms/f columns at the end of the table
+(the parts of cpu_game; not in compare.csv). A RUN is
+a bench JSON (ISS_BENCH_JSON), a session folder of bench.ps1 (its NN-<variant>
+run folders, not warmup-*: each one's bench.json, else frames.csv, else
+game.log; the control defaults to variants.json's), a summary.json of 'summarize', a game log (its
 last 'Bench:' line, else its Frame stats/pacing lines) or a SHADPS4_FRAME_CSV
 file (only its benchmark window when it has the 'bench' column). Runs are
 grouped by their label (ISS_BENCH_LABEL), else by the name of their folder
@@ -640,7 +644,7 @@ def bench_table(runs, control=None, noise_k=2.0, all_runs=None):
 def fmt_cell(c, key):
     if c["mean"] is None: return "-"
     # counts: whole numbers stay whole; a mean between two counts keeps one decimal
-    nd = (BENCH_EXTRA[key][2] if key in BENCH_EXTRA else
+    nd = (BENCH_EXTRA[key][2] if key in BENCH_EXTRA else 2 if key in BENCH_CPU_SPLIT else
           0 if key in BENCH_INT and float(c["mean"]).is_integer() else 1)
     s = f"{c['mean']:.{nd}f}"
     if c["sd"] is not None: s += f" +-{c['sd']:.{max(nd, 1)}f}"
@@ -681,9 +685,40 @@ def drift_column(g, check, runs):
     return f"{sum(1 for x in mine if x['drift'])}/{len(mine)}" + (f" ?{unknown}" if unknown else "")
 
 
+# A session folder of bench.ps1: its measured runs, as bench.ps1 compare picks them ('NN-<variant>'
+# folders, not warmup-*; bench.json, else frames.csv, else game.log), plus its control.
+SESSION_RUN = re.compile(r"^\d+-")
+SESSION_FILES = ("bench.json", "frames.csv", "game.log")
+
+
+def expand_runs(paths):
+    """(run files, the control of the first session folder or None): a folder in paths expands
+    to its runs in name order; a file stays as it is."""
+    out, control = [], None
+    for p in paths:
+        if not os.path.isdir(p):
+            out.append(p); continue
+        found = 0
+        for name in sorted(os.listdir(p)):
+            d = os.path.join(p, name)
+            if not SESSION_RUN.match(name) or not os.path.isdir(d): continue
+            f = next((os.path.join(d, x) for x in SESSION_FILES if os.path.isfile(os.path.join(d, x))), None)
+            if f: out.append(f); found += 1
+            else: print(f"note: {d}: no bench.json, frames.csv or game.log, skipped", file=sys.stderr)
+        if not found: raise ValueError(f"{p}: a folder without run folders (NN-<variant> with a bench.json...)")
+        if control is None:
+            try:
+                with open(os.path.join(p, "variants.json"), encoding="utf-8-sig") as f: v = json.load(f)
+                control = v.get("control") if isinstance(v, dict) else None
+            except (OSError, ValueError): pass
+    return out, control
+
+
 def cmd_bench(a):
+    try: paths, session_control = expand_runs(a.runs)
+    except (OSError, ValueError) as e: print(f"error: {e}", file=sys.stderr); sys.exit(2)
     loaded = []
-    for p in a.runs:
+    for p in paths:
         try: loaded.append(draws_fingerprint(load_bench(p, a.skip_ms)))
         except (OSError, ValueError) as e: print(f"error: {e}", file=sys.stderr); sys.exit(2)
     # a failed run (run_failure) measured no route: out of the drift check and the table
@@ -695,7 +730,10 @@ def cmd_bench(a):
         x["drift_state"] = "failed"
     drift_pct = getattr(a, "drift_pct", DRIFT_PCT)
     exclude = getattr(a, "exclude_drift", False)
-    control = a.control or (loaded[0]["name"] if loaded else None)
+    control = a.control
+    if not control and session_control and any(x["name"] == session_control for x in loaded):
+        control = session_control   # a session folder: its variants.json's control
+    control = control or (loaded[0]["name"] if loaded else None)
     if any(x["name"] == control for x in failed) and not any(x["name"] == control for x in runs):
         print(f"error: every run of the control '{control}' failed: nothing to compare with", file=sys.stderr)
         for x in failed: print(f"  {run_tag(x)}: {x['failed']}", file=sys.stderr)
@@ -728,14 +766,20 @@ def cmd_bench(a):
     extra_cells = {g: [fmt_cell(extra[k]["groups"][g], k) if k in extra else "-" for k in BENCH_EXTRA]
                    for g in t["groups"]}
     shown = [i for i, k in enumerate(BENCH_EXTRA) if k in extra]
-    print_table(hdr + [extra_hdr[i] for i in shown],
-                [rw + [extra_cells[g][i] for i in shown] for rw, g in zip(rows, t["groups"])])
+    # --cpu-split: the parts of cpu_game (guest, cp, gpu_helpers) after them, when a run has them
+    split = {row["metric"]: row for row in t["rows"] if row["split"]}
+    split_keys = [k for k in BENCH_CPU_GAME if k in split] if getattr(a, "cpu_split", False) else []
+    split_hdr = [re.sub(r"^cpu_(.*)_ms_per_frame$", r"\1_ms/f", k) for k in split_keys]
+    print_table(hdr + [extra_hdr[i] for i in shown] + split_hdr,
+                [rw + [extra_cells[g][i] for i in shown] + [fmt_cell(split[k]["groups"][g], k) for k in split_keys]
+                 for rw, g in zip(rows, t["groups"])])
     print(f"\nmean +-stdev per variant; % = diff vs '{t['control']}'; '~' = within {a.noise_k:g}x the "
           "control's stdev when above 0 (likely noise)."
           + (" One control run only: no noise estimate." if t["runs"][t["control"]] < 2 else "")
           + (" cpu_ms/f: process CPU ms per frame (GetProcessTimes: tick-sampled, noisy); cpu_game_ms/f: "
              "guest + command processor + GPU helper threads, cycle time, no background compiles (lower is "
              "better)." if extra else "")
+          + (f" {', '.join(split_hdr)}: the parts of cpu_game_ms/f." if split_hdr else "")
           + f"\ndraws/frame: mean of each run's Frame stats lines in the window; drift = runs more than "
           f"{drift_pct:g}% off the median of all runs ('?N': N runs unknown)."
           + (" '!' = unreliable: a drift run in this variant or the control." if t["unreliable"] else ""))
@@ -888,6 +932,8 @@ def main():
     b.add_argument("--noise-k", type=float, default=2.0); b.add_argument("--skip-ms", type=float, default=1000.0)
     b.add_argument("--csv"); b.add_argument("--json")
     b.add_argument("--drift-pct", type=float, default=DRIFT_PCT); b.add_argument("--exclude-drift", action="store_true")
+    b.add_argument("--cpu-split", action="store_true",
+                   help="also show guest / cp / gpu_helpers ms per frame (the parts of cpu_game_ms/f)")
     a = ap.parse_args()
     {"summarize": cmd_summarize, "compare": cmd_compare, "bench": cmd_bench}[a.cmd](a)
 

@@ -205,6 +205,62 @@ class Bench(unittest.TestCase):
             ",failed,cpu_ms_per_frame,cpu_game_ms_per_frame,cpu_guest_ms_per_frame,cpu_cp_ms_per_frame,"
             "cpu_gpu_helpers_ms_per_frame,cpu_compile_ms_per_frame,cpu_other_ms_per_frame,cpu_cycles_ms_per_frame"))
         self.assertTrue(runs_csv[1].endswith(",4.0,30.0,10.0,15.0,5.0,2.0,1.0,33.0"))
+        # --cpu-split: guest / cp / gpu_helpers after the existing columns, which keep their order;
+        # compare.csv keeps its layout
+        out = self.run_cmd(ra.cmd_bench, runs=files, control=None, noise_k=2.0, skip_ms=1000.0,
+                           csv=str(self.root / "s2.csv"), json=None, cpu_split=True)
+        head = out.splitlines()[0].split()
+        self.assertEqual(head[-5:], ["cpu_ms/f", "cpu_game_ms/f", "guest_ms/f", "cp_ms/f", "gpu_helpers_ms/f"])
+        self.assertEqual(head[:-3], out.replace("guest_ms/f", "").replace("cp_ms/f", "")
+                         .replace("gpu_helpers_ms/f", "").splitlines()[0].split())
+        c = next(line for line in out.splitlines() if line.startswith("C "))
+        self.assertRegex(c, r"27\.05 \+-0\.07 \(-10\.0%\)\s+9\.05 \+-0\.07 \(-10\.0%\)\s+13\.00 \+-0\.00 \(-13\.3%\)"
+                            r"\s+5\.00 \+-0\.00 \(\+0\.0%\)$")
+        self.assertIn("the parts of cpu_game_ms/f", out)
+        self.assertEqual((self.root / "s2.csv").read_text(), (self.root / "s.csv").read_text())
+        # runs without the split: no category columns even with --cpu-split
+        plain = [self.write(f"p{i}/bench.json", bench(n, 60.0)) for i, n in enumerate("AB")]
+        out = self.run_cmd(ra.cmd_bench, runs=plain, control=None, noise_k=2.0, skip_ms=1000.0,
+                           csv=None, json=None, cpu_split=True)
+        self.assertNotIn("guest_ms/f", out)
+
+    def test_session_folder(self):
+        # a bench.ps1 session folder: its NN-<variant> runs (bench.json, else game.log), no warm-ups,
+        # the control from variants.json; files given one by one still work
+        s = self.root / "sess"
+        self.write("sess/variants.json", dict(variants=["B", "A"], control="B"))
+        self.write("sess/warmup-A-1/bench.json", bench("A", 10.0))
+        self.write("sess/warmup-B-auto/bench.json", bench("B", 10.0))
+        self.write("sess/compare.json", {"x": 1})
+        self.write("sess/01-A/bench.json", bench("A", 60.0))
+        self.write("sess/02-B/bench.json", bench("B", 66.0))
+        self.write("sess/03-B/game.log", "Bench: frames=5000 seconds=90.0 avg_fps=67.0 low1_fps=50.0 "
+                                         "p99_ms=20.0 worst_ms=40.0 over33=0 over50=0 compiles=0 label=B\n")
+        self.write("sess/04-A/bench.json", bench("A", 61.0))
+        (s / "05-A").mkdir()   # no result: skipped with a note
+        files, control = ra.expand_runs([str(s)])
+        self.assertEqual([Path(f).parent.name + "/" + Path(f).name for f in files],
+                         ["01-A/bench.json", "02-B/bench.json", "03-B/game.log", "04-A/bench.json"])
+        self.assertEqual(control, "B")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            out = self.bench_drift([str(s)], json=str(self.root / "c.json"))
+        self.assertIn("05-A: no bench.json", err.getvalue())
+        self.assertIn("B (control)", out)
+        a = next(line for line in out.splitlines() if line.startswith("A "))
+        self.assertRegex(a, r"^A\s+2\s+60\.5 \+-0\.7 \(-9\.0%\)")
+        d = json.loads((self.root / "c.json").read_text())
+        self.assertEqual((d["control"], len(d["run_files"])), ("B", 4))
+        with contextlib.redirect_stderr(io.StringIO()):
+            out = self.bench_drift([str(s)], control="A")
+        self.assertEqual(out.splitlines()[2].split()[:2], ["A", "(control)"])
+        # explicit files: the first run's variant is the control, as before
+        out = self.bench_drift([str(s / "01-A/bench.json"), str(s / "02-B/bench.json")])
+        self.assertIn("A (control)", out)
+        # a folder without run folders
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()) as e:
+            self.bench_drift([str(self.root)])
+        self.assertIn("without run folders", e.getvalue())
 
     def test_cmd_bench_prints_table(self):
         files = [self.write(f"{i:02d}-{n}/bench.json", bench(n, v, compiles=3 if i == 1 else 0))

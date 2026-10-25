@@ -10,10 +10,10 @@ Automated, repeatable A/B benchmark of inFAMOUS Second Son on Windows (renderer 
            The whole savedata folder of the player's data folder is copied into the bench folder
            first: every later run starts from that same copy, never from the player's saves (the
            game's Continue loads the newest save in it).
-  run      Replays the route: up to -WarmupRuns (2) warm-up runs per variant (discarded; they stop
+  run      Replays the route: up to -WarmupRuns (3) warm-up runs per variant (discarded; they stop
            early once a run compiled no shaders; none with -NoWarmup; skipped for a variant whose
            cache slot's last run had the same build and settings and compiled nothing, unless
-           -AlwaysWarmup), then rounds, each variant once per round, the order reversed every
+           -AlwaysWarmup; when every slot is warm the control keeps up to 2), then rounds, each variant once per round, the order reversed every
            other round (A B, B A, A B): -Rounds N fixed, else adaptive, -MinRounds (3) to
            -MaxRounds (5), stopping early once every variant's paired avg_fps diff vs the control
            is clearly outside the noise or its 90% CI within +-EquivPct (1%). Each run gets its own
@@ -105,8 +105,9 @@ param(
     # The variant the others are compared with (default: the first one).
     [string]$Control,
     [switch]$NoWarmup,
-    # Warm-up runs per variant at most; they stop early once a run compiled no shaders.
-    [int]$WarmupRuns = 2,
+    # Warm-up runs per variant at most (a cold or changed cache slot); they stop early once a run
+    # compiled no shaders. The control's warm-up when every slot is warm: up to 2 unless given.
+    [int]$WarmupRuns = 3,
     [int]$TimeoutSec = 600,
     # run: the session folder name under <BenchDir>\runs (default: a timestamp).
     # compare: a session name or folder (default: the newest session).
@@ -125,6 +126,8 @@ param(
     [string]$Python,
     # compare: also print round_analyze.py's per-run 'compare' table for each variant.
     [switch]$Detail,
+    # compare: also show the parts of cpu_game_ms/f (guest, cp, gpu_helpers ms/f; --cpu-split).
+    [switch]$CpuSplit,
     [double]$NoiseK = 2.0,
     # compare: a run whose mean draws/frame is more than this % off the median of all runs drifted.
     [double]$DriftPct = 5.0,
@@ -147,7 +150,9 @@ $GraceSec = 30
 $Reserved = @('ISS_PAD_REPLAY', 'ISS_PAD_REPLAY_AUTO', 'ISS_PAD_RECORD', 'ISS_PAD_RECORD_SECONDS', 'ISS_PAD_FILE',
     'ISS_BENCH_JSON', 'ISS_BENCH_LABEL', 'ISS_BENCH_EXIT', 'ISS_BENCH_SKIP_MS', 'ISS_STOP_FILE', 'ISS_FRAME_STATS',
     'ISS_USER_DIR', 'ISS_GPU_USER_DIR', 'SHADPS4_FRAME_CSV', 'APPDATA')
-$Metrics = @('avg_fps', 'low1_fps', 'p99_ms', 'worst_ms', 'over33', 'over50', 'compiles', 'cpu_ms_per_frame')
+$Metrics = @('avg_fps', 'low1_fps', 'p99_ms', 'worst_ms', 'over33', 'over50', 'compiles', 'cpu_ms_per_frame', 'cpu_game_ms_per_frame')
+# cpu_game_ms_per_frame = the sum of these (round_analyze.py add_cpu_game), when a bench.json has them all
+$CpuGameParts = @('cpu_guest_ms_per_frame', 'cpu_cp_ms_per_frame', 'cpu_gpu_helpers_ms_per_frame')
 $IniDefaults = [ordered]@{ vsync = '0'; fps_limit = '0' }
 $LauncherWaitMs = 60000            # the launcher's exit after the game closed (then it is killed)
 $script:Junctions = New-Object Collections.Generic.List[string]   # every junction this process made
@@ -168,13 +173,13 @@ function Show-Usage {
     Info @'
 Usage: scripts\bench.ps1 <record|run|compare> [options]   (Get-Help scripts\bench.ps1 -Detailed)
   record  [-Exe <launcher>] [-UserDir <data folder>] [-Seconds 90] [-Force] [-KeepOpen]
-  run     [-Exe <launcher>] [-Variants @{...} | -VariantFile <json>] [-NoWarmup] [-WarmupRuns 2]
+  run     [-Exe <launcher>] [-Variants @{...} | -VariantFile <json>] [-NoWarmup] [-WarmupRuns 3]
           [-AlwaysWarmup] [-TimeoutSec 600] [-Session <name>] [-FrameCsv] [-SkipMs <ms>]
           rounds: [-Rounds N] (fixed) | [-MinRounds 3] [-MaxRounds 5] [-EquivPct 1]
           [-NoiseCvPct 1.2] [-PairSdFloorPct 0.5] (adaptive, the default)
           [-CacheMode slot|variant] (variant key 'bench:cache' = 'variant' | '<name>')
   compare [-Session <name|folder>] [-Control <variant>] [-Detail] [-Python <exe>] [-NoiseK 2]
-          [-DriftPct 5] [-ExcludeDrift]
+          [-DriftPct 5] [-ExcludeDrift] [-CpuSplit]
   caches  (record/run) [-ResetBenchCache] (delete and seed again the bench's own copies)
           [-SharePlayerCache] (use the player's real caches; refuses profile-changing variants)
   source  (record/run with port\launcher\infamous_run.py) [-GameDir <folder with eboot.bin>]
@@ -350,7 +355,7 @@ function Initialize-LaunchEnv($launcher) {
         if ($DryRun) { Note "warning: $msg" } else { Fail $msg }
     } else {
         if (-not (Test-Path -LiteralPath (Join-Path $game 'eboot.bin'))) {
-            $msg = "the game folder $game ($from) has no eboot.bin"
+            $msg = "the game folder $game ($from) has no eboot.bin: pass -GameDir '<folder with eboot.bin>'"
             if ($DryRun) { Note "warning: $msg" } else { Fail $msg }
         }
         $env:ISS_GAME_DIR = $game
@@ -1435,6 +1440,10 @@ function Invoke-Run {
     # warm-up anyway (the session's first run also warms the disk cache and the GPU clocks). A
     # measured run of a skipped variant that still compiles becomes a warm-up and is repeated.
     $warmSkip = @{}
+    # The warm-up limit per variant: -WarmupRuns (3) for a cold or changed slot (2 left 1 to 12
+    # compiles in some measured runs); the control kept for a session of warm slots: up to 2.
+    $warmLimit = @{}
+    foreach ($v in $names) { $warmLimit[$v] = $WarmupRuns }
     if (-not $NoWarmup -and -not $AlwaysWarmup -and -not $SharePlayerCache -and -not $ResetBenchCache) {
         foreach ($v in $names) {
             if (-not $sigs[$v] -or $relocated[$v]) { continue }
@@ -1445,6 +1454,7 @@ function Invoke-Run {
         }
         if ($warmSkip.Count -eq $names.Count) {
             $warmSkip.Remove($names[0])
+            if (-not $script:Bound.ContainsKey('WarmupRuns')) { $warmLimit[$names[0]] = [Math]::Min(2, $WarmupRuns) }
             Info "  warm-up  : every cache slot is warm; the control '$($names[0])' keeps one warm-up run (disk cache, GPU clocks)"
         }
     }
@@ -1453,7 +1463,7 @@ function Invoke-Run {
     # sessions plan -MaxRounds and skip the rest once decided.
     $plan = New-Object Collections.Generic.List[object]
     if (-not $NoWarmup) {
-        foreach ($v in $names) { for ($i = 1; $i -le $WarmupRuns; $i++) { $plan.Add(@{ Variant = $v; Warmup = $i; Round = 0; Dir = "warmup-$v-$i"; Skip = $warmSkip.ContainsKey($v) }) } }
+        foreach ($v in $names) { for ($i = 1; $i -le $warmLimit[$v]; $i++) { $plan.Add(@{ Variant = $v; Warmup = $i; Round = 0; Dir = "warmup-$v-$i"; Skip = $warmSkip.ContainsKey($v) }) } }
     }
     $n = 0
     for ($round = 1; $round -le $maxR; $round++) {
@@ -1595,7 +1605,7 @@ function Invoke-Run {
                     signature = $sigs[$v]; commit = $build.commit; status = "$($r.status)"; compiles = $compiles; warmup = [bool]$step.Warmup })
         }
         if ($b) {
-            if ($step.Warmup -and $null -ne $compiles -and $compiles -eq 0 -and $step.Warmup -lt $WarmupRuns) {
+            if ($step.Warmup -and $null -ne $compiles -and $compiles -eq 0 -and $step.Warmup -lt $warmLimit[$v]) {
                 Info "  warm: no compiles, skipping the remaining warm-ups of $v"
                 foreach ($s in $plan) { if ($s.Variant -eq $v -and $s.Warmup -gt $step.Warmup) { $s.Skip = $true } }
             }
@@ -1614,7 +1624,7 @@ function Invoke-Run {
                 }
             }
             if ((-not $step.Warmup) -and $null -ne $compiles -and $compiles -gt 0) {
-                Note "  warning: $($b.compiles) shader/pipeline compiles during the measurement (more warm-up: -WarmupRuns $($WarmupRuns + 1))"
+                Note "  warning: $($b.compiles) shader/pipeline compiles during the measurement (more warm-up: -WarmupRuns $($warmLimit[$v] + 1))"
             }
         }
         $results.Add($r)
@@ -1703,7 +1713,7 @@ function Show-InternalTable($runs, $order, [string]$ctrl) {
         foreach ($m in $cols) {
             $s = $stats[$g][$m]; $c = $stats[$ctrl][$m]
             if ($null -eq $s.Mean) { $row += '-'; continue }
-            $nd = 1; if ($m -in 'over33', 'over50', 'compiles') { $nd = 0 } elseif ($m -eq 'cpu_ms_per_frame') { $nd = 2 }
+            $nd = 1; if ($m -in 'over33', 'over50', 'compiles') { $nd = 0 } elseif ($m -in 'cpu_ms_per_frame', 'cpu_game_ms_per_frame') { $nd = 2 }
             $cell = Fmt "{0:F$nd}" $s.Mean
             if ($null -ne $s.Sd) { $cell += Fmt " +-{0:F$([Math]::Max($nd,1))}" $s.Sd }
             if ($g -ne $ctrl -and $null -ne $c.Mean) {
@@ -1727,6 +1737,7 @@ function Show-InternalTable($runs, $order, [string]$ctrl) {
     $single = ''; if ($stats[$ctrl][$cols[0]].N -lt 2) { $single = ' One control run only: no noise estimate.' }
     Info ''
     Info ("mean +-stdev per variant; % = diff vs '$ctrl'; '~' = within $NoiseK" + "x the control's stdev when above 0 (likely noise).$single")
+    if ($cols -contains 'cpu_game_ms_per_frame') { Info 'cpu_game_ms_per_frame: guest + command processor + GPU helper threads, cycle time, no background compiles (lower is better).' }
 }
 
 function Invoke-Compare([string]$sessionDir) {
@@ -1753,7 +1764,17 @@ function Invoke-Compare([string]$sessionDir) {
         $bj = Join-Path $d.FullName 'bench.json'
         $log = Join-Path $d.FullName 'game.log'
         $csv = Join-Path $d.FullName 'frames.csv'
-        if (Test-Path -LiteralPath $bj) { $runs.Add(@{ Variant = $variant; File = $bj; Data = (Read-Json $bj); Status = $status }) }
+        if (Test-Path -LiteralPath $bj) {
+            $data = Read-Json $bj
+            if ($data -and -not $data.PSObject.Properties['cpu_game_ms_per_frame']) {
+                $parts = @($CpuGameParts | Where-Object { $data.PSObject.Properties[$_] -and $null -ne $data.$_ })
+                if ($parts.Count -eq $CpuGameParts.Count) {
+                    $sum = 0.0; foreach ($k in $CpuGameParts) { $sum += [double]$data.$k }
+                    $data | Add-Member -NotePropertyName 'cpu_game_ms_per_frame' -NotePropertyValue ([Math]::Round($sum, 3))
+                }
+            }
+            $runs.Add(@{ Variant = $variant; File = $bj; Data = $data; Status = $status })
+        }
         elseif (Test-Path -LiteralPath $csv) { $runs.Add(@{ Variant = $variant; File = $csv; Data = $null }) }
         elseif (Test-Path -LiteralPath $log) { $runs.Add(@{ Variant = $variant; File = $log; Data = $null }) }
         else { $missing += $d.Name }
@@ -1772,6 +1793,7 @@ function Invoke-Compare([string]$sessionDir) {
     $files = @(); foreach ($g in $order) { $files += @($runs | Where-Object { $_.Variant -eq $g } | ForEach-Object { $_.File }) }
     $common = @('--control', $ctrl, '--noise-k', (Fmt '{0}' $NoiseK), '--drift-pct', (Fmt '{0}' $DriftPct))
     if ($ExcludeDrift) { $common += '--exclude-drift' }
+    if ($CpuSplit) { $common += '--cpu-split' }
     if ($SkipMs -ge 0) { $common += @('--skip-ms', "$SkipMs") }
     $pyArgs = @('-I', $analyzer, 'bench') + $files + $common + @('--csv', (Join-Path $sessionDir 'compare.csv'), '--json', (Join-Path $sessionDir 'compare.json'))
     if ($DryRun) {
