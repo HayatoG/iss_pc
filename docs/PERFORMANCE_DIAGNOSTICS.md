@@ -121,10 +121,29 @@ launches nothing. Exit codes: 0 ok, 1 error, 2 usage, 3 when a measured run did 
 
 ```text
 .\scripts\bench.ps1 record -Exe 'D:\inFAMOUS\inFAMOUS Second Son.exe' -Seconds 90
-.\scripts\bench.ps1 run -Exe 'D:\inFAMOUS\inFAMOUS Second Son.exe' -Rounds 3 `
+.\scripts\bench.ps1 run -Exe 'D:\inFAMOUS\inFAMOUS Second Son.exe' `
     -Variants ([ordered]@{ A = @{}; B = @{ ISS_TUNING = 'x=1' } })
 .\scripts\bench.ps1 compare
 ```
+
+**Fast A/B recipe.** Two variants (the control and one change), warm cache slots, adaptive 3 to
+5 rounds: these are the defaults, so a plain `run` is the fast one.
+
+```text
+.\scripts\bench.ps1 run -Exe '...\inFAMOUS Second Son.exe' -Session h256 `
+    -Variants ([ordered]@{ base = @{}; h256 = @{ ISS_HAVOK_SPIN = '256' } })
+```
+
+The control uses the cache slot `cache\_slot0\` and the change uses `_slot1\` in every session,
+whatever the variants are called, so the caches stay warm from one session to the next. A slot
+whose last run had the same build and settings and compiled nothing needs no warm-up. When
+neither slot needs one, the control still gets one warm-up run. A slot that is warm but was
+last used by another build or variant needs one warm-up, which stops early when it compiles
+nothing. The session then runs 3 rounds and stops as soon as the result is clear (see
+*Adaptive rounds* below), or runs up to 5. Cost: about 7 to 11 boots, i.e. 10 to 17 min, instead
+of about 14 for 2 cold variants × 5 fixed rounds. Each extra variant adds a run per round and
+makes an early stop less likely, because every variant must be decided. Use `-Rounds N` for a
+fixed count, and `-AlwaysWarmup` or `-ResetBenchCache` when in doubt about a slot.
 
 **record.** First play to a quiet, repeatable spot and let the game save there: every replay
 presses Cross through the title menus and takes Continue, so the route starts where the newest
@@ -135,10 +154,18 @@ copy, and records `-Seconds` of pad input into `route.txt` from the moment gamep
 detected. The game closes a few seconds after "Route recorded" (`-KeepOpen` leaves it open).
 An existing route is kept unless `-Force` (then it moves to `old-<time>\`).
 
-**run.** Up to two warm-up runs per variant first (discarded; `-WarmupRuns N`, default 2, stops
-early once a run compiled nothing; `-NoWarmup` skips them: after one warm-up measured runs still
-compiled 2 to 21 shaders), then `-Rounds` rounds with each variant once,
-the order reversed every other round (A B, B A, A B) so slow drift does not favour one side.
+**run.** Up to two warm-up runs per variant first. They are discarded. `-WarmupRuns N` (default
+2) sets the limit, and the warm-ups stop early once a run compiles nothing. `-NoWarmup` skips
+them; on a cold cache, measured runs still compiled 2 to 21 shaders after one warm-up. A variant
+needs no warm-up when its cache copy's `slot.json` shows that the last run on that copy had the
+same build and settings and compiled nothing. "Same" is a hash of the probe exes' SHA256, the
+launcher, the `ISS_`/`TLG_`/`SHADPS4_` variables the run sees and its `tlg.ini` keys. If no
+variant needs a warm-up, the control still gets one, because the session's first run also warms
+the disk cache and the GPU clocks. If the first measured run of a skipped variant still compiles,
+it is renamed `warmup-<variant>-auto\` and run again. `-AlwaysWarmup` turns the skipping off.
+Then come the rounds, each variant once per round, the order reversed every other round
+(A B, B A, A B) so slow drift does not favour one side: `-Rounds N` fixed, or adaptive by
+default (below).
 Variants are `-Variants` (name -> `@{ VAR = 'value' }`; use `[ordered]@{}` or `-Control` to pick
 the control, a plain hashtable is sorted by name) or `-VariantFile` with the same JSON
 (`{"A": {}, "B": {"ISS_TUNING": "x=1"}}`, file order kept). An empty value unsets a variable;
@@ -152,7 +179,7 @@ which measures the noise. Every run gets:
   variant's `ini:` keys the same way;
 - NTFS junctions for the shader/pipeline caches only, so they stay warm from run to run:
   `cache\` (port renderer), `gpu-0\` to `gpu-19\` (renderer v2) and the old Windows location
-  `user\cache\`. They point into the variant's own cache copy (see *Caches* below). Nothing else
+  `user\cache\`. They point into the variant's cache copy (a slot by default, see *Caches* below). Nothing else
   is linked: `mods\` is read in place through `ISS_MODS_DIR` (unless the shell sets it), `dlc\`
   gets a header-only copy (each `.pkg` cut to 4 KB and each `sce_sys\param.sfo`: all the launcher
   reads for `ISS_ADDCONT_LABELS`), and other folders (screenshots, save backups...) are not
@@ -171,20 +198,63 @@ which measures the noise. Every run gets:
   twin of a variable the script or a variant sets is unset for the run, because the game copies
   `ISS_X` to `TLG_X` only when `TLG_X` is unset.
 
-**Caches.** By default the benchmark never writes into the player's caches. Each variant has its
-own copy in `<BenchDir>\cache\<variant>\` (the recording uses `cache\_record\`). On its first use
+**Adaptive rounds.** Without `-Rounds`, a session runs `-MinRounds` (3) to `-MaxRounds` (5)
+rounds. From round `-MinRounds` on, after each round it takes, for every test variant, the
+per-round paired difference of `avg_fps` against the control: (test − control) / control, using
+only rounds where both runs ended ok. Pairing within a round cancels slow drift. It then computes
+the mean of these differences and their standard deviation, which is held at
+`-PairSdFloorPct` (0.5%) or more so that a few lucky rounds cannot end the session. A variant is
+decided as:
+
+- **clear difference:** the 95% CI excludes 0 and the mean is more than `-NoiseK` (2) ×
+  max(`-NoiseCvPct` 1.2%, the control's own CV). This is `compare`'s `~` noise test with the A/A
+  noise level as a floor, so the bar is at least 2.4%.
+- **no change:** the 90% CI lies within ±`-EquivPct` (1%). This is an equivalence test at 5% per
+  side.
+
+The session stops when every variant is decided and `round_analyze.py bench` (run on the
+measured runs so far, `adaptive-check.json`) finds no scene-drift run and no inconclusive drift
+check. Otherwise the next round runs, up to `-MaxRounds`. Without Python the drift check is
+skipped (a note says so). Each check prints one line per variant (diff, paired sd, both CIs, the
+noise bar, the verdict) and why it stopped or went on. `variants.json` gets `rounds_run`,
+`round_stop` and `adaptive_checks`. With 1.2% per-run noise, "no change" within ±1% is reached
+early only when the paired differences agree closely; a real 1 to 2% effect usually runs all 5
+rounds and is then read from `compare` as before. `-Rounds N` (fixed) cannot be combined with
+`-MinRounds`/`-MaxRounds`, and `-MinRounds` must be at least 2.
+
+**Caches.** By default the benchmark never writes into the player's caches. Each variant uses a
+cache copy of the bench in `<BenchDir>\cache\<key>\` (the recording uses `cache\_record\`). The key
+depends on `-CacheMode`:
+
+- `slot` (the default): the variant's position, so the copies are reused by every session, whatever
+  the variants are called. `_slot0` is the control, `_slot1` the first test variant, and so on.
+  A variant that sets a shader-profile key in `ISS_TUNING` (see below) gets its own slot for that
+  profile, `_slotN-p<hash>`.
+- `variant`: one copy per variant name (the earlier behaviour).
+
+A variant can also set its own with the key `'bench:cache'`: `'variant'` (named after the variant)
+or `'<name>'` (`cache\<name>\`, kept across sessions too). Two variants of a session may not share
+a copy. A slot keeps every shader and pipeline that any variant ever compiled in it. That is
+harmless for variants that only change settings, but when a variant compiles other shaders or
+pipelines (a shader-compiler change, new pipeline keys), the slot would mix them with the control
+build's. Give such a variant its own copy, for example `'bench:cache' = 'variant'` or a name per
+build, or reset the slot with `-ResetBenchCache`. On its first use
 the copy is seeded by copying the player's `cache\`, `gpu-0\`...`gpu-19\` and `user\cache\`
 folders (robocopy, read only on the player's side; nothing is moved, junctions are not followed,
 `<serial>.incompatible` leftovers are skipped); `seed.json` records where from and when, and later
 runs and sessions reuse the copy. Without a player cache the copy starts empty and the warm-up
-builds it. Seeding copies the whole cache once per variant, so it needs that much disk space; a
-copy whose seeding was interrupted (no `seed.json`) is deleted and seeded again. This matters
+builds it. Seeding copies the whole cache once per copy, so it needs that much disk space; a
+copy whose seeding was interrupted (no `seed.json`) is deleted and seeded again. After every run
+`slot.json` in the copy records that run (session, variant, run folder, build/settings hash,
+commit, status, compiles); it decides whether the next session needs a warm-up. This matters
 because the pipeline cache belongs to one shader profile: the ISS_TUNING keys
 `lds_barriers_multi_wave` and `wave_memory_barriers` are part of it, and a run with another profile
 moves the cache aside to `<serial>.incompatible` after deleting the previous one, so an A/B/A on a
 shared cache would lose it. With per-variant copies that only happens to the bench's copy.
-`-ResetBenchCache` deletes the copies of the variants of this `run` (or `cache\_record\` for
-`record`) and seeds them again from the player's current caches.
+`-ResetBenchCache` deletes the copies the variants of this `run` use (or `cache\_record\` for
+`record`) and seeds them again from the player's current caches. The old per-name copies of
+earlier sessions (`cache\<variant>\`) are not used by slots; delete those you no longer need with
+`cmd /c rmdir /s /q`.
 
 `-SharePlayerCache` keeps the earlier behaviour: the junctions point into the player's folder
 (else into `<BenchDir>\cache\_shared\`), so no copy is made, but every run writes into the
@@ -295,8 +365,9 @@ py -3 -I scripts\round_analyze.py bench (Get-ChildItem $env:USERPROFILE\iss-benc
 
 `compare` reads one session only; `round_analyze.py bench` takes run files from any number of
 sessions and groups them by label (the variant name), so give each commit its own variant name.
-Each variant name gets its own cache copy (`cache\<variant>\`, seeded from the player's caches on
-first use), so keep the warm-up: a build that changes shaders compiles them again there. Runs of different sessions are not interleaved, so drift
+With one variant per session both builds use `_slot0`. Keep the warm-up (a different probe hash
+always gets one), or give each build its own copy with `'bench:cache' = 'variant'` when the
+builds compile different shaders. Runs of different sessions are not interleaved, so drift
 between them (temperature, background load) is not cancelled out: repeat the first session last
 (A B A) to see it.
 
