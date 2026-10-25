@@ -137,9 +137,9 @@ launches nothing. Exit codes: 0 ok, 1 error, 2 usage, 3 when a measured run did 
 The control uses the cache slot `cache\_slot0\` and the change uses `_slot1\` in every session,
 whatever the variants are called, so the caches stay warm from one session to the next. A slot
 whose last run had the same build and settings and compiled nothing needs no warm-up. When
-neither slot needs one, the control still gets one warm-up run. A slot that is warm but was
-last used by another build or variant needs one warm-up, which stops early when it compiles
-nothing. The session then runs 3 rounds and stops as soon as the result is clear (see
+neither slot needs one, the control still gets a warm-up (up to 2 runs, usually 1). A slot that
+is cold, or warm but last used by another build or variant, gets up to 3 warm-ups, which stop
+early once a run compiles nothing. The session then runs 3 rounds and stops as soon as the result is clear (see
 *Adaptive rounds* below), or runs up to 5. Cost: about 7 to 11 boots, i.e. 10 to 17 min, instead
 of about 14 for 2 cold variants × 5 fixed rounds. Each extra variant adds a run per round and
 makes an early stop less likely, because every variant must be decided. Use `-Rounds N` for a
@@ -154,14 +154,15 @@ copy, and records `-Seconds` of pad input into `route.txt` from the moment gamep
 detected. The game closes a few seconds after "Route recorded" (`-KeepOpen` leaves it open).
 An existing route is kept unless `-Force` (then it moves to `old-<time>\`).
 
-**run.** Up to two warm-up runs per variant first. They are discarded. `-WarmupRuns N` (default
-2) sets the limit, and the warm-ups stop early once a run compiles nothing. `-NoWarmup` skips
-them; on a cold cache, measured runs still compiled 2 to 21 shaders after one warm-up. A variant
+**run.** Up to three warm-up runs per variant first. They are discarded. `-WarmupRuns N` (default
+3) sets the limit, and the warm-ups stop early once a run compiles nothing. `-NoWarmup` skips
+them; on a cold cache, measured runs still compiled 2 to 21 shaders after one warm-up, and 1 to
+12 after two (which is why the default went from 2 to 3). A variant
 needs no warm-up when its cache copy's `slot.json` shows that the last run on that copy had the
 same build and settings and compiled nothing. "Same" is a hash of the probe exes' SHA256, the
 launcher, the `ISS_`/`TLG_`/`SHADPS4_` variables the run sees and its `tlg.ini` keys. If no
-variant needs a warm-up, the control still gets one, because the session's first run also warms
-the disk cache and the GPU clocks. If the first measured run of a skipped variant still compiles,
+variant needs a warm-up, the control still gets one (up to 2 runs unless `-WarmupRuns` is
+given), because the session's first run also warms the disk cache and the GPU clocks. If the first measured run of a skipped variant still compiles,
 it is renamed `warmup-<variant>-auto\` and run again. `-AlwaysWarmup` turns the skipping off.
 Then come the rounds, each variant once per round, the order reversed every other round
 (A B, B A, A B) so slow drift does not favour one side: `-Rounds N` fixed, or adaptive by
@@ -307,9 +308,18 @@ over 90% of it; the command processor alone: 11 ms/frame in cycles, 0.01-0.04 in
 not what made `cpu_ms/f` swing. `~` marks a difference within twice
 the control's standard deviation (`-NoiseK`): probably noise. With a single control run, or a
 standard deviation of 0 (identical control runs), there is no noise estimate and no `~`.
-`-Detail` adds the per-run `compare` table. The table is also written to `compare.csv` and
+`-Detail` adds the per-run `compare` table. `-CpuSplit` (`--cpu-split`) appends the parts of
+`cpu_game_ms/f` as `guest_ms/f`, `cp_ms/f` and `gpu_helpers_ms/f` to the table (not to
+`compare.csv`). The table is also written to `compare.csv` and
 `compare.json` in the session. Without Python the script prints the same table itself from the
-`bench.json` files. A warning flags a measured run that still compiled shaders.
+`bench.json` files, `cpu_game_ms_per_frame` included (summed from the categories). A warning
+flags a measured run that still compiled shaders.
+
+`round_analyze.py bench` also takes a session folder directly:
+`py -3 -I scripts\round_analyze.py bench <BenchDir>\runs\<session> [--cpu-split]` reads its
+`NN-<variant>\` runs as `compare` does (each one's `bench.json`, else `frames.csv`, else
+`game.log`; the `warmup-*` folders are left out) and takes the control from its `variants.json`
+unless `--control` is given. It writes `compare.*` only with `--csv`/`--json`.
 
 **Failed runs.** A measured run whose `run.json` status is not `ok` (crash, timeout, exit code 3),
 or that has no bench summary or window (no `bench.json`, no `Bench:` line, so only its whole
