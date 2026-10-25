@@ -414,15 +414,16 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
             MarkAsMaybeDirty(image_id, image);
         }
     });
-    // ISS_TEX_FAULT_STREAK_KB (default 256, 0 off): a guest thread writing on through image
+    // ISS_TEX_FAULT_STREAK_KB (default 1024, 0 off): a guest thread writing on through image
     // pages it faults on one after the other gets the images of the next window marked maybe
     // dirty now (hashed, untracked: re-uploaded at their next use only if their bytes changed),
     // as their faults would do one by one. Every ~2 s the game copies ~11 MB over a pool of
     // small textures at 0x2093xxxxx-0x209Fxxxxx: ~2850 faults, one per image, a 45 ms frame
-    // (the "mini frame skips", 2026-10-17).
+    // (the "mini frame skips", 2026-10-17). 1 MB from the first page in a row (was 256 KB from
+    // the third): marking is cheap (hashed), each fault is not.
     static const u64 streak_bytes = [] {
         const char* setting = std::getenv("ISS_TEX_FAULT_STREAK_KB");
-        const u64 kb = setting ? std::strtoull(setting, nullptr, 10) : 256;
+        const u64 kb = setting ? std::strtoull(setting, nullptr, 10) : 1024;
         return std::min<u64>(kb, 4096) * 1024;
     }();
     if (size <= 8 && streak_bytes != 0) {
@@ -431,7 +432,7 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
         if (page == last_page + 1 || (next_page != 0 && page == next_page)) ++streak;
         else if (page != last_page) streak = 0;
         last_page = page;
-        if (streak >= 3) {
+        if (streak >= 1) {
             const VAddr ahead = pages_end;
             const VAddr ahead_end = ahead + streak_bytes;
             ImageIds marked;

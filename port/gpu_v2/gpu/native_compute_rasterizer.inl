@@ -527,6 +527,9 @@ static void Install(np::Callbacks& callbacks) {
 }
 
 static void Report() {
+    if constexpr (!Common::Perf::kStats) {
+        return;
+    }
     std::string misses;
     for (u32 m = 0; m < MissCount; ++m) {
         char item[48];

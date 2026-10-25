@@ -1014,9 +1014,12 @@ static np::DrawResult Record(np::Segment& s, void* regs_ptr, u64 key, const u32*
     // attachment state of its first.
     const u32 ds = DepthStencilClass(regs);
     if (GuardDepth() && r.begun && r.first_ds != ~0u && ds != r.first_ds) {
-        if (g_depth_mix.fetch_add(1, std::memory_order_relaxed) < 20)
-            std::fprintf(stderr, "NATIVE_PASSES_DEPTH_MIX db=%llx first=%x now=%x\n",
-                         (unsigned long long)regs.depth_buffer.DepthAddress(), r.first_ds, ds);
+        // A shared counter and a log line per mix: diagnostics only (ISS_STATS).
+        if constexpr (Common::Perf::kStats) {
+            if (g_depth_mix.fetch_add(1, std::memory_order_relaxed) < 20)
+                std::fprintf(stderr, "NATIVE_PASSES_DEPTH_MIX db=%llx first=%x now=%x\n",
+                             (unsigned long long)regs.depth_buffer.DepthAddress(), r.first_ds, ds);
+        }
         return miss(MissFormat, np::NewSegment);
     }
     if (d.indirect && regs.num_indices == 0) return miss(MissCommand);
@@ -1380,6 +1383,9 @@ constexpr const char* reject_names[13] = {"context", "user_data", "inherited", "
                                           "env", "inherited_state", "dynamic", "assumed"};
 
 static void Report() {
+    if constexpr (!Common::Perf::kStats) {
+        return;
+    }
     std::fprintf(stderr,
                  "NATIVE_PASSES_GUARDS template_gate=%d learn_gated=%llu auto_draws=%llu depth_mix=%llu "
                  "(guard %s) classes=%u left[opaque=%llu depth=%llu blend=%llu]\n",

@@ -15,6 +15,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Diagnostic counters, their timers and periodic reports (perf_stats.h, native pass stats, the
+# runtime's lock counters): OFF for players, ON to investigate (-DISS_STATS=ON).
+option(ISS_STATS "Keep the diagnostic counters and their reports" OFF)
+
 set(PORT ${CMAKE_CURRENT_SOURCE_DIR}/../gpu)
 set(SRC ${CMAKE_CURRENT_SOURCE_DIR}/shadps4)
 set(CS ${CMAKE_CURRENT_SOURCE_DIR}/gpu)
@@ -179,7 +183,7 @@ endif()
 set_source_files_properties(${OURS_SOURCES} ${PORT}/third_party/imgui/backends/imgui_impl_vulkan.cpp
     PROPERTIES COMPILE_DEFINITIONS "IMGUI_IMPL_VULKAN_NO_PROTOTYPES")
 target_compile_definitions(issgpu PRIVATE TLG_RENDERER_V2
-    TLG_FONT_PATH="${PORT}/third_party/fonts/DejaVuSans.ttf")
+    TLG_FONT_PATH="${PORT}/third_party/fonts/DejaVuSans.ttf" ISS_STATS=$<BOOL:${ISS_STATS}>)
 
 # Windows: tlg-probe-v2.exe, this port's loader and runtime (as port/gpu/CMakeLists.txt builds
 # tlg-probe.exe) linked with this renderer.
@@ -200,6 +204,7 @@ if (WIN32)
         target_compile_definitions(tlg-probe-v2 PRIVATE TLG_BUILD_COMMIT="$ENV{TLG_BUILD_COMMIT}")
     endif()
     target_include_directories(tlg-probe-v2 PRIVATE ${RT} ${RT}/src)
+    target_compile_definitions(tlg-probe-v2 PRIVATE ISS_STATS=$<BOOL:${ISS_STATS}>)
     pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     target_link_libraries(tlg-probe-v2 PRIVATE issgpu atrac9_v2 PkgConfig::FREETYPE onecore bcrypt ws2_32 -pthread)
     target_link_options(tlg-probe-v2 PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")

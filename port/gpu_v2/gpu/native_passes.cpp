@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <condition_variable>
 #include <thread>
+#include "common/perf_stats.h"
 
 #ifndef ISS_SYSV
 #define ISS_SYSV __attribute__((sysv_abi))
@@ -62,22 +63,24 @@ enum Close : u32 { CloseBoundary, CloseTarget, CloseChunk, CloseNoRecord, CloseL
 constexpr const char* close_names[CloseCount] = {"packet", "target", "chunk", "no_record",
                                                  "learn", "format", "lane", "submit", "full",
                                                  "reset"};
+// Diagnostic counters (ISS_STATS): nothing in players' builds.
+using Stat = Common::Perf::StatCounter;
 struct Stats {
-    std::atomic<u64> draws{}, recorded{}, segments{}, learn_posted{}, unknown_state{}, restarts{},
+    Stat draws{}, recorded{}, segments{}, learn_posted{}, unknown_state{}, restarts{},
         unknown_draws{},
         not_ready{}, abandoned{}, no_slot{}, no_segment{}, learn_deduped{}, closed_inside{};
-    std::array<std::atomic<u64>, CloseCount> close{};
-    std::array<std::atomic<u64>, 257> boundary_opcodes{};
-    std::array<std::atomic<u64>, 258> unknown_opcodes{}; // 256: not type 3, 257: past the cursor
+    std::array<Stat, CloseCount> close{};
+    std::array<Stat, 257> boundary_opcodes{};
+    std::array<Stat, 258> unknown_opcodes{}; // 256: not type 3, 257: past the cursor
     // Command processor.
-    std::atomic<u64> claimed{}, executed{}, executed_draws{}, rejected{}, learned{};
+    Stat claimed{}, executed{}, executed_draws{}, rejected{}, learned{};
     // Compute (ISS_NATIVE_COMPUTE): dispatches seen and recorded, segments, learn requests,
     // dispatches without gnmdriver's trailing NOP, and what closed compute segments (opcode).
-    std::atomic<u64> dispatches{}, dispatches_recorded{}, cs_segments{}, cs_learn_posted{},
+    Stat dispatches{}, dispatches_recorded{}, cs_segments{}, cs_learn_posted{},
         cs_no_nop{};
     // ISS_NATIVE_INDIRECT: indexed indirect draws seen and recorded.
-    std::atomic<u64> indirect_seen{}, indirect_recorded{};
-    std::array<std::atomic<u64>, 257> cs_close_opcodes{};
+    Stat indirect_seen{}, indirect_recorded{};
+    std::array<Stat, 257> cs_close_opcodes{};
 };
 Stats stats;
 // Learn request divergence by tracked word (command processor only).
@@ -380,7 +383,8 @@ Segment* PostLearnAt(Lane& l, const u32* packet, u64 key, bool compute, u32 draw
         return s;
     }
     s->mask.assign(l.written.begin(), l.written.end());
-    if ((stats.learn_posted.load(std::memory_order_relaxed) & 31) == 0) {
+    // The divergence sample (Report) every 32 learn requests: only with the counters.
+    if (Common::Perf::kStats && (stats.learn_posted.load(std::memory_order_relaxed) & 31) == 0) {
         s->snapshot.reserve(TrackedWords);
         for (u32 r = 0; r < 3; ++r)
             s->snapshot.insert(s->snapshot.end(), l.words + TrackedFirst[r],
@@ -780,8 +784,8 @@ struct SubmitState {
     std::mutex scan_mutex;
     std::condition_variable scan_cv;
     std::deque<ScanItem> scans;
-    // Statistics.
-    std::atomic<u64> submits{}, scan_us{}, dcbs_recorded{}, jobs_done{}, cp_waits{}, cp_wait_us{};
+    // Statistics (ISS_STATS).
+    Stat submits{}, scan_us{}, dcbs_recorded{}, jobs_done{}, cp_waits{}, cp_wait_us{};
 };
 SubmitState submit;
 
@@ -1097,6 +1101,13 @@ u64 NowUs() {
     QueryPerformanceFrequency(&f);
     return u64(t.QuadPart * 1000000 / f.QuadPart);
 }
+// NowUs() for a time that only feeds the statistics: 0 without ISS_STATS.
+u64 StatNowUs() {
+    if constexpr (Common::Perf::kStats) {
+        return NowUs();
+    }
+    return 0;
+}
 
 // The scissor setters of the eboot's DrawCommandBuffer (setScreenScissor 0x626890, called by the
 // frame setup; setGenericScissor 0x6269D0, called by the shadow view bind 0x439AB0 and restore
@@ -1301,10 +1312,10 @@ bool JobWait() {
 void WaitJob(std::unique_lock<std::mutex>& lock, DcbWork& work, u32 k) {
     const auto done = [&] { return work.job_done[k].load(std::memory_order_acquire) != 0; };
     if (done()) return;
-    const u64 t0 = NowUs();
+    const u64 t0 = StatNowUs();
     submit.done_cv.wait(lock, done);
     submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
-    submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
+    submit.cp_wait_us.fetch_add(StatNowUs() - t0, std::memory_order_relaxed);
 }
 void SetBoundary() {
     next_job_boundary = cp_work && cp_next_job < cp_work->job_begins.size()
@@ -1328,10 +1339,10 @@ void WaitRecorded(const u32* dcb) {
         // The scan's jobs are known once it is scanned: wait for the first one only; the
         // others as the command processor reaches them (WaitRecordedAt).
         if (!scanned()) {
-            const u64 t0 = NowUs();
+            const u64 t0 = StatNowUs();
             submit.done_cv.wait(lock, scanned);
             submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
-            submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
+            submit.cp_wait_us.fetch_add(StatNowUs() - t0, std::memory_order_relaxed);
         }
         cp_work.reset();
         cp_next_job = 0;
@@ -1346,10 +1357,10 @@ void WaitRecorded(const u32* dcb) {
         return;
     }
     if (done()) return;
-    const u64 t0 = NowUs();
+    const u64 t0 = StatNowUs();
     submit.done_cv.wait(lock, done);
     submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
-    submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
+    submit.cp_wait_us.fetch_add(StatNowUs() - t0, std::memory_order_relaxed);
 }
 
 void WaitRecordedSlow(const u32* packet) {
@@ -1401,8 +1412,10 @@ void ScanCommandBuffer(const u32* begin, const u32* end, const std::shared_ptr<D
     static const u32 job_draws = [] {
         const char* p = std::getenv("ISS_NATIVE_PASSES_JOB_DRAWS");
         // 48 (was 96): the command processor's wait for the pool 1.47 -> 0.89 ms per frame in the
-        // city, the first job of each command buffer ready sooner (jd48 2026-10-18).
-        return p ? u32(std::max(8, std::atoi(p))) : 48u;
+        // city, the first job of each command buffer ready sooner (jd48 2026-10-18), with 6 pool
+        // threads. 384 with the hardware's pool below (4 threads on a 4-core i3-12100): fewer,
+        // larger jobs (v2.5 measurement set; to A/B against 48 alone).
+        return p ? u32(std::max(8, std::atoi(p))) : 384u;
     }();
     const auto snapshot = [](const Lane& shadow) {
         std::vector<u32> start;
@@ -1459,9 +1472,13 @@ void ScanCommandBuffer(const u32* begin, const u32* end, const std::shared_ptr<D
 
 void StartPool() {
     if (!submit.threads.empty()) return;
+    // ISS_NATIVE_PASSES_THREADS, default half the logical CPUs within 2..6: 6 threads beside the
+    // command processor, the game's and the renderer's own oversubscribe a 4-core CPU (4 on an
+    // i3-12100, 2 on a 2-core/4-thread one, 6 from 12 threads up as before).
     static const u32 n = [] {
         const char* p = std::getenv("ISS_NATIVE_PASSES_THREADS");
-        return p ? u32(std::max(1, std::atoi(p))) : 6u;
+        if (p) return u32(std::max(1, std::atoi(p)));
+        return std::clamp(std::thread::hardware_concurrency() / 2, 2u, 6u);
     }();
     for (u32 i = 0; i < n; ++i) submit.threads.emplace_back(PoolThread);
 }
@@ -1498,13 +1515,13 @@ void ScanThread() {
             item = std::move(submit.scans.front());
             submit.scans.pop_front();
         }
-        const u64 t0 = NowUs();
+        const u64 t0 = StatNowUs();
         {
             std::scoped_lock lock{submit.mutex};
             ScanCommandBuffer(item.begin, item.end, item.work, jobs);
         }
         QueueJobs(jobs, {item.work});
-        submit.scan_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
+        submit.scan_us.fetch_add(StatNowUs() - t0, std::memory_order_relaxed);
     }
 }
 
@@ -1540,7 +1557,7 @@ void BeforeSubmit(u32 count, const u32* const* dcbs, const u32* sizes_in_bytes) 
             submit.dcbs_recorded.fetch_add(count, std::memory_order_relaxed);
             return;
         }
-        const u64 t0 = NowUs();
+        const u64 t0 = StatNowUs();
         // The registers at each command buffer's start and every job_draws draws, in submission
         // order: the jobs, recorded by the pool after this returns.
         std::vector<Job> jobs;
@@ -1555,7 +1572,7 @@ void BeforeSubmit(u32 count, const u32* const* dcbs, const u32* sizes_in_bytes) 
         }
         QueueJobs(jobs, works);
         submit.submits.fetch_add(1, std::memory_order_relaxed);
-        submit.scan_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
+        submit.scan_us.fetch_add(StatNowUs() - t0, std::memory_order_relaxed);
         submit.dcbs_recorded.fetch_add(count, std::memory_order_relaxed);
         return;
     }
@@ -1592,8 +1609,7 @@ struct AscShadow {
 };
 std::array<AscShadow, MaxAscQueues> asc_shadows;
 struct AscStats {
-    std::atomic<u64> submits{}, ibs{}, dispatches{}, jobs{}, waits{}, wait_us{}, timeouts{},
-        scan_us{};
+    Stat submits{}, ibs{}, dispatches{}, jobs{}, waits{}, wait_us{}, timeouts{}, scan_us{};
 };
 AscStats asc_stats;
 
@@ -1670,7 +1686,7 @@ bool AscEnabled() {
 
 void BeforeAscSubmit(u32 qid, const u32* ring, u32 dwords, const u32* cp_cs, u32 cp_words) {
     if (!AscEnabled() || qid >= MaxAscQueues || !ring || dwords == 0) return;
-    const u64 t0 = NowUs();
+    const u64 t0 = StatNowUs();
     StartPool();
     auto work = std::make_shared<DcbWork>();
     std::vector<Job> jobs;
@@ -1706,7 +1722,7 @@ void BeforeAscSubmit(u32 qid, const u32* ring, u32 dwords, const u32* cp_cs, u32
     }
     asc_stats.submits.fetch_add(1, std::memory_order_relaxed);
     if (jobs.empty()) {
-        asc_stats.scan_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
+        asc_stats.scan_us.fetch_add(StatNowUs() - t0, std::memory_order_relaxed);
         return;
     }
     asc_stats.jobs.fetch_add(jobs.size(), std::memory_order_relaxed);
@@ -1725,7 +1741,7 @@ void BeforeAscSubmit(u32 qid, const u32* ring, u32 dwords, const u32* cp_cs, u32
         static thread_local std::unique_ptr<Lane> lane;
         if (!lane) lane = NewJobLane();
         for (const Job& job : jobs) RecordCommandBuffer(*lane, job.begin, job.end, job.start);
-        asc_stats.scan_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
+        asc_stats.scan_us.fetch_add(StatNowUs() - t0, std::memory_order_relaxed);
         return;
     }
     work->jobs_left.store(u32(jobs.size()), std::memory_order_relaxed);
@@ -1742,11 +1758,11 @@ void BeforeAscSubmit(u32 qid, const u32* ring, u32 dwords, const u32* cp_cs, u32
             submit.asc_pending[ring] = {work, 0};
         }
         QueueJobs(jobs, {work}, true);
-        asc_stats.scan_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
+        asc_stats.scan_us.fetch_add(StatNowUs() - t0, std::memory_order_relaxed);
         return;
     }
     QueueJobs(jobs, {work}, true);
-    const u64 t1 = NowUs();
+    const u64 t1 = StatNowUs();
     asc_stats.scan_us.fetch_add(t1 - t0, std::memory_order_relaxed);
     static const u32 wait_limit_us = AscEnv("ISS_NATIVE_ASC_WAIT_US", 4000);
     std::unique_lock lock{submit.pool_mutex};
@@ -1754,7 +1770,7 @@ void BeforeAscSubmit(u32 qid, const u32* ring, u32 dwords, const u32* cp_cs, u32
         return work->jobs_left.load(std::memory_order_acquire) == 0;
     });
     asc_stats.waits.fetch_add(1, std::memory_order_relaxed);
-    asc_stats.wait_us.fetch_add(NowUs() - t1, std::memory_order_relaxed);
+    asc_stats.wait_us.fetch_add(StatNowUs() - t1, std::memory_order_relaxed);
     if (!done) asc_stats.timeouts.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -1785,6 +1801,9 @@ bool AscRecorded(const u32* ring) {
 }
 
 void Report() {
+    if constexpr (!Common::Perf::kStats) {
+        return;
+    }
     auto& s = stats;
     if (const u64 n = submit.submits.load(std::memory_order_relaxed))
         std::fprintf(stderr,

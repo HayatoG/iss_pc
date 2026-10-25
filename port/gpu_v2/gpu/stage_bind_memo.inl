@@ -611,6 +611,9 @@ void Rasterizer::RememberStageMemo(u32 slot, const Shader::Info& stage, const Pi
 }
 
 void Rasterizer::ReportStageMemo() {
+    if constexpr (!Common::Perf::kStats) {
+        return;
+    }
     const auto& s = stage_memo_stats;
     std::fprintf(stderr, "STAGE_MEMO_PARTIAL partial_hits=%llu resolved_buffers=%llu\n",
                  (unsigned long long)s.partial_hits, (unsigned long long)s.resolved_buffers);

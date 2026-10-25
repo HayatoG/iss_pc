@@ -88,7 +88,7 @@ namespace iss::asc_stats {
 // Defined in buffer_cache.cpp (same enum).
 enum Cause:u32 {WaitGraphicsSubmitted,ComputeSubmit,GdsFlushGraphics,GdsFlushCompute,BdaFlush,
                 RangeFlushCompute,RangeFlushGraphics,FirstTouchFlushGraphics,ReadbackWriterFlush,Num};
-extern std::atomic<u64> count[Num],ns[Num];
+extern Common::Perf::StatCounter count[Num],ns[Num];
 inline constexpr const char* names[Num]{"wait_gfx_submitted","compute_submit","gds_flush_gfx",
     "gds_flush_compute","bda_flush","range_flush_compute","range_flush_gfx","first_touch_flush_gfx",
     "readback_writer_flush"};

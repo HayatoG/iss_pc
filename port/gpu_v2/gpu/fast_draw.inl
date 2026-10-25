@@ -2469,6 +2469,9 @@ bool Rasterizer::TryFastDraw(bool is_indexed, u32 index_offset) {
 }
 
 void Rasterizer::ReportFastDraw() {
+    if constexpr (!Common::Perf::kStats) {
+        return;
+    }
     const auto& s = fast_draw_stats;
     if (s.cyc_plain + s.cyc_rebind + s.cyc_fail != 0) {
         const u64 plain = s.hits - s.rebinds - s.switches;

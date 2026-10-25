@@ -180,24 +180,35 @@ static size_t write_merge_min(void) {
     }
     return min;
 }
+/* TLG_WRITE_MERGE=1 (renderer v1 with precise readbacks, BufferCache::CpuWriteMerge): only then
+ * can the GPU library take a write. Otherwise (and always with renderer v2, whose
+ * tlggpu_cpu_write declines) every copy is a plain one, without the call. */
+static int write_merge(void) {
+    static int value=-1;
+    if (value<0) { const char *env=getenv("TLG_WRITE_MERGE"); value=env && env[0]=='1'; }
+    return value;
+}
+static void count_memory_call(void) {
+    if (ISS_STATS) atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+}
 /* Writes of `write_merge_min()` bytes or more into GPU-modified memory go through
  * tlggpu_cpu_write (no fault and no GPU wait with TLG_WRITE_MERGE=1); smaller ones and other
  * memory write normally. */
 static ABI void *guest_memset(void *dst, int value, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
-    if (size >= write_merge_min() && tlggpu_cpu_write(dst, NULL, value, size)) return dst;
+    count_memory_call();
+    if (write_merge() && size >= write_merge_min() && tlggpu_cpu_write(dst, NULL, value, size)) return dst;
     return memset(dst, value, size);
 }
 static ABI void *guest_memcpy(void *dst, const void *src, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
-    if (size >= write_merge_min() && tlggpu_cpu_write(dst, src, -1, size)) return dst;
+    count_memory_call();
+    if (write_merge() && size >= write_merge_min() && tlggpu_cpu_write(dst, src, -1, size)) return dst;
     return memcpy(dst, src, size);
 }
 static ABI void *guest_memmove(void *dst, const void *src, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    count_memory_call();
     /* Same write merge as memcpy when the ranges cannot overlap; an overlapping move keeps
        memmove's semantics (the merge path copies forward). */
-    if (size >= write_merge_min()) {
+    if (write_merge() && size >= write_merge_min()) {
         uintptr_t to=(uintptr_t)dst, from=(uintptr_t)src;
         if ((to <= from ? from - to : to - from) >= size && tlggpu_cpu_write(dst, src, -1, size))
             return dst;
@@ -205,7 +216,7 @@ static ABI void *guest_memmove(void *dst, const void *src, size_t size) {
     return memmove(dst, src, size);
 }
 static ABI int guest_memcmp(const void *a, const void *b, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed); return memcmp(a, b, size);
+    count_memory_call(); return memcmp(a, b, size);
 }
 static ABI size_t guest_strlen(const char *text) { return strlen(text); }
 static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {

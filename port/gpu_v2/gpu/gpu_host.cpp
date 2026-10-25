@@ -113,7 +113,7 @@ extern "C" int tlggpu_init(const TlgGpuConfig* config) {
     // TLG_NATIVE_PASSES sets ISS_NATIVE_PASSES (off by default: NVIDIA's Linux driver).
     const char* native = std::getenv("ISS_NATIVE_PASSES");
     std::printf("GPU: native passes %s (TLG_NATIVE_PASSES)\n", native && native[0] == '1' ? "on" : "off");
-    std::printf("GPU: renderer v2 (gpu_v2)\n");
+    std::printf("GPU: renderer v2.5 (gpu_v2)\n");
     return iss_gpu_initialize(&callbacks) == 0 ? 0 : -1;
 }
 

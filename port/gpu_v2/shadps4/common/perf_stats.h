@@ -19,6 +19,13 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentProcessorNumb
 #include <sched.h>
 #endif
 
+// ISS_STATS (CMake option, OFF for players): the diagnostic counters, their timers and the
+// periodic reports. Off, they compile to nothing: no atomic increments shared between threads
+// and no clock reads in the hot paths.
+#ifndef ISS_STATS
+#define ISS_STATS 0
+#endif
+
 /**
  * Lightweight performance counters used to find what causes slow frames.
  *
@@ -28,6 +35,26 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentProcessorNumb
  * readbacks, page faults or uploads.
  */
 namespace Common::Perf {
+
+inline constexpr bool kStats = ISS_STATS != 0;
+
+/// A diagnostic counter: an atomic with ISS_STATS, nothing (always 0) without.
+struct StatCounter {
+#if ISS_STATS
+    std::atomic<u64> value{};
+    u64 fetch_add(u64 n, std::memory_order order = std::memory_order_seq_cst) {
+        return value.fetch_add(n, order);
+    }
+    u64 load(std::memory_order order = std::memory_order_seq_cst) const {
+        return value.load(order);
+    }
+    void store(u64 n, std::memory_order order = std::memory_order_seq_cst) { value.store(n, order); }
+#else
+    u64 fetch_add(u64, std::memory_order = std::memory_order_seq_cst) { return 0; }
+    u64 load(std::memory_order = std::memory_order_seq_cst) const { return 0; }
+    void store(u64, std::memory_order = std::memory_order_seq_cst) {}
+#endif
+};
 
 enum Counter : u32 {
     ShaderCompiles,
@@ -582,6 +609,9 @@ inline std::atomic<u32>& GpuThreadCpu() {
 }
 
 inline void Add(Counter counter, u64 value = 1) {
+    if constexpr (!kStats) {
+        return;
+    }
     bool shared;
     auto& slot = LocalCounters(shared)->values[counter];
     if (shared) [[unlikely]] {
@@ -598,6 +628,14 @@ inline u64 NowNs() {
                                 .count());
 }
 
+/// NowNs() for a time that only feeds the counters: 0 without ISS_STATS (no clock read).
+inline u64 StatNowNs() {
+    if constexpr (kStats) {
+        return NowNs();
+    }
+    return 0;
+}
+
 inline u32 CurrentCpu() {
 #ifdef _WIN32
     return static_cast<u32>(GetCurrentProcessorNumber());
@@ -611,10 +649,12 @@ inline u32 CurrentCpu() {
 class ScopedTimer {
 public:
     ScopedTimer(Counter count_counter_, Counter ns_counter_)
-        : count_counter{count_counter_}, ns_counter{ns_counter_}, start{NowNs()} {}
+        : count_counter{count_counter_}, ns_counter{ns_counter_}, start{StatNowNs()} {}
     ~ScopedTimer() {
-        Add(count_counter);
-        Add(ns_counter, NowNs() - start);
+        if constexpr (kStats) {
+            Add(count_counter);
+            Add(ns_counter, NowNs() - start);
+        }
     }
     ScopedTimer(const ScopedTimer&) = delete;
     ScopedTimer& operator=(const ScopedTimer&) = delete;

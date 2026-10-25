@@ -336,10 +336,22 @@ void runtime_wait_slot_end(RuntimeWait *w) {
     __atomic_store_n(&w->level[depth].kind,NULL,__ATOMIC_RELEASE);
     __atomic_add_fetch(&w->generation,1,__ATOMIC_RELEASE);
 }
+int runtime_wait_tracking(void) {
+    static int value=-1;
+    if (value<0) {
+        const char *freeze=getenv("TLG_FREEZE_REPORT_SECONDS");
+        value=!(freeze && *freeze && strtoul(freeze,NULL,10)==0) || wait_stats();
+    }
+    return value;
+}
 void runtime_wait_begin(const char *kind,const void *object,const char *name,const void *const *owner,uintptr_t frame) {
+    if (!runtime_wait_tracking()) return;
     runtime_wait_slot_begin(runtime_wait_slot(),kind,object,name,owner,frame,runtime_wait_now_ms());
 }
-void runtime_wait_end(void) { runtime_wait_slot_end(runtime_wait_slot()); }
+void runtime_wait_end(void) {
+    if (!runtime_wait_tracking()) return;
+    runtime_wait_slot_end(runtime_wait_slot());
+}
 int runtime_wait_copy(const RuntimeWait *from,RuntimeWait *to) {
     for (int attempt=0;attempt<8;++attempt) {
         uint32_t before=__atomic_load_n(&from->generation,__ATOMIC_ACQUIRE);

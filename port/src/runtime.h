@@ -168,6 +168,15 @@ void runtime_wait_slot_end(RuntimeWait *w);
 void runtime_wait_begin(const char *kind, const void *object, const char *name,
                         const void *const *owner, uintptr_t frame);
 void runtime_wait_end(void);
+/* Whether anything reads the wait slots and the mutex holders: the freeze report
+ * (TLG_FREEZE_REPORT_SECONDS, default 10, 0 = off) or TLG_WAIT_STATS=1. Decided on first use;
+ * without a reader runtime_wait_begin/end do nothing and guest mutexes skip the bookkeeping. */
+int runtime_wait_tracking(void);
+/* ISS_STATS (renderer v2's CMake option, off for players): the runtime's hot counters (guest
+ * lock/wait/wakeup counts, memory calls), shared between threads and read only at exit. */
+#ifndef ISS_STATS
+#define ISS_STATS 0
+#endif
 /* Consistent copy of a slot another thread may be changing (0: it kept changing). */
 int runtime_wait_copy(const RuntimeWait *from, RuntimeWait *to);
 /* Thread record of the calling guest (or attached host) thread, NULL on other threads. */

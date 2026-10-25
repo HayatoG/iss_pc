@@ -54,8 +54,9 @@ namespace iss::asc_stats {
 // Same enum in vk_rasterizer.cpp (printed there).
 enum Cause:u32 {WaitGraphicsSubmitted,ComputeSubmit,GdsFlushGraphics,GdsFlushCompute,BdaFlush,
                 RangeFlushCompute,RangeFlushGraphics,FirstTouchFlushGraphics,ReadbackWriterFlush,Num};
-std::atomic<u64> count[Num]{},ns[Num]{};
-struct Timer {Cause c;u64 start{Common::Perf::NowNs()};~Timer(){count[c].fetch_add(1,std::memory_order_relaxed);ns[c].fetch_add(Common::Perf::NowNs()-start,std::memory_order_relaxed);}};
+// ISS_STATS only: two clock reads and two shared atomics per forced submit otherwise.
+Common::Perf::StatCounter count[Num]{},ns[Num]{};
+struct Timer {Cause c;u64 start{Common::Perf::StatNowNs()};~Timer(){if constexpr(Common::Perf::kStats){count[c].fetch_add(1,std::memory_order_relaxed);ns[c].fetch_add(Common::Perf::NowNs()-start,std::memory_order_relaxed);}}};
 // Sources of cross-queue waits (CP thread only): which ranges make a queue wait for the other.
 struct WaitKey {u64 page;u32 size;u8 queue,kind,untouched;bool operator==(const WaitKey&) const=default;};
 struct WaitKeyHash {size_t operator()(const WaitKey& k) const noexcept {return std::hash<u64>{}(k.page*31+k.size*7+k.queue*3+k.kind+k.untouched*5);}};
@@ -63,12 +64,14 @@ std::unordered_map<WaitKey,u64,WaitKeyHash> sources;
 std::array<std::array<u64,4>,2> age{}; // per waiting queue: other tick age 0,1,2-3,4+
 bool in_upload{};
 void NoteWait(u64 addr,u64 size,u32 queue,bool written,bool untouched,u64 dependency,u64 other_current){
+    if constexpr(!Common::Perf::kStats)return; // a hash map insert per cross-queue wait
     const u8 kind=in_upload?2:written?1:0;
     ++sources[{addr>>12,u32(std::min<u64>(size,~0u)),u8(queue),kind,u8(untouched)}];
     const u64 a=other_current>dependency?other_current-dependency:0;
     ++age[queue][a==0?0:a==1?1:a<4?2:3];
 }
 void Print(){
+    if constexpr(!Common::Perf::kStats)return;
     std::vector<std::pair<WaitKey,u64>> v(sources.begin(),sources.end());
     std::sort(v.begin(),v.end(),[](auto& a,auto& b){return a.second>b.second;});
     std::fprintf(stderr,"ASC_WAIT_AGE compute(0,1,2-3,4+)=%llu,%llu,%llu,%llu gfx=%llu,%llu,%llu,%llu distinct=%zu\n",
@@ -766,6 +769,10 @@ namespace {
 /// call for the command processor); otherwise it looks for jobs every millisecond, and a
 /// submission waiting for jobs does them itself.
 constexpr size_t UploadWorkerWakeJobs = 8;
+/// How long the worker sleeps between looks. Not 1 ms: on Windows (libc++ over winpthreads) a
+/// timed wait rounds the time left down to whole milliseconds, so a 1 ms deadline becomes a 0 ms
+/// wait and the worker spins a whole core (~100% even in menus). 2 ms sleeps about 1 ms.
+constexpr auto UploadWorkerPoll = std::chrono::milliseconds{2};
 } // Anonymous namespace
 
 u64 UploadWorker::Enqueue(Job&& job) {
@@ -800,7 +807,7 @@ void UploadWorker::Run(std::stop_token stoken) {
         {
             std::unique_lock lk{queue_mutex};
             worker_sleeping = true;
-            queue_cv.wait_for(lk, stoken, std::chrono::milliseconds{1},
+            queue_cv.wait_for(lk, stoken, UploadWorkerPoll,
                               [this] { return queue.size() >= UploadWorkerWakeJobs; });
             worker_sleeping = false;
             if (queue.empty()) {
@@ -1308,12 +1315,12 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             ReadMemory(device_addr, size, true, assume_locks);
         });
     if (is_fault && !assume_locks) {
-        // Write fault window (ISS_FAULT_WINDOW_KB, power of two, 0 off): the guest fills its
-        // per-frame buffers (the particle arena) sequentially, one fault per 4 KB page. The clean
-        // pages around the fault that hold no GPU data are unprotected with it.
+        // Write fault window (ISS_FAULT_WINDOW_KB, power of two, default 128, 0 off): the guest
+        // fills its per-frame buffers (the particle arena) sequentially, one fault per 4 KB page.
+        // The clean pages around the fault that hold no GPU data are unprotected with it.
         static const u64 window = [] {
             const char* setting = std::getenv("ISS_FAULT_WINDOW_KB");
-            const u64 kb = setting ? std::strtoull(setting, nullptr, 10) : 0;
+            const u64 kb = setting ? std::strtoull(setting, nullptr, 10) : 128;
             const u64 bytes = kb >= 8 ? std::bit_floor(std::min<u64>(kb, 1024)) * 1024 : 0;
             std::fprintf(stderr, "PORT_TUNING fault_window_bytes=%llu\n",
                          static_cast<unsigned long long>(bytes));
@@ -1322,19 +1329,22 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
         if (window != 0) {
             const u32 pages =
                 memory_tracker->ExtendWriteFault(Common::AlignDown(device_addr, window), window);
-            fault_window_faults.fetch_add(1, std::memory_order_relaxed);
-            fault_window_pages.fetch_add(pages, std::memory_order_relaxed);
+            if constexpr (Common::Perf::kStats) {
+                fault_window_faults.fetch_add(1, std::memory_order_relaxed);
+                fault_window_pages.fetch_add(pages, std::memory_order_relaxed);
+            }
         }
-        // ISS_FAULT_STREAK_KB (default 256, 0 off): a guest thread writing on through pages it
+        // ISS_FAULT_STREAK_KB (default 1024, 0 off): a guest thread writing on through pages it
         // faults on one after the other (a memcpy over memory the GPU wrote or owns, which the
         // window above leaves alone) gets the pages ahead invalidated now, exactly as their
         // faults would (snapshots for the merge, discards, CPU modified, unprotected), 4 pages
         // at a time as a fault does. Every ~2 s the game copies ~11 MB at 0x2093xxxxx-0x209Fxxxxx:
         // ~2870 faults, a 45 ms frame (the "mini frame skips", 2026-10-17). Pages with a
-        // readback pending are left protected: they fault as before.
+        // readback pending are left protected: they fault as before. 1 MB after the second
+        // page in a row (was 256 KB after the third): fewer faults in those copies.
         static const u64 streak_bytes = [] {
             const char* setting = std::getenv("ISS_FAULT_STREAK_KB");
-            const u64 kb = setting ? std::strtoull(setting, nullptr, 10) : 256;
+            const u64 kb = setting ? std::strtoull(setting, nullptr, 10) : 1024;
             return std::min<u64>(kb, 4096) * 1024;
         }();
         if (streak_bytes != 0) {
@@ -1343,7 +1353,7 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             if (page == last_page + 1 || (next_page != 0 && page == next_page)) ++streak;
             else if (page != last_page) streak = 0;
             last_page = page;
-            if (streak >= 3) {
+            if (streak >= 2) {
                 const VAddr ahead = (page + 1) * BYTES_PER_PAGE;
                 constexpr u64 chunk = 4 * BYTES_PER_PAGE;
                 for (u64 off = 0; off < streak_bytes; off += chunk) {
@@ -1351,7 +1361,8 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                 }
                 InvalidatePreparedPacketAccess(ahead, streak_bytes);
                 next_page = page + 1 + streak_bytes / BYTES_PER_PAGE;
-                fault_streak_extends.fetch_add(1, std::memory_order_relaxed);
+                if constexpr (Common::Perf::kStats)
+                    fault_streak_extends.fetch_add(1, std::memory_order_relaxed);
             }
         }
     }
