@@ -49,6 +49,9 @@ get '!' (unreliable). --exclude-drift leaves those runs out of the table.
 Half the runs or more off = inconclusive (no flags); a variant off the control in
 every run but tight within itself changes the draw count itself (a note, no '!').
 The per-run check goes to <csv>_runs.csv and the JSON's 'drift'.
+Paired diff: after the table, each variant's per-round avg_fps diff vs the
+control (rounds from run.json, else the k-th run of each pairs with the k-th
+control run): mean, sd and 95% CI (Student t); compare.json 'paired_avg_fps'.
 Failed runs: a bench.ps1 run (a folder with run.json) whose status is not ok, or
 that has no bench summary or window (read from its whole log or CSV: loading
 screens, not the route), is left out of the table and the drift check: a
@@ -641,6 +644,63 @@ def bench_table(runs, control=None, noise_k=2.0, all_runs=None):
     return out
 
 
+# Paired avg_fps diff: bench.ps1 runs every variant once per round (A B, B A, ...), so each round
+# pairs a test run with the control run next to it, which cancels the drift between rounds
+# (temperature, background load) that the unpaired mean +-stdev keeps. Two-sided Student t, 97.5%.
+T975 = (12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160,
+        2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056,
+        2.052, 2.048, 2.045, 2.042)
+
+
+def run_round(d):
+    """The round of a bench.ps1 run (its run.json 'round'), else None (a file passed by hand)."""
+    meta = os.path.join(os.path.dirname(os.path.abspath(d["path"])), "run.json")
+    try:
+        with open(meta, encoding="utf-8-sig") as f: m = json.load(f)
+    except (OSError, ValueError): return None
+    v = m.get("round") if isinstance(m, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) and not m.get("warmup") else None
+
+
+def paired_fps(runs, groups, control):
+    """{variant: dict(n, mean, sd, ci95)} of the per-round diff 100 (test - control) / control of
+    avg_fps. Rounds from run.json when every run has one, else the k-th run of each variant (in run
+    order) pairs with the k-th control run. Fewer than 2 pairs: n only."""
+    fps = [x for x in runs if x.get("avg_fps") is not None]
+    rounds = [run_round(x) for x in fps]
+    by_round = bool(fps) and all(rd is not None for rd in rounds)
+    def series(g):
+        out = {}
+        for x, rd in zip(fps, rounds):
+            if x["name"] != g: continue
+            k = rd if by_round else len(out)
+            out.setdefault(k, x["avg_fps"])   # a round counted twice: its first run
+        return out
+    ctl = series(control)
+    res = {}
+    for g in groups:
+        if g == control: continue
+        v = series(g)
+        d = [100.0 * (v[k] - ctl[k]) / ctl[k] for k in sorted(v) if k in ctl and ctl[k]]
+        e = dict(n=len(d), mean=None, sd=None, ci95=None, by_round=by_round)
+        if d: e["mean"] = mean(d)
+        if len(d) > 1:
+            e["sd"] = st.stdev(d)
+            h = (T975[len(d) - 2] if len(d) - 2 < len(T975) else 1.96) * e["sd"] / math.sqrt(len(d))
+            e["ci95"] = [e["mean"] - h, e["mean"] + h]
+        res[g] = e
+    return res
+
+
+def fmt_paired(g, control, e):
+    if not e["n"]: return f"{g} vs {control}: no paired rounds"
+    if e["ci95"] is None: return f"{g} vs {control}: {e['mean']:+.2f}% over 1 round (no CI)"
+    lo, hi = e["ci95"]
+    verdict = "excludes 0" if (lo > 0 or hi < 0) else "includes 0"
+    return (f"{g} vs {control}: {e['mean']:+.2f}% over {e['n']} rounds (paired sd {e['sd']:.2f}%), "
+            f"95% CI [{lo:+.2f}, {hi:+.2f}] ({verdict})")
+
+
 def fmt_cell(c, key):
     if c["mean"] is None: return "-"
     # counts: whole numbers stay whole; a mean between two counts keeps one decimal
@@ -783,6 +843,12 @@ def cmd_bench(a):
           + f"\ndraws/frame: mean of each run's Frame stats lines in the window; drift = runs more than "
           f"{drift_pct:g}% off the median of all runs ('?N': N runs unknown)."
           + (" '!' = unreliable: a drift run in this variant or the control." if t["unreliable"] else ""))
+    t["paired_avg_fps"] = paired_fps(used, t["groups"], t["control"])
+    if t["paired_avg_fps"]:
+        how = ("by round (run.json)" if all(e["by_round"] for e in t["paired_avg_fps"].values())
+               else "k-th run with the k-th control run")
+        print(f"\npaired avg_fps diff per round vs '{t['control']}' ({how}):")
+        for g, e in t["paired_avg_fps"].items(): print("  " + fmt_paired(g, t["control"], e))
     for v in t["excluded_variants"]:
         print(f"{v['variant']}: all {v['runs']} runs excluded ({v['reason']}), no comparison")
     bar = "!" * 78
