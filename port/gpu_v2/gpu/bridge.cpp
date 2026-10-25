@@ -114,7 +114,11 @@ bool thread_priority_enabled(){static const bool on=[]{const char *p=std::getenv
 void raise_gpu_threads(){}
 #else
 void raise_gpu_threads(){
-    static const wchar_t *names[]={L"shadPS4:GpuCommandProcessor",L"shadPS4:GpuCommandRecorder",L"shadPS4:PresentThread",L"shadPS4:GpuUploadWorker",L"iss:DrawStageB"};
+    // ISS_PENDING_OPS_PRIO=1 (default 0): also the thread that writes the deferred labels, EOPs
+    // and interrupts the guest waits on once the GPU reaches their tick (vk_scheduler.cpp).
+    static const bool pending_ops=[]{const char *p=std::getenv("ISS_PENDING_OPS_PRIO");return p&&p[0]=='1';}();
+    static const wchar_t *names[]={L"shadPS4:GpuCommandProcessor",L"shadPS4:GpuCommandRecorder",L"shadPS4:PresentThread",L"shadPS4:GpuUploadWorker",L"iss:DrawStageB",
+                                   pending_ops?L"shadPS4:GpuSchedPriorityPendingOpsRunner":nullptr};
     const DWORD pid=GetCurrentProcessId();
     HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);if(snap==INVALID_HANDLE_VALUE)return;
     THREADENTRY32 te{};te.dwSize=sizeof(te);
@@ -123,7 +127,7 @@ void raise_gpu_threads(){
         HANDLE t=OpenThread(THREAD_SET_LIMITED_INFORMATION|THREAD_QUERY_LIMITED_INFORMATION,FALSE,te.th32ThreadID);if(!t)continue;
         PWSTR desc=nullptr;
         if(SUCCEEDED(GetThreadDescription(t,&desc))&&desc){
-            for(const wchar_t *n:names)if(!wcscmp(desc,n)&&GetThreadPriority(t)<THREAD_PRIORITY_ABOVE_NORMAL){
+            for(const wchar_t *n:names)if(n&&!wcscmp(desc,n)&&GetThreadPriority(t)<THREAD_PRIORITY_ABOVE_NORMAL){
                 if(SetThreadPriority(t,THREAD_PRIORITY_ABOVE_NORMAL))std::fprintf(stderr,"PORT_TUNING thread_priority %ls=above_normal\n",desc);
             }
             LocalFree(desc);
