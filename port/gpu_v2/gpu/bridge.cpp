@@ -418,6 +418,51 @@ extern "C" void IssPreciseSleepUs(unsigned us){
     else SwitchToThread();
 #endif
 }
+// An idle wait that sleeps, for one waiting thread (ISS_UPLOAD_IDLE=sleep, the upload worker in
+// buffer_cache.cpp): IssIdleWaitFor returns after us microseconds on a high resolution timer, or
+// once IssIdleWaitWake is called (a wake while nobody waits ends the next wait at once). Windows
+// only (IssIdleWaitCreate returns null elsewhere): libc++ there rounds a timed condition variable
+// wait down to whole milliseconds, so a 1 ms wait returns at once and its caller spins; the POSIX
+// timed waits sleep.
+#ifdef _WIN32
+namespace {struct IssIdleWait{HANDLE event,timer;};}
+#endif
+extern "C" void* IssIdleWaitCreate(){
+#ifndef _WIN32
+    return nullptr;
+#else
+    HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+    if(!timer)return nullptr;
+    HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr); // auto-reset: no wake is lost
+    if(!event){CloseHandle(timer);return nullptr;}
+    return new IssIdleWait{event,timer};
+#endif
+}
+extern "C" void IssIdleWaitWake(void* wait){
+#ifdef _WIN32
+    SetEvent(static_cast<IssIdleWait*>(wait)->event);
+#else
+    (void)wait;
+#endif
+}
+extern "C" void IssIdleWaitFor(void* wait,unsigned us){
+#ifdef _WIN32
+    auto* w=static_cast<IssIdleWait*>(wait);
+    LARGE_INTEGER due;due.QuadPart=-static_cast<LONGLONG>(us)*10;
+    const HANDLE handles[2]={w->event,w->timer};
+    if(SetWaitableTimer(w->timer,&due,0,nullptr,nullptr,FALSE))WaitForMultipleObjects(2,handles,FALSE,INFINITE);
+    else WaitForSingleObject(w->event,1);
+#else
+    (void)wait;(void)us;
+#endif
+}
+extern "C" void IssIdleWaitDestroy(void* wait){
+#ifdef _WIN32
+    if(auto* w=static_cast<IssIdleWait*>(wait)){CloseHandle(w->event);CloseHandle(w->timer);delete w;}
+#else
+    (void)wait;
+#endif
+}
 // The present thread's vblank clock (ISS_VBLANK_TIMER=hr|hrspin, videoout_driver.cpp): sleeps
 // ns on a per-thread timer created once, high resolution when Windows has it (a plain one, about
 // 15.6 ms granular, otherwise). Returns 1 when that timer is high resolution; ns<=0 only creates it.
