@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <time.h>
+#include <immintrin.h>
 typedef struct { int type; } GuestAttr;
 /* owner/depth: who holds it, for the freeze report (written only while holding the mutex). */
 typedef struct { pthread_mutex_t native; void *owner; unsigned depth; char name[32]; } GuestMutex;
@@ -88,6 +89,39 @@ static void took(GuestMutex *m) {
 static void releasing(GuestMutex *m) {
     if (m->depth && m->owner == holder() && !--m->depth) m->owner = NULL;
 }
+/* TLG_MUTEX_SPIN_US=N: a contended lock retries the trylock for up to N microseconds (pausing
+ * between tries) before it blocks in the host mutex. 0 (the default) blocks at once. */
+static uint64_t spin_ns = UINT64_MAX;   /* UINT64_MAX: not read yet */
+static size_t contended, spin_hits;     /* runtime_counters */
+static uint64_t mutex_spin_ns(void) {
+    uint64_t v = __atomic_load_n(&spin_ns, __ATOMIC_RELAXED);
+    if (v == UINT64_MAX) {
+        const char *env = getenv("TLG_MUTEX_SPIN_US");
+        long us = env ? strtol(env, NULL, 10) : 0;
+        v = us > 0 ? (uint64_t)(us > 10000 ? 10000 : us) * 1000 : 0;
+        __atomic_store_n(&spin_ns, v, __ATOMIC_RELAXED);
+        if (v) printf("Runtime: contended guest mutexes spin up to %llu us before blocking (TLG_MUTEX_SPIN_US)\n",
+                      (unsigned long long)(v / 1000));
+    }
+    return v;
+}
+static uint64_t mono_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000 + (uint64_t)t.tv_nsec;
+}
+/* Spins only while another thread holds the mutex: when the caller is the holder (a recursive or
+ * error-check relock), waiting cannot help. Returns the last trylock result. */
+static int spin_trylock(GuestMutex *m, uint64_t ns) {
+    if (__atomic_load_n(&m->owner, __ATOMIC_RELAXED) == holder()) return EBUSY;
+    uint64_t end = mono_ns() + ns;
+    int r;
+    do {
+        for (int i = 0; i < 32; ++i) _mm_pause();
+        r = pthread_mutex_trylock(&m->native);
+    } while (r == EBUSY && mono_ns() < end);
+    return r;
+}
 /* A contended lock marks the wait (the uncontended path only adds the trylock). An error-check
  * mutex the caller holds fails the trylock with EBUSY and the lock with EDEADLK, as before. */
 static int32_t lock_mutex(GuestMutex **mutex, uintptr_t frame) {
@@ -95,6 +129,14 @@ static int32_t lock_mutex(GuestMutex **mutex, uintptr_t frame) {
     if (e) return e;
     GuestMutex *m = *mutex;
     int r = pthread_mutex_trylock(&m->native);
+    if (r == EBUSY) {
+        uint64_t ns = mutex_spin_ns();
+        if (runtime_counters) __atomic_fetch_add(&contended, 1, __ATOMIC_RELAXED);
+        if (ns) {
+            r = spin_trylock(m, ns);
+            if (!r && runtime_counters) __atomic_fetch_add(&spin_hits, 1, __ATOMIC_RELAXED);
+        }
+    }
     if (r == EBUSY) {
         runtime_wait_begin("mutex", m, m->name, (const void *const *)&m->owner, frame);
         r = pthread_mutex_lock(&m->native);
@@ -299,7 +341,8 @@ uintptr_t runtime_mutex_resolve(const char *name) {
 }
 void runtime_mutex_report(void) {
     if (runtime_counters) {
-        printf("Runtime: mutexes created=%zu, locks=%zu, unlocks=%zu\n", created, locks, unlocks);
+        printf("Runtime: mutexes created=%zu, locks=%zu, unlocks=%zu, contended=%zu, spin acquired=%zu\n",
+               created, locks, unlocks, contended, spin_hits);
         printf("Runtime: condition variables created=%zu, waits=%zu, wakeups=%zu\n", conds, waits, wakeups);
     } else {
         printf("Runtime: mutexes created=%zu, locks/unlocks off (ISS_RUNTIME_COUNTERS=1 to count)\n", created);
