@@ -24,6 +24,10 @@
 #define ISS_SYSV __attribute__((sysv_abi))
 #endif
 
+#ifdef _WIN32
+bool IssCommandProcessorCpuSets(std::vector<ULONG>& out); // bridge.cpp, ISS_CP_CPU
+#endif
+
 namespace iss::native_passes {
 namespace {
 using u8 = std::uint8_t;
@@ -1053,9 +1057,10 @@ std::atomic<u32> pool_slots{};
 u64 NowUs();
 
 // ISS_NATIVE_PASSES_CPU=off|ecore|pcore: the CPU sets each pool thread restricts itself to (once,
-// at its start). ecore: efficiency class 0; pcore: the highest class. Both leave out the sets the
-// process default excludes (ISS_CP_CPU's core, see IssPinCommandProcessor in bridge.cpp). off
-// (default), a non-hybrid CPU or Linux: unchanged.
+// at its start). ecore: every efficiency class below the highest (class 0 on a 2-class CPU, both
+// lower classes on a 3-class one); pcore: the highest class. Both leave out the command
+// processor's core (ISS_CP_CPU, IssCommandProcessorCpuSets in bridge.cpp, whichever thread
+// starts first). off (default), a non-hybrid CPU or Linux: unchanged.
 enum class PoolCpu { Off, ECore, PCore };
 PoolCpu PoolCpuMode() {
     static const PoolCpu mode = [] {
@@ -1099,35 +1104,42 @@ void RestrictPoolThread() {
         if (log) std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: not a hybrid CPU\n", name);
         return;
     }
-    // The process default: every set but the command processor's core once it is pinned; none
-    // (every set) otherwise. A thread's selected sets override it, so it is applied here.
-    ULONG count = 0;
-    GetProcessDefaultCpuSets(GetCurrentProcess(), nullptr, 0, &count);
-    std::vector<ULONG> defaults(count);
-    if (count && !GetProcessDefaultCpuSets(GetCurrentProcess(), defaults.data(), count, &count))
-        defaults.clear();
-    defaults.resize(std::min<size_t>(defaults.size(), count));
-    const unsigned wanted = mode == PoolCpu::ECore ? 0u : high;
+    // The command processor's core: a thread's selected sets override the process default that
+    // keeps other threads off it, so it is left out here.
+    std::vector<ULONG> cp_sets;
+    const bool cp_pinned = IssCommandProcessorCpuSets(cp_sets);
+    const auto wanted = [&](unsigned efficiency) {
+        return mode == PoolCpu::ECore ? efficiency < high : efficiency == high;
+    };
     std::vector<ULONG> ids;
     size_t excluded = 0;
     for (const auto& [id, efficiency] : sets) {
-        if (efficiency != wanted) continue;
-        if (!defaults.empty() && std::find(defaults.begin(), defaults.end(), id) == defaults.end()) {
+        if (!wanted(efficiency)) continue;
+        if (std::find(cp_sets.begin(), cp_sets.end(), id) != cp_sets.end()) {
             ++excluded;
             continue;
         }
         ids.push_back(id);
     }
+    char classes[16];
+    if (mode == PoolCpu::ECore && high - 1 > low)
+        std::snprintf(classes, sizeof(classes), "%u-%u", low, high - 1);
+    else if (mode == PoolCpu::ECore)
+        std::snprintf(classes, sizeof(classes), "%u", low);
+    else
+        std::snprintf(classes, sizeof(classes), "%u", high);
     if (ids.empty()) {
         if (log)
-            std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: no CPU set of class %u\n", name, wanted);
+            std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: no CPU set of class %s\n", name, classes);
         return;
     }
     const BOOL ok = SetThreadSelectedCpuSets(GetCurrentThread(), ids.data(), ULONG(ids.size()));
+    // Nothing excluded: the command processor is not pinned, or (ecore) its core is not of
+    // these classes.
+    const char* why = excluded ? "" : !cp_pinned ? " (cp not pinned)" : " (cp core not in these classes)";
     if (log)
-        std::fprintf(stderr,
-                     "NATIVE_PASSES_POOL cpu=%s class=%u sets=%zu excluded=%zu(process default) thread=%d\n",
-                     name, wanted, ids.size(), excluded, int(ok));
+        std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s class=%s sets=%zu excluded=%zu(cp core)%s thread=%d\n",
+                     name, classes, ids.size(), excluded, why, int(ok));
 #else
     if (log) std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: CPU sets are Windows-only\n", name);
 #endif
@@ -1185,10 +1197,15 @@ void WaitRecordingBefore(u64 ticket) {
 
 namespace {
 u64 NowUs() {
-    LARGE_INTEGER t, f;
-    QueryPerformanceCounter(&t);
-    QueryPerformanceFrequency(&f);
-    return u64(t.QuadPart * 1000000 / f.QuadPart);
+    static const u64 f = [] {
+        LARGE_INTEGER q;
+        QueryPerformanceFrequency(&q);
+        return u64(q.QuadPart);
+    }();
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    const u64 t = u64(q.QuadPart);
+    return (t / f) * 1000000 + (t % f) * 1000000 / f; // t * 1000000 overflows after ~10 days at 10 MHz
 }
 
 // The scissor setters of the eboot's DrawCommandBuffer (setScreenScissor 0x626890, called by the
@@ -1906,14 +1923,16 @@ void Report() {
     if (const u64 n = submit.submits.load(std::memory_order_relaxed))
         std::fprintf(stderr,
                      "NATIVE_PASSES_SUBMIT submits=%llu dcbs=%llu jobs=%llu scan_us/submit=%llu "
-                     "cp_waits=%llu cp_wait_us/submit=%llu pool_busy_us/submit=%llu pool_wakes=%llu "
-                     "pool_idle_wakes=%llu wake=%s\n",
+                     "cp_waits=%llu cp_wait_us/submit=%llu pool_busy_us=%llu pool_busy_us/job=%llu "
+                     "pool_wakes=%llu pool_idle_wakes=%llu wake=%s\n",
                      (unsigned long long)n, (unsigned long long)submit.dcbs_recorded.load(),
                      (unsigned long long)submit.jobs_done.load(),
                      (unsigned long long)(submit.scan_us.load() / n),
                      (unsigned long long)submit.cp_waits.load(),
                      (unsigned long long)(submit.cp_wait_us.load() / n),
-                     (unsigned long long)(submit.pool_busy_us.load() / n),
+                     // The pool's totals: every job, gfx and ISS_NATIVE_ASC (jobs= counts both).
+                     (unsigned long long)submit.pool_busy_us.load(),
+                     (unsigned long long)(submit.pool_busy_us.load() / std::max<u64>(1, submit.jobs_done.load())),
                      (unsigned long long)submit.pool_wakes.load(),
                      (unsigned long long)submit.pool_idle_wakes.load(), WakeOne() ? "one" : "all");
     if (const u64 n = asc_stats.submits.load(std::memory_order_relaxed))

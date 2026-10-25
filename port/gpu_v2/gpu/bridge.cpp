@@ -760,8 +760,25 @@ static const char* cp_mode_name(CpMode mode) {
     return mode == CpMode::Auto ? "auto" : mode == CpMode::Manual ? "manual" : "off";
 }
 
-void IssPinCommandProcessor() {
-    iss_set_high_qos(true);
+namespace {
+// The command processor's placement (ISS_CP_CPU), chosen once for the process: the topology and
+// the choice are logged here. pinned: the core it gets (core_ids: every CPU set of that core;
+// id: the one of them the command processor thread runs on); not pinned: nothing else is set.
+struct CpSelection {
+    bool pinned{};
+    CpMode mode{CpMode::Off};
+    long wanted{-1};
+    ULONG id{};
+    unsigned logical{}, core{}, efficiency{};
+    bool hybrid{};
+    const char* scope{""};
+    std::vector<ULONG> others;   // every CPU set but the core's: the process default
+    std::vector<ULONG> core_ids; // the core's CPU sets
+    std::string siblings;        // the core's logical processors, "10/11"
+};
+
+CpSelection SelectCommandProcessorCpu() {
+    CpSelection sel;
     const char* value = std::getenv("ISS_CP_CPU");
     const CpChoice choice = cp_mode(value);
     const CpMode mode = choice.mode;
@@ -772,7 +789,7 @@ void IssPinCommandProcessor() {
             reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()), length, &length,
             GetCurrentProcess(), 0)) {
         std::fprintf(stderr, "PORT_TUNING cp_cpu failed: no CPU set information\n");
-        return;
+        return sel;
     }
     struct Set { ULONG id; unsigned core; unsigned logical; unsigned group; unsigned efficiency; };
     std::vector<Set> sets;
@@ -827,7 +844,7 @@ void IssPinCommandProcessor() {
     if (mode == CpMode::Off) {
         std::fprintf(stderr, "PORT_TUNING cp_cpu=%s mode=off hybrid=%d\n", value && *value ? value : "(empty)",
                      hybrid ? 1 : 0);
-        return;
+        return sel;
     }
     const Set* mine = nullptr;
     long wanted = -1;
@@ -838,7 +855,7 @@ void IssPinCommandProcessor() {
         if (group0_cores < 4) { // a 2- or 3-core CPU keeps every core for the game's threads
             std::fprintf(stderr, "PORT_TUNING cp_cpu=auto mode=auto not pinned: %zu physical cores in group 0 "
                          "(fewer than 4)\n", group0_cores);
-            return;
+            return sel;
         }
         // Non-hybrid: the group 0 logical processors sharing the L3 of LP 0 (one CCD of a
         // dual-CCD Ryzen, where the game's threads run), 0 if unknown.
@@ -882,7 +899,7 @@ void IssPinCommandProcessor() {
         }
         if (!pick) {
             std::fprintf(stderr, "PORT_TUNING cp_cpu=auto mode=auto failed: no core besides core 0; not pinned\n");
-            return;
+            return sel;
         }
         if (l3_mask) scope = " scope=l3(lp0)";
         mine = pick->lps.front();
@@ -902,24 +919,56 @@ void IssPinCommandProcessor() {
         }
         if (!mine) {
             std::fprintf(stderr, "PORT_TUNING cp_cpu failed: logical processor %ld not found\n", wanted);
-            return;
+            return sel;
         }
     }
-    std::vector<ULONG> others;
-    std::string siblings;
+    sel.pinned = true;
+    sel.mode = mode;
+    sel.wanted = wanted;
+    sel.id = mine->id;
+    sel.logical = unsigned(mine->logical);
+    sel.core = unsigned(mine->core);
+    sel.efficiency = unsigned(mine->efficiency);
+    sel.hybrid = hybrid;
+    sel.scope = scope;
     for (const auto& set : sets) {
-        if (set.group != mine->group || set.core != mine->core) others.push_back(set.id);
-        else siblings += (siblings.empty() ? "" : "/") + std::to_string(set.logical);
+        if (set.group != mine->group || set.core != mine->core) {
+            sel.others.push_back(set.id);
+        } else {
+            sel.core_ids.push_back(set.id);
+            sel.siblings += (sel.siblings.empty() ? "" : "/") + std::to_string(set.logical);
+        }
     }
-    const BOOL process_ok = !others.empty() &&
-        SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(), static_cast<ULONG>(others.size()));
-    const ULONG id = mine->id;
+    return sel;
+}
+
+const CpSelection& CommandProcessorCpu() {
+    static const CpSelection selection = SelectCommandProcessorCpu(); // thread-safe, once
+    return selection;
+}
+} // namespace
+
+// The CPU sets of the command processor's core (ISS_CP_CPU), whichever thread asks first; false
+// (out empty) when it is not pinned. native_passes.cpp keeps its pool off them.
+bool IssCommandProcessorCpuSets(std::vector<ULONG>& out) {
+    const CpSelection& sel = CommandProcessorCpu();
+    out = sel.pinned ? sel.core_ids : std::vector<ULONG>{};
+    return !out.empty();
+}
+
+void IssPinCommandProcessor() {
+    iss_set_high_qos(true);
+    const CpSelection& sel = CommandProcessorCpu();
+    if (!sel.pinned) return;
+    const BOOL process_ok = !sel.others.empty() &&
+        SetProcessDefaultCpuSets(GetCurrentProcess(), sel.others.data(), static_cast<ULONG>(sel.others.size()));
+    const ULONG id = sel.id;
     const BOOL thread_ok = SetThreadSelectedCpuSets(GetCurrentThread(), &id, 1);
     std::fprintf(stderr,
                  "PORT_TUNING cp_cpu=%s mode=%s lp=%u core=%u lps=%s class=%u hybrid=%d%s "
                  "process_default=%d(%zu sets) thread=%d\n",
-                 mode == CpMode::Auto ? "auto" : std::to_string(wanted).c_str(), cp_mode_name(mode),
-                 unsigned(mine->logical), unsigned(mine->core), siblings.c_str(), unsigned(mine->efficiency),
-                 hybrid ? 1 : 0, scope, int(process_ok), others.size(), int(thread_ok));
+                 sel.mode == CpMode::Auto ? "auto" : std::to_string(sel.wanted).c_str(), cp_mode_name(sel.mode),
+                 sel.logical, sel.core, sel.siblings.c_str(), sel.efficiency,
+                 sel.hybrid ? 1 : 0, sel.scope, int(process_ok), sel.others.size(), int(thread_ok));
 }
 #endif
