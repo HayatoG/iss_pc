@@ -316,8 +316,11 @@ static void expected_by_model(State *s, uint8_t kind, int dst, int src, unsigned
 }
 
 static unsigned sites_run[4];   /* by mode */
+static unsigned bmi2_sites_run; /* EXTRQ sites run with the inline BMI2 stub */
 
-static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned index, uint8_t mode, int rounds) {
+/* bmi2: IsaTable.extrq_bmi2, the inline EXTRQ stub (the host must have BMI2). */
+static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned index, uint8_t mode, int rounds,
+                     int bmi2) {
     static const uint8_t lea_rax[] = {0x48, 0x8d, 0x40, 0x01};   /* lea rax, [rax+1]: plain, 4 bytes */
     uint8_t code[32];
     size_t n = encode(code, kind, dst, src, length, index);
@@ -352,6 +355,7 @@ static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned i
     t.hits = &hits;
     t.count = 1;
     t.image_size = PAGE;
+    t.extrq_bmi2 = bmi2;
     IsaReport r = isa_rewrite_apply(&t, image, stubs, CPU_SET_SSE4A);
     assert(r.rewritten == 1 && r.skipped == 0);
     trap_table = &t;
@@ -371,6 +375,11 @@ static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned i
 #endif
         if (!native) expected_by_model(&want, kind, dst, kind == ISA_EXTRQ_IMM ? -1 : src, length, index, relocated);
         run_state(image + SITE_AT, &got);
+#ifdef _WIN32
+        /* Windows' exception dispatch itself writes below rsp: an int3 site cannot keep the red zone
+         * there (the probe protects guest red zones by relocating code instead, red_zone.py). */
+        if (mode == ISA_MODE_INT3) memcpy(got.red_zone, want.red_zone, sizeof want.red_zone);
+#endif
         if (memcmp(&want, &got, sizeof want) != 0) {
             fprintf(stderr, "%s xmm%d, xmm%d (length %u, index %u) mode %u: state differs\n", isa_kind_name(kind), dst,
                     src, length, index, mode);
@@ -392,9 +401,10 @@ static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned i
     }
     assert(hits == (uint64_t)rounds);
     sites_run[mode]++;
+    if (bmi2 && mode != ISA_MODE_INT3 && (kind == ISA_EXTRQ || kind == ISA_EXTRQ_IMM)) bmi2_sites_run++;
 }
 
-static void test_sites(void) {
+static void test_sites(int bmi2) {
     install_trap_handler();
     static const uint8_t kinds[] = {ISA_EXTRQ, ISA_INSERTQ, ISA_EXTRQ_IMM, ISA_INSERTQ_IMM};
     for (int k = 0; k < 4; k++)
@@ -405,15 +415,21 @@ static void test_sites(void) {
                 uint8_t probe[16];
                 const size_t n = encode(probe, kinds[k], dst, src, length, index);
                 if (n == 4) {
-                    run_site(kinds[k], dst, src, length, index, ISA_MODE_INT3, 8);
-                    run_site(kinds[k], dst, src, length, index, ISA_MODE_JMP_RELOCATE, 8);
+                    run_site(kinds[k], dst, src, length, index, ISA_MODE_INT3, 8, bmi2);
+                    run_site(kinds[k], dst, src, length, index, ISA_MODE_JMP_RELOCATE, 8, bmi2);
                 } else {
-                    run_site(kinds[k], dst, src, length, index, ISA_MODE_JMP, 8);
+                    run_site(kinds[k], dst, src, length, index, ISA_MODE_JMP, 8, bmi2);
                 }
             }
     /* The site of the Windows crash (inFAMOUS 1.07, 0x8938f1): extrq xmm4, xmm7. */
-    run_site(ISA_EXTRQ, 4, 7, 0, 0, ISA_MODE_INT3, 2000);
-    run_site(ISA_EXTRQ, 4, 7, 0, 0, ISA_MODE_JMP_RELOCATE, 2000);
+    run_site(ISA_EXTRQ, 4, 7, 0, 0, ISA_MODE_INT3, 2000, bmi2);
+    run_site(ISA_EXTRQ, 4, 7, 0, 0, ISA_MODE_JMP_RELOCATE, 2000, bmi2);
+    if (bmi2) {
+        /* The inline stub on every immediate pair, bits 7:6 included (index + length > 64 too). */
+        for (unsigned length = 0; length < 256; length += 3)
+            for (unsigned index = 0; index < 256; index += 5)
+                run_site(ISA_EXTRQ_IMM, (int)(next() % 16), 0, length, index, ISA_MODE_JMP, 4, 1);
+    }
 }
 
 static void test_table_records(void) {
@@ -463,9 +479,13 @@ int main(void) {
     test_recorded_amd_results();
     test_against_cpu();
     test_table_records();
-    test_sites();
-    printf("isa-sse4a-test ok (%s: %llu operand sets against the CPU; sites: %u jmp, %u relocated, %u int3)\n",
+    test_sites(0);
+    const int bmi2 = __builtin_cpu_supports("bmi2");
+    if (bmi2) test_sites(1);   /* the probe's choice on such a host: EXTRQ inline */
+    printf("isa-sse4a-test ok (%s: %llu operand sets against the CPU; sites: %u jmp, %u relocated, %u int3; "
+           "%u with the inline BMI2 EXTRQ%s)\n",
            native ? "SSE4A host, CPU as oracle" : "no SSE4A, recorded AMD results and model", compared,
-           sites_run[ISA_MODE_JMP], sites_run[ISA_MODE_JMP_RELOCATE], sites_run[ISA_MODE_INT3]);
+           sites_run[ISA_MODE_JMP], sites_run[ISA_MODE_JMP_RELOCATE], sites_run[ISA_MODE_INT3], bmi2_sites_run,
+           bmi2 ? "" : ", host without BMI2");
     return 0;
 }

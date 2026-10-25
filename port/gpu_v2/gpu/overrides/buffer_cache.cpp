@@ -3712,29 +3712,32 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         u64 guest_copy_ns = 0;
         u64 staging_flush_ns = 0;
         u64 gpu_record_ns = 0;
-        const u64 parts_start_ns = Common::Perf::NowNs();
+        // The times only feed the Info line below: no clock reads when it is not logged.
+        const bool timed = Common::Log::ShouldLog(Common::Log::Class::Render_Vulkan, Common::Log::Level::Info);
+        const auto stamp = [timed] { return timed ? Common::Perf::NowNs() : u64{0}; };
+        const u64 parts_start_ns = stamp();
         ForEachUploadPart(copies, MaxUploadPartBytes, [&] {
             const size_t slot = part_index % UploadSlots;
             if (slot_ticks[slot] != 0) {
-                const u64 wait_start = Common::Perf::NowNs();
+                const u64 wait_start = stamp();
                 Sched().Wait(slot_ticks[slot]);
-                reuse_wait_ns += Common::Perf::NowNs() - wait_start;
+                reuse_wait_ns += stamp() - wait_start;
             }
-            const u64 request_start = Common::Perf::NowNs();
+            const u64 request_start = stamp();
             staging = Staging().Request(MaxUploadPartBytes, MemoryType::HostUncached);
-            staging_request_ns += Common::Perf::NowNs() - request_start;
+            staging_request_ns += stamp() - request_start;
         }, [&](VAddr address, u64 offset, u64 bytes) {
-            const u64 copy_start = Common::Perf::NowNs();
+            const u64 copy_start = stamp();
             ParallelGuestCopy(memory, address, staging.mapped + offset, bytes);
-            guest_copy_ns += Common::Perf::NowNs() - copy_start;
+            guest_copy_ns += stamp() - copy_start;
             part_copies.emplace_back(staging.offset + offset, address - arena->cpu_addr, bytes);
         }, [&](u64 bytes) {
-            const u64 flush_start = Common::Perf::NowNs();
+            const u64 flush_start = stamp();
             staging.Flush();
-            staging_flush_ns += Common::Perf::NowNs() - flush_start;
-            const u64 record_start = Common::Perf::NowNs();
+            staging_flush_ns += stamp() - flush_start;
+            const u64 record_start = stamp();
             Rt().CopyBuffer(staging.buffer, arena, part_copies);
-            gpu_record_ns += Common::Perf::NowNs() - record_start;
+            gpu_record_ns += stamp() - record_start;
             // Only these destination ranges are written by this part. Tracking the entire
             // guest binding once per part repeatedly scans gigabytes of untouched memory and
             // adds unnecessary cross-queue dependencies.
@@ -3752,7 +3755,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
                  "written={} texel={} elapsed_ms={:.3f} reuse_wait_ms={:.3f} "
                  "staging_ms={:.3f} guest_copy_ms={:.3f} flush_ms={:.3f} record_ms={:.3f}",
                  device_addr, size, total_size_bytes, copies.size(), part_index, is_written,
-                 is_texel_buffer, (Common::Perf::NowNs() - parts_start_ns) / 1'000'000.0,
+                 is_texel_buffer, (stamp() - parts_start_ns) / 1'000'000.0,
                  reuse_wait_ns / 1'000'000.0,
                  staging_request_ns / 1'000'000.0, guest_copy_ns / 1'000'000.0,
                  staging_flush_ns / 1'000'000.0, gpu_record_ns / 1'000'000.0);

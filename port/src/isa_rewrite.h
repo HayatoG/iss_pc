@@ -27,6 +27,9 @@ typedef struct {
     /* Set before isa_rewrite_apply: a JMP_RELOCATE stub runs its relocated instruction 128 bytes
      * below the guest rsp when that instruction can fault (IsaSite.mem_flags & ISA_MEM_RELOCATED_FAULTABLE). */
     int protect_red_zone;
+    /* Set before isa_rewrite_apply (host has BMI2): EXTRQ stubs extract the field inline with
+     * SHRX/SHLX, which leave rflags alone, instead of saving registers and rflags around a call. */
+    int extrq_bmi2;
 } IsaTable;
 enum { ISA_MEM_RELOCATED_FAULTABLE = 2 };
 typedef struct { uint32_t groups, protected_instructions, short_relays, skipped; } IsaRedZoneReport;

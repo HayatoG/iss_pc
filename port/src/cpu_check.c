@@ -60,6 +60,8 @@ unsigned cpu_missing_rewritable(CpuFeatureWords words, char *out, size_t size) {
     return mask;
 }
 
+int cpu_has_bmi2(CpuFeatureWords words) { return (words.leaf7_ebx >> 8) & 1; }
+
 /* The n bytes at text equal name (lower case), ignoring ASCII case. */
 static int name_is(const char *text, size_t n, const char *name) {
     if (n != strlen(name)) return 0;

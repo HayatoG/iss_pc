@@ -275,15 +275,60 @@ static size_t emit_return(unsigned char *code, unsigned char *p, const unsigned 
     return (size_t)(p - code);
 }
 
+/* EXTRQ (both forms) on a host with BMI2: the field is extracted inline, as isa_emulate_sse4a does
+ * (dst.lo >> index, keeping length bits, 0 meaning 64; dst.hi zeroed). SHRX/SHLX, mov, movzx, not
+ * and lea leave rflags alone, so only rax and rcx are saved and nothing is called. The hot EXTRQ
+ * of inFAMOUS Second Son run millions of times a minute; the full stub saved nine registers and
+ * rflags around a C call each time. */
+static size_t emit_extrq_bmi2_stub(unsigned char *code, const unsigned char *at, const IsaSite *s, uint64_t *hit,
+                                   unsigned char *image, int protect) {
+    static const uint8_t shrx_rax_mem_rsp[] = {0xc4, 0xe2, 0xf3, 0xf7, 0x04, 0x24}; /* shrx rax,[rsp],rcx */
+    static const uint8_t shlx_rax_rax[] = {0xc4, 0xe2, 0xf1, 0xf7, 0xc0};            /* shlx rax,rax,rcx */
+    static const uint8_t shrx_rax_rax[] = {0xc4, 0xe2, 0xf3, 0xf7, 0xc0};            /* shrx rax,rax,rcx */
+    unsigned char *p = code;
+    emit_bytes(&p, lea_rsp_below_red_zone, sizeof lea_rsp_below_red_zone);
+    emit_bytes(&p, (const uint8_t[]){0x50, 0x51}, 2);                      /* push rax; push rcx */
+    emit_bytes(&p, (const uint8_t[]){0x48, 0x8d, 0x64, 0x24, 0xe0}, 5);   /* lea rsp,[rsp-0x20] */
+    emit_movdqu_rsp(&p, 1, s->dst, 0);
+    if (s->kind == ISA_EXTRQ) emit_movdqu_rsp(&p, 1, s->src1, 16);
+    emit_bytes(&p, (const uint8_t[]){0x48, 0xb8}, 2);                      /* mov rax, &hits[i] */
+    emit_u64(&p, (uint64_t)(uintptr_t)hit);
+    emit_bytes(&p, (const uint8_t[]){0x48, 0x8b, 0x08, 0x48, 0x8d, 0x49, 0x01, 0x48, 0x89, 0x08}, 10); /* ++[rax], flags kept */
+    if (s->kind == ISA_EXTRQ) {
+        emit_bytes(&p, (const uint8_t[]){0x0f, 0xb6, 0x4c, 0x24, 0x11}, 5); /* movzx ecx,byte [rsp+17]: index */
+        emit_bytes(&p, shrx_rax_mem_rsp, sizeof shrx_rax_mem_rsp);          /* (counts are taken mod 64) */
+        emit_bytes(&p, (const uint8_t[]){0x0f, 0xb6, 0x4c, 0x24, 0x10}, 5); /* movzx ecx,byte [rsp+16]: length */
+        emit_bytes(&p, (const uint8_t[]){0xf7, 0xd1, 0x8d, 0x49, 0x01}, 5); /* not ecx; lea ecx,[rcx+1]: -length */
+    } else {
+        const unsigned length = (unsigned)s->disp & 63, index = (unsigned)(s->disp >> 8) & 63;
+        emit_u8(&p, 0xb9);                                                  /* mov ecx, index */
+        emit_u32(&p, index);
+        emit_bytes(&p, shrx_rax_mem_rsp, sizeof shrx_rax_mem_rsp);
+        emit_u8(&p, 0xb9);                                                  /* mov ecx, -length mod 64 */
+        emit_u32(&p, (64 - length) & 63);
+    }
+    emit_bytes(&p, shlx_rax_rax, sizeof shlx_rax_rax);                     /* keep the low length bits */
+    emit_bytes(&p, shrx_rax_rax, sizeof shrx_rax_rax);
+    emit_bytes(&p, (const uint8_t[]){0x48, 0x89, 0x04, 0x24}, 4);          /* mov [rsp], rax */
+    emit_bytes(&p, (const uint8_t[]){0x48, 0xc7, 0x44, 0x24, 0x08, 0, 0, 0, 0}, 9); /* mov qword [rsp+8], 0 */
+    emit_movdqu_rsp(&p, 0, s->dst, 0);
+    emit_bytes(&p, (const uint8_t[]){0x48, 0x8d, 0x64, 0x24, 0x20}, 5);   /* lea rsp,[rsp+0x20] */
+    emit_bytes(&p, (const uint8_t[]){0x59, 0x58}, 2);                      /* pop rcx; pop rax */
+    emit_bytes(&p, lea_rsp_above_red_zone, sizeof lea_rsp_above_red_zone);
+    return emit_return(code, p, at, s, image, protect);
+}
+
 /* SSE4A stub: the operands are XMM registers, which isa_emulate's IsaRegs does not carry. It steps
  * over the red zone, saves rflags (then clears DF for the C call) and the registers the SysV ABI
  * lets isa_emulate_sse4a clobber, copies the destination and source XMM to a 32-byte buffer, calls
  * it and loads the destination back. The movdqu are legacy SSE like EXTRQ itself: bits 255:128 of
  * the YMM register stay as they were, and no other XMM register is touched. */
 static size_t emit_sse4a_stub(unsigned char *code, const unsigned char *at, const IsaSite *s, uint64_t *hit,
-                              unsigned char *image, int protect) {
+                              unsigned char *image, int protect, int bmi2) {
     static const uint8_t pushes[] = {0x50, 0x51, 0x52, 0x56, 0x57, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0x55};
     static const uint8_t pops[] = {0x5d, 0x41, 0x5b, 0x41, 0x5a, 0x41, 0x59, 0x41, 0x58, 0x5f, 0x5e, 0x5a, 0x59, 0x58};
+    if (bmi2 && (s->kind == ISA_EXTRQ || s->kind == ISA_EXTRQ_IMM))
+        return emit_extrq_bmi2_stub(code, at, s, hit, image, protect);
     unsigned char *p = code;
     emit_bytes(&p, (const uint8_t[]){0x48, 0x8d, 0x64, 0x24, 0x80}, 5);   /* lea rsp,[rsp-0x80] */
     emit_u8(&p, 0x9c);                                                     /* pushfq */
@@ -369,11 +414,11 @@ static size_t emit_f16c_stub(unsigned char *code, const unsigned char *at, const
 /* Writes the stub for `s` into `code` (laid out to run at `at`). Returns its size, or 0 when the
  * jmp back is out of rel32 range. */
 static size_t emit_stub(unsigned char *code, const unsigned char *at, const IsaSite *s, uint64_t *hit,
-                        unsigned char *image, int protect) {
+                        unsigned char *image, int protect, int bmi2) {
     static const uint8_t lea_rsp_down[] = {0x48, 0x8d, 0xa4, 0x24, 0x00, 0xff, 0xff, 0xff};   /* lea rsp,[rsp-0x100] */
     static const uint8_t lea_rax_rsp_up[] = {0x48, 0x8d, 0x84, 0x24, 0x00, 0x01, 0x00, 0x00}; /* lea rax,[rsp+0x100] */
     static const uint8_t lea_rsp_up[] = {0x48, 0x8d, 0xa4, 0x24, 0x00, 0x01, 0x00, 0x00};     /* lea rsp,[rsp+0x100] */
-    if (isa_kind_is_sse4a(s->kind)) return emit_sse4a_stub(code, at, s, hit, image, protect);
+    if (isa_kind_is_sse4a(s->kind)) return emit_sse4a_stub(code, at, s, hit, image, protect, bmi2);
     if (isa_kind_is_f16c(s->kind)) return emit_f16c_stub(code, at, s, hit, image, protect);
     unsigned char *p = code;
     emit_bytes(&p, lea_rsp_down, sizeof lea_rsp_down);
@@ -448,7 +493,8 @@ IsaReport isa_rewrite_apply(IsaTable *t, unsigned char *image, unsigned char *st
         unsigned char code[2 * ISA_STUB_BYTES];
         int32_t rel;
         size_t size;
-        if (!rel32_to(site + JMP_BYTES, stub, &rel) || (size = emit_stub(code, stub, s, &t->hits[i], image, t->protect_red_zone)) == 0) {
+        if (!rel32_to(site + JMP_BYTES, stub, &rel) ||
+            (size = emit_stub(code, stub, s, &t->hits[i], image, t->protect_red_zone, t->extrq_bmi2)) == 0) {
             fprintf(stderr, "ISA: site 0x%llx out of rel32 range\n", (unsigned long long)s->offset);
             report.skipped++;
             continue;

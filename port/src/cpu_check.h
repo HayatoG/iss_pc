@@ -15,6 +15,8 @@ enum { CPU_SET_MOVBE = 1u << 0, CPU_SET_BMI1 = 1u << 1, CPU_SET_LZCNT = 1u << 2,
 int cpu_missing_fatal(CpuFeatureWords words, char *out, size_t size);
 /* Rewritable sets the host lacks (MOVBE, F16C, BMI1, LZCNT, SSE4A): CPU_SET_* mask; names in out. */
 unsigned cpu_missing_rewritable(CpuFeatureWords words, char *out, size_t size);
+/* BMI2 (leaf 7 EBX bit 8, Intel since Haswell): the ISA rewrite's inline EXTRQ (SHRX/SHLX). */
+int cpu_has_bmi2(CpuFeatureWords words);
 
 /* CPU_SET_* of a TLG_ISA_REWRITE value: "1" = every emulated set (MOVBE, BMI1, LZCNT, F16C, SSE4A),
  * otherwise a comma separated list of names ("sse4a", "f16c", "movbe,bmi1", case-insensitive); 0 for "0",

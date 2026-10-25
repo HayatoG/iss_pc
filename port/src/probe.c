@@ -1289,6 +1289,9 @@ int main(int argc, char **argv) {
 #endif
     if (isa_table) {
         isa_table->protect_red_zone = red_zone_on;
+        /* EXTRQ inline with BMI2 (TLG_ISA_FAST_EXTRQ=0: through isa_emulate_sse4a as before). */
+        const char *fast_extrq = getenv("TLG_ISA_FAST_EXTRQ");
+        isa_table->extrq_bmi2 = cpu_has_bmi2(cpu_feature_words()) && !(fast_extrq && !strcmp(fast_extrq, "0"));
         IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
         if (r.unsupported_needed) {
             printf("STOP: this CPU lacks %s and %u sites use encodings the rewrite cannot emulate\n", missing, r.unsupported_needed);
@@ -1297,8 +1300,9 @@ int main(int argc, char **argv) {
         }
         if (forced) printf("ISA: forced rewrite of %u sites (TLG_ISA_REWRITE=%s; %u jmp, %u relocated, %u int3), %u skipped\n",
                            r.rewritten, policy, r.jmp, r.relocated, r.int3, r.skipped);
-        else if (isa_sets) printf("ISA: CPU lacks %s: %u sites rewritten (%u jmp, %u relocated, %u int3), %u skipped\n",
-                                  missing, r.rewritten, r.jmp, r.relocated, r.int3, r.skipped);
+        else if (isa_sets) printf("ISA: CPU lacks %s: %u sites rewritten (%u jmp, %u relocated, %u int3), %u skipped%s\n",
+                                  missing, r.rewritten, r.jmp, r.relocated, r.int3, r.skipped,
+                                  (isa_sets & CPU_SET_SSE4A) && isa_table->extrq_bmi2 ? "; EXTRQ inline (BMI2)" : "");
         if (red_zone_on) {
             const uint32_t *st = isa_table->rz_stats;   /* scripts/red_zone.py STATS_FIELDS */
             IsaRedZoneReport z = isa_red_zone_apply(isa_table, image, stubs + stub_area);
