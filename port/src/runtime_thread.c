@@ -351,6 +351,15 @@ int runtime_wait_copy(const RuntimeWait *from,RuntimeWait *to) {
     memset(to,0,sizeof(*to));
     return 0;
 }
+/* OS thread ids of the live guest threads (and host threads attached to run guest code, as
+ * "main"): the bench window's CPU split (gpu_v2/gpu/bench_cpu.cpp) counts them as the game's. */
+size_t runtime_guest_thread_ids(uint64_t *out,size_t max) {
+    size_t n=0;
+    pthread_mutex_lock(&lock);
+    for (GuestThread *t=threads;t && n<max;t=t->next) if (t->os_tid && !t->finished) out[n++]=t->os_tid;
+    pthread_mutex_unlock(&lock);
+    return n;
+}
 size_t runtime_thread_snapshot(RuntimeThreadInfo *out,size_t max) {
     size_t n=0;
     pthread_mutex_lock(&lock);

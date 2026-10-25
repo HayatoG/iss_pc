@@ -18,6 +18,7 @@
 #endif
 #include <imgui.h>
 #include <SDL3/SDL.h>
+#include "bench_cpu.h"
 #include "iss_gpu.h"
 #include "tlggpu.h"
 #include "common/perf_stats.h"
@@ -296,6 +297,7 @@ struct Bench {
     Clock::time_point last;         // the previous kept flip
     u64 compiles_at_start{};
     double cpu_at_start_s{};        // process CPU time (all threads, user + kernel) at counting start
+    IssBenchCpu::Sample cpu_threads_at_start; // each thread's cycle time then (bench_cpu.h)
     std::vector<float> intervals_ms;
 };
 Bench g_bench;
@@ -334,6 +336,7 @@ void BenchFrame(Clock::time_point now) {
         g_bench.last = now;
         g_bench.compiles_at_start = BenchCompiles();
         g_bench.cpu_at_start_s = ProcessCpuSeconds();
+        g_bench.cpu_threads_at_start = IssBenchCpu::Take();
         return;
     }
     if (g_bench.intervals_ms.size() < BenchMaxFrames) {
@@ -391,6 +394,7 @@ void BenchEnd() {
     bool counting = false, truncated = false;
     u64 compiles_at_start = 0;
     double cpu_at_start_s = 0;
+    IssBenchCpu::Sample cpu_threads_at_start;
     {
         std::scoped_lock lock{g_bench.mutex};
         if (!g_bench.active.load(std::memory_order_relaxed)) {
@@ -402,12 +406,16 @@ void BenchEnd() {
         truncated = g_bench.truncated;
         compiles_at_start = g_bench.compiles_at_start;
         cpu_at_start_s = g_bench.cpu_at_start_s;
+        cpu_threads_at_start = std::move(g_bench.cpu_threads_at_start);
         BenchCsvMark(false);
     }
     const u64 compiles =
         counting ? BenchCompiles() - compiles_at_start : 0;
     // process CPU time over the counted window (the same span as the kept intervals)
     const double cpu_s = counting ? std::max(0.0, ProcessCpuSeconds() - cpu_at_start_s) : 0.0;
+    // the same span per thread category, from cycle times (Windows; bench_cpu.h)
+    const IssBenchCpu::Split split = counting ? IssBenchCpu::Diff(cpu_threads_at_start, IssBenchCpu::Take(), 12)
+                                              : IssBenchCpu::Split{};
     const size_t frames = intervals.size();
     double sum_ms = 0;
     u32 over33 = 0, over50 = 0;
@@ -429,11 +437,44 @@ void BenchEnd() {
     if (truncated) {
         std::printf("Bench: the window was cut at %zu frames\n", BenchMaxFrames);
     }
+    // cpu_<category>_ms_per_frame=... and cpu_cycles_ms_per_frame (their sum), when there is a split
+    std::string split_text, split_json;
+    if (split.valid && frames) {
+        char item[128];
+        for (int c = 0; c < IssBenchCpu::CategoryCount; ++c) {
+            const double ms = split.seconds[c] * 1e3 / frames;
+            std::snprintf(item, sizeof(item), " cpu_%s_ms_per_frame=%.2f", IssBenchCpu::CategoryNames[c], ms);
+            split_text += item;
+            std::snprintf(item, sizeof(item), "\"cpu_%s_ms_per_frame\": %.3f, ", IssBenchCpu::CategoryNames[c],
+                          ms);
+            split_json += item;
+        }
+        std::snprintf(item, sizeof(item), " cpu_cycles_ms_per_frame=%.2f", split.total_s * 1e3 / frames);
+        split_text += item;
+        std::snprintf(item, sizeof(item), "\"cpu_cycles_ms_per_frame\": %.3f, \"cpu_threads_exited\": %zu, ",
+                      split.total_s * 1e3 / frames, split.exited);
+        split_json += item;
+    }
     std::printf("Bench: frames=%zu seconds=%.2f avg_fps=%.1f low1_fps=%.1f p99_ms=%.1f "
                 "worst_ms=%.1f over33=%u over50=%u compiles=%llu cpu_ms_per_frame=%.2f cpu_s=%.2f "
-                "cpu_util=%.2f label=%s\n",
+                "cpu_util=%.2f%s label=%s\n",
                 frames, seconds, avg_fps, low1_fps, p99_ms, worst_ms, over33, over50,
-                static_cast<unsigned long long>(compiles), cpu_ms_per_frame, cpu_s, cpu_util, label);
+                static_cast<unsigned long long>(compiles), cpu_ms_per_frame, cpu_s, cpu_util,
+                split_text.c_str(), label);
+    // The busiest threads: cycle-time ms/frame (category, then the tick-sampled GetThreadTimes value
+    // that GetProcessTimes adds up for cpu_ms_per_frame).
+    if (split.valid && frames) {
+        std::string line = "Bench CPU threads:";
+        for (const IssBenchCpu::ThreadSplit& t : split.top) {
+            char item[192];
+            std::snprintf(item, sizeof(item), " %s=%.2f(%s,ticks %.2f)", t.name.c_str(),
+                          t.cycle_s * 1e3 / frames, IssBenchCpu::CategoryNames[t.category],
+                          t.tick_s * 1e3 / frames);
+            line += item;
+        }
+        std::printf("%s; %zu threads, %zu exited (%.2f ms/frame, in other)\n", line.c_str(), split.threads,
+                    split.exited, split.exited_s * 1e3 / frames);
+    }
     // ISS_BENCH_JSON=path: the same values as one JSON object (more decimals).
     if (const char* path = std::getenv("ISS_BENCH_JSON"); path && *path) {
         if (std::FILE* f = std::fopen(path, "w")) {
@@ -441,10 +482,10 @@ void BenchEnd() {
                          "{\"frames\": %zu, \"seconds\": %.3f, \"avg_fps\": %.3f, \"low1_fps\": %.3f, "
                          "\"p99_ms\": %.3f, \"worst_ms\": %.3f, \"over33\": %u, \"over50\": %u, "
                          "\"compiles\": %llu, \"cpu_ms_per_frame\": %.3f, \"cpu_s\": %.3f, "
-                         "\"cpu_util\": %.3f, \"label\": %s}\n",
+                         "\"cpu_util\": %.3f, %s\"label\": %s}\n",
                          frames, seconds, avg_fps, low1_fps, p99_ms, worst_ms, over33, over50,
                          static_cast<unsigned long long>(compiles), cpu_ms_per_frame, cpu_s, cpu_util,
-                         JsonString(label).c_str());
+                         split_json.c_str(), JsonString(label).c_str());
             std::fclose(f);
         } else {
             std::printf("Bench: cannot write %s (ISS_BENCH_JSON)\n", path);

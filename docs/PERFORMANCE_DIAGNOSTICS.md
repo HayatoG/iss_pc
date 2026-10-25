@@ -220,9 +220,21 @@ calling shell is restored afterwards, also after Ctrl+C.
 **compare.** For the newest session (or `-Session <name|folder>`) it runs
 `python -I scripts\round_analyze.py bench` on the runs and prints, per variant, the mean and
 sample standard deviation of `avg_fps`, `low1_fps`, `p99_ms`, `worst_ms`, `over33`, `over50`,
-`compiles` and `cpu_ms/f`, and the difference from the control in percent. `cpu_ms/f` (last
-column, lower is better) is the process's CPU time (user + kernel, all threads) per frame of the
-window: on a GPU-bound machine a CPU-side change does not move the FPS, but it shows here. `~` marks a difference within twice
+`compiles`, `cpu_ms/f` and `cpu_game_ms/f`, and the difference from the control in percent.
+On a GPU-bound machine a CPU-side change does not move the FPS, but it shows in the last two
+columns (lower is better). `cpu_ms/f` is the process's CPU time (user + kernel, all threads,
+`GetProcessTimes`) per frame of the window. Windows charges that time by sampling: at each
+15.625 ms clock tick the thread running on a core is charged a whole tick, so it comes in whole
+ticks, and work that a timer wakes (the vblank ticks, frame pacing) mostly runs between two ticks
+and is not charged. How much is missed depends on the phase of that work against the tick, which
+changes from run to run: identical runs gave 3.4 to 16.5 ms/frame at the same FPS. Use
+`cpu_game_ms/f` instead: guest + command processor + GPU helper threads (see `cpu_<category>`
+below), from each thread's cycle time (`QueryThreadCycleTime`, exact), without the background
+shader/pipeline compiles. In an A/A session (6 runs, same build) `cpu_ms/f` read 9.6 to 12.0
+(CV 8.8%) while the cycle time was about 120 ms/frame (about 7 cores busy: `cpu_ms/f` misses
+over 90% of it; the command processor alone: 11 ms/frame in cycles, 0.01-0.04 in ticks) and
+`cpu_game_ms/f` had a CV of 2.1%. The background compiles were 0.00-0.01 ms/frame there: they are
+not what made `cpu_ms/f` swing. `~` marks a difference within twice
 the control's standard deviation (`-NoiseK`): probably noise. With a single control run, or a
 standard deviation of 0 (identical control runs), there is no noise estimate and no `~`.
 `-Detail` adds the per-run `compare` table. The table is also written to `compare.csv` and
@@ -262,8 +274,10 @@ control's runs as tight) draws differently by itself (culling, LOD...): a note s
 `compare.json` (`drift`: threshold, median, state, each run's series, mean, deviation, flag;
 `run_files` lists every input, `kept_run_files` those in the table; `excluded_variants`) and
 `compare.csv` (its earlier columns, then `draws/frame`, `drift`, `unreliable`, `failed_runs`,
-`cpu_ms/f`; `-` for runs of a build without it) carry the same
-information, and `compare_runs.csv` has one line per run. Excluding
+`cpu_ms/f`, `cpu_game_ms/f`; `-` for runs of a build without them) carry the same
+information, and `compare_runs.csv` has one line per run (with its CPU values: `cpu_ms_per_frame`,
+`cpu_game_ms_per_frame` and each `cpu_<category>_ms_per_frame`; `compare.json` compares each
+category per variant too, rows with `split: true`, and lists them per run under `drift.runs[].cpu`). Excluding
 is a stopgap (fewer runs, more noise). Frequent drift means the route is too long or too
 dependent on timing: re-record a shorter, simpler one (stand still or walk straight, fewer camera
 swings and no combat or traversal that depends on physics) and run the session again.
@@ -323,7 +337,7 @@ Variables of the route and the summary (the game copies `ISS_X` to `TLG_X` at st
 | `ISS_PAD_REPLAY_AUTO=1` | Taps Cross every 2 s until gameplay is detected, then replays the route (wall-clock timed). |
 | `ISS_PAD_FILE=<txt>` | Manual alternative: held button names, stick values, or `replay`. |
 | `ISS_FRAME_STATS=1` | `Frame stats` / `Frame pacing` log lines every 5 s (the launcher's default). |
-| `ISS_BENCH_JSON=<path>` | When the replay ends, writes `frames, seconds, avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles, cpu_ms_per_frame, cpu_s, cpu_util, label`. The log always gets `Bench: frames=... label=...`. `cpu_s` is the process CPU time (user + kernel, all threads; `GetProcessTimes`, Linux `CLOCK_PROCESS_CPUTIME_ID`) over the counted window, `cpu_ms_per_frame` = `cpu_s` per frame, `cpu_util` = `cpu_s` / `seconds` (CPU cores busy on average). |
+| `ISS_BENCH_JSON=<path>` | When the replay ends, writes `frames, seconds, avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles, cpu_ms_per_frame, cpu_s, cpu_util, label`. The log always gets `Bench: frames=... label=...`. `cpu_s` is the process CPU time (user + kernel, all threads; `GetProcessTimes`, Linux `CLOCK_PROCESS_CPUTIME_ID`) over the counted window, `cpu_ms_per_frame` = `cpu_s` per frame, `cpu_util` = `cpu_s` / `seconds` (CPU cores busy on average; on Windows tick-sampled, see **compare**). Windows also adds the window's CPU time per thread category, from cycle times (`QueryThreadCycleTime`, TSC cycles, converted with the TSC rate measured over the window; threads listed with Toolhelp32 and named by `GetThreadDescription` at both ends of the window): `cpu_guest_ms_per_frame` (threads in the runtime's guest thread registry, `runtime_guest_thread_ids`: the game's own threads and `main`), `cpu_cp_ms_per_frame` (`GpuCommandProcessor`), `cpu_gpu_helpers_ms_per_frame` (`GpuCommandRecorder`, `NativePasses*`, `Scout`, `GpuUploadWorker`, `PresentThread`, `DrawStageB`, `AscCP`, `GpuSchedPriorityPendingOpsRunner`), `cpu_compile_ms_per_frame` (`Precompile*`, `AotCompute*`, `SpecTranslate*`, `PipelineCompiler*`, `PipelineCacheIO`, `ShaderWarmup`), `cpu_other_ms_per_frame` (everything else: the window and loading-screen threads, the Vulkan driver's threads, and the threads that exited during the window, whose time is only in the process total) and `cpu_cycles_ms_per_frame` (the process's cycle time, `QueryProcessCycleTime`: the categories add up to it), plus `cpu_threads_exited`. The log line `Bench CPU threads:` lists the 12 busiest threads (cycle ms/frame, category, and the tick-sampled `GetThreadTimes` value next to it). Linux: no categories (thread names are cut at 15 characters there, which merges the command processor and the recorder). |
 | `ISS_BENCH_LABEL=<text>` | `label` of the summary (`bench.ps1`: the variant name). |
 | `ISS_BENCH_SKIP_MS=<ms>` | Start of the replay window left out of the summary (default 1000; `bench.ps1 -SkipMs`). |
 | `ISS_BENCH_EXIT=1` | The game exits cleanly after the summary. |

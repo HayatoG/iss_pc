@@ -23,9 +23,14 @@ fica dentro do ruido. Aceita tambem o JSON do benchmark (ISS_BENCH_JSON).
 
 bench (automated benchmark, scripts/bench.ps1): one row per variant, mean +-
 sample stdev of avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles,
-cpu_ms/f (the process's CPU time, all threads, per frame of the window: lower is
-better; the last column: a game-side cost the FPS of a GPU-bound run hides) and
-the % diff vs the control variant (the first one, or --control). A RUN is
+cpu_ms/f (the process's CPU time, all threads, per frame of the window, from
+GetProcessTimes: sampled by the 15.6 ms clock tick, so it swings by 3x between
+identical runs), cpu_game_ms/f (guest + command processor + GPU helper threads,
+from their cycle times: the background shader compiles and the rest left out;
+lower is better; the last columns: a game-side cost the FPS of a GPU-bound run
+hides) and the % diff vs the control variant (the first one, or --control).
+compare.json also compares each category (cpu_guest/cp/gpu_helpers/compile/
+other/cycles_ms_per_frame) and compare_runs.csv lists them per run. A RUN is
 a bench JSON (ISS_BENCH_JSON), a summary.json of 'summarize', a game log (its
 last 'Bench:' line, else its Frame stats/pacing lines) or a SHADPS4_FRAME_CSV
 file (only its benchmark window when it has the 'bench' column). Runs are
@@ -278,8 +283,22 @@ BENCH_CMP = [("avg_fps", True), ("low1_fps", True), ("p99_ms", False), ("worst_m
              ("over33", False), ("over50", False), ("compiles", False)]
 # compared like BENCH_CMP, but shown after the drift columns (and at the end of compare.csv) so the
 # earlier columns keep their positions: metric -> (column, higher is better, decimals)
-BENCH_EXTRA = {"cpu_ms_per_frame": ("cpu_ms/f", False, 2)}
+BENCH_EXTRA = {"cpu_ms_per_frame": ("cpu_ms/f", False, 2), "cpu_game_ms_per_frame": ("cpu_game_ms/f", False, 2)}
+# The game's CPU time per thread category (gpu_v2/gpu/bench_cpu.cpp: cycle time, Windows), ms per
+# frame; cpu_game = guest + cp + gpu_helpers (the work every frame costs: the background compiles
+# and the rest left out). Compared like BENCH_EXTRA in compare.json and per run in compare_runs.csv.
+BENCH_CPU_SPLIT = ("cpu_guest_ms_per_frame", "cpu_cp_ms_per_frame", "cpu_gpu_helpers_ms_per_frame",
+                   "cpu_compile_ms_per_frame", "cpu_other_ms_per_frame", "cpu_cycles_ms_per_frame")
+BENCH_CPU_GAME = ("cpu_guest_ms_per_frame", "cpu_cp_ms_per_frame", "cpu_gpu_helpers_ms_per_frame")
 RE_BENCH = re.compile(r"Bench: (.*?)(?:\s+label=(.*?))?\s*$")
+
+
+def add_cpu_game(d):
+    """cpu_game_ms_per_frame = guest + cp + gpu_helpers, when the run has the split."""
+    parts = [d.get(k) for k in BENCH_CPU_GAME]
+    if d.get("cpu_game_ms_per_frame") is None and all(isinstance(v, (int, float)) for v in parts):
+        d["cpu_game_ms_per_frame"] = round(sum(parts), 3)
+    return d
 
 
 def is_bench(d):
@@ -535,6 +554,7 @@ def load_bench(path, skip_ms=1000.0):
         else:
             d["source"] = "log_bench"
     if d.get("label") == "-": d["label"] = ""   # the game's placeholder for no ISS_BENCH_LABEL
+    add_cpu_game(d)
     folder = os.path.basename(os.path.dirname(os.path.abspath(path)))
     d["name"] = d.get("label") or re.sub(r"^\d+-", "", folder) or folder
     d["path"] = path
@@ -592,7 +612,8 @@ def bench_table(runs, control=None, noise_k=2.0, all_runs=None):
                         unknown=sum(1 for x in (all_runs or runs) if x["name"] == g and x.get("draws_mean") is None),
                         total=sum(1 for x in (all_runs or runs) if x["name"] == g))
     out["draws"] = draws
-    for key, better in BENCH_CMP + [(k, v[1]) for k, v in BENCH_EXTRA.items()]:
+    for key, better in (BENCH_CMP + [(k, v[1]) for k, v in BENCH_EXTRA.items()]
+                        + [(k, False) for k in BENCH_CPU_SPLIT]):
         cells = {}
         for g in groups:
             m, sd, n = stats_of([x.get(key) for x in runs if x["name"] == g])
@@ -610,8 +631,9 @@ def bench_table(runs, control=None, noise_k=2.0, all_runs=None):
             v["noise"] = bool(d is not None and noise and abs(d) <= noise_k * noise)
             v["unreliable"] = g in unreliable
             v["better"] = None if (d is None or d == 0 or v["noise"] or v["unreliable"]) else ((d > 0) == better)
+        # split: only in compare.json (the table and compare.csv show cpu_game)
         out["rows"].append(dict(metric=key, higher_is_better=better, noise_pct=noise, groups=cells,
-                                extra=key in BENCH_EXTRA))
+                                extra=key in BENCH_EXTRA, split=key in BENCH_CPU_SPLIT))
     return out
 
 
@@ -695,7 +717,7 @@ def cmd_bench(a):
     t["excluded_variants"] = [dict(variant=g, runs=sum(1 for x in loaded if x["name"] == g), reason=why(g))
                               for g in gone]
     # new columns at the end: compare.csv keeps its earlier layout
-    main = [row for row in t["rows"] if not row["extra"]]
+    main = [row for row in t["rows"] if not row["extra"] and not row["split"]]
     extra = {row["metric"]: row for row in t["rows"] if row["extra"]}
     hdr = ["variant", "runs"] + [row["metric"] for row in main] + ["draws/frame", "drift"]
     rows = [[g + (" (control)" if g == t["control"] else ""), str(t["runs"][g])]
@@ -711,7 +733,9 @@ def cmd_bench(a):
     print(f"\nmean +-stdev per variant; % = diff vs '{t['control']}'; '~' = within {a.noise_k:g}x the "
           "control's stdev when above 0 (likely noise)."
           + (" One control run only: no noise estimate." if t["runs"][t["control"]] < 2 else "")
-          + (" cpu_ms/f: process CPU ms per frame (lower is better)." if extra else "")
+          + (" cpu_ms/f: process CPU ms per frame (GetProcessTimes: tick-sampled, noisy); cpu_game_ms/f: "
+             "guest + command processor + GPU helper threads, cycle time, no background compiles (lower is "
+             "better)." if extra else "")
           + f"\ndraws/frame: mean of each run's Frame stats lines in the window; drift = runs more than "
           f"{drift_pct:g}% off the median of all runs ('?N': N runs unknown)."
           + (" '!' = unreliable: a drift run in this variant or the control." if t["unreliable"] else ""))
@@ -778,12 +802,14 @@ def cmd_bench(a):
         with open(runs_csv, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["run", "variant", "draws_mean", "draws_dev_pct", "draws_off_pct", "draws_samples",
-                        "drift", "drift_state", "excluded", "failed"])
+                        "drift", "drift_state", "excluded", "failed", "cpu_ms_per_frame", "cpu_game_ms_per_frame"]
+                       + list(BENCH_CPU_SPLIT))
             for x in loaded:
                 w.writerow([run_tag(x), x["name"], r(x["draws_mean"], 1), r(x["draws_dev_pct"]),
                             r(x["draws_off_pct"], 1), len(x["draws"] or []),
                             "unknown" if x["drift"] is None else str(x["drift"]).lower(), x["drift_state"],
-                            str(bool(x["failed"] or (exclude and x["drift"]))).lower(), x["failed"] or ""])
+                            str(bool(x["failed"] or (exclude and x["drift"]))).lower(), x["failed"] or ""]
+                           + [r(x.get(k), 3) for k in ("cpu_ms_per_frame", "cpu_game_ms_per_frame") + BENCH_CPU_SPLIT])
         print(f"written: {a.csv}, {runs_csv}")
     if a.json:
         drift = dict(drift_pct=drift_pct, median_draws=r(med, 1), min_runs=DRIFT_MIN_RUNS, state=check["state"],
@@ -793,7 +819,9 @@ def cmd_bench(a):
                                 draws=x["draws"], draws_mean=r(x["draws_mean"], 1),
                                 draws_dev_pct=r(x["draws_dev_pct"]), draws_off_pct=r(x["draws_off_pct"], 1),
                                 drift=x["drift"], drift_state=x["drift_state"],
-                                excluded=bool(x["failed"] or (exclude and x["drift"])), failed=x["failed"])
+                                excluded=bool(x["failed"] or (exclude and x["drift"])), failed=x["failed"],
+                                cpu={k: x.get(k) for k in ("cpu_ms_per_frame", "cpu_game_ms_per_frame")
+                                     + BENCH_CPU_SPLIT if x.get(k) is not None})
                           for x in loaded])
         with open(a.json, "w") as f:
             json.dump(dict(t, run_files=[x["path"] for x in loaded], kept_run_files=[x["path"] for x in used],
