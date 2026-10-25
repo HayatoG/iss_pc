@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -15,15 +16,17 @@
 #include "common/perf_stats.h"
 #include "common/thread.h"
 #include "common/types.h"
+#include "ab_switch.h"
 
 namespace iss {
 class DrawPipe {
 public:
     using Handler=void(*)(void*,const u8*,u32);
-    enum Reason:u32 { Packet,Commands,Submission,Yield,Fault,Resource,Fence,Indirect,Shutdown,NumReasons };
+    using Between=void(*)(void*); // after each packet, on the worker
+    enum Reason:u32 { Packet,Commands,Submission,Yield,Fault,Resource,Fence,Indirect,Native,Shutdown,NumReasons };
     static constexpr u64 Capacity=16ull<<20;
     static constexpr u32 MaxPayload=static_cast<u32>(Capacity/4-64);
-    DrawPipe(Handler fn,void* data):handler(fn),context(data),ring(std::make_unique<u8[]>(Capacity)) {
+    DrawPipe(Handler fn,void* data,Between after=nullptr):handler(fn),between(after),context(data),ring(std::make_unique<u8[]>(Capacity)) {
         worker=std::jthread([this](std::stop_token stop){Run(stop);});
     }
     ~DrawPipe(){Drain(Shutdown);worker.request_stop();Wake();worker.join();}
@@ -44,17 +47,26 @@ public:
     void Drain(u32 reason=Resource){
         u64 done=consumed.load(std::memory_order_acquire);if(done==head)return;
         ++drains;const auto start=Common::Perf::NowNs();
+        draining.store(reason,std::memory_order_relaxed);
         for(u32 spins=0;done!=head;++spins){
             if(spins<4096) _mm_pause();
             else WaitProgress(done);
             done=consumed.load(std::memory_order_acquire);
         }
+        draining.store(~0u,std::memory_order_relaxed);
         const auto ns=Common::Perf::NowNs()-start;wait_ns+=ns;
         if(reason<NumReasons){++reason_count[reason];reason_ns[reason]+=ns;}
     }
     u64 packets{},drains{},wait_ns{};
     std::array<u64,NumReasons> reason_count{},reason_ns{};
     std::atomic<u64> busy_ns{},completed_packets{};
+    std::atomic<u32> draining{~0u}; // the reason A waits in Drain, ~0 when it does not
+    /// For a stall dump (iss::ab::SetStallNote): where the two stages are.
+    void Note() const {
+        std::fprintf(stderr,"STALL_DUMP draw_pipe published=%llu consumed=%llu packets=%llu completed=%llu a_draining=%d b_sleeping=%d producer_waiting=%d\n",
+            (unsigned long long)published.load(),(unsigned long long)consumed.load(),(unsigned long long)packets,
+            (unsigned long long)completed_packets.load(),int(draining.load()),int(sleeping.load()),int(producer_waiting.load()));
+    }
 private:
     struct Header{u32 size,bytes;};
     void Wake(){wake.fetch_add(1,std::memory_order_seq_cst);wake.notify_one();}
@@ -68,6 +80,7 @@ private:
     }
     void Run(std::stop_token stop){
         Common::SetCurrentThreadName("iss:DrawStageB");on_worker=true;u64 at=0;
+        iss::ab::NoteThread(iss::ab::DrawWorker);
         const auto spin_time=std::chrono::microseconds([] {
             if(const char* p=std::getenv("ISS_DRAW_PIPE_SPIN_US"))return std::clamp(std::atoi(p),0,1000);
             return std::thread::hardware_concurrency()>=12?200:50;
@@ -97,12 +110,15 @@ private:
                 busy_ns.fetch_add(Common::Perf::NowNs()-start,std::memory_order_relaxed);
                 at+=h->size;completed_packets.fetch_add(1,std::memory_order_relaxed);
             }
+            // Before the packet counts as consumed: A sees the queue busy (and leaves the work
+            // `between` takes, the guest's commands, to this thread) until it returns.
+            if(between)between(context);
             consumed.store(at,std::memory_order_seq_cst);
             if(producer_waiting.load(std::memory_order_seq_cst))consumed.notify_one();
         }
         on_worker=false;
     }
-    Handler handler;void* context;std::unique_ptr<u8[]> ring;
+    Handler handler;Between between;void* context;std::unique_ptr<u8[]> ring;
     u64 head{};u32 pending{};
     alignas(64) std::atomic<u64> published{0};
     alignas(64) std::atomic<u64> consumed{0};

@@ -31,6 +31,7 @@
 #include "video_core/buffer_cache/region_definitions.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "ab_switch.h"
 #include "compute_phase.h"
 #include "g4_record_ownership.h"
 #include "native_item_identity.h"
@@ -1001,6 +1002,8 @@ void Liverpool::ProcessCommands() {
         thread_context.qid != GfxQueueId) return;
     // Process incoming commands with high priority
     while (num_commands) {
+        // ISS_DRAW_PIPE_COMMANDS: the draw pipe worker takes them while it has packets queued.
+        if (rasterizer && rasterizer->DrawWorkerTakesCommands()) return;
         if(rasterizer)rasterizer->DrainDrawPipe(1);
         Common::UniqueFunction<void> callback{};
         {
@@ -1025,6 +1028,19 @@ void Liverpool::ProcessCommands() {
         thread_context = previous_context;
         ++processed_packets;
     }
+}
+
+bool Liverpool::RunOneCommand() {
+    Common::UniqueFunction<void> callback{};
+    {
+        std::scoped_lock lk{submit_mutex};
+        if (!num_commands) return false;
+        callback = std::move(command_queue.front());
+        command_queue.pop();
+        --num_commands;
+    }
+    callback();
+    return true;
 }
 
 bool Liverpool::BeginCpRecord(CpLane lane, u64 tick) {
@@ -1267,6 +1283,7 @@ bool Liverpool::GraphicsSubmitsPending() {
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     ::IssPinCommandProcessor();
+    iss::ab::NoteThread(iss::ab::CommandProcessor);
     thread_context = CpThreadContext{this, GfxQueueId, {}};
     gpu_id = std::this_thread::get_id();
 #ifdef __linux__
@@ -1841,7 +1858,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     }();
     const bool pass_cost = IssPassCostEnabled();
     u32 pass_cost_class = 12; // class of the packet processed since the last tick (12: setup)
+    // ISS_DRAW_PIPE_NATIVE_INORDER: the end of the range of the segment queued to the draw pipe
+    // worker; the packets before it are decoded as usual, as its fallback.
+    const u32* native_fallback_end = nullptr;
     while (!dcb.empty()) {
+        if (native_fallback_end && dcb.data() >= native_fallback_end) {
+            rasterizer->EndNativeSegment();
+            native_fallback_end = nullptr;
+        }
         if (pass_cost) {
             IssPassCostTick(pass_cost_class);
             pass_cost_class = 0;
@@ -2292,11 +2316,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             const bool fits = seg->end > reinterpret_cast<const u32*>(header) &&
                                               seg->end <= dcb.data() + dcb.size();
                             if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
+                                rasterizer->PipeNativeInOrder()) {
+                                // ISS_DRAW_PIPE_NATIVE_INORDER: queued, its range decoded below
+                                // as the fallback the worker draws if it rejects the segment.
+                                if (rasterizer->PostNativeSegment(*seg)) native_fallback_end = seg->end;
+                                else np::Finish(*seg, false, 0);
+                            } else if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
                                 rasterizer->NativePassExecute(
                                     *seg, [this](const u32* packet) { BeginScoutDraw(packet); },
                                     [this] { EndScoutDraw(); }, tick)) {
-                                for (const auto& [reg, value] : seg->final_regs)
+                                for (const auto& [reg, value] : seg->final_regs) {
                                     regs.reg_array[reg] = value;
+                                    rasterizer->MarkDrawPipeReg(reg);
+                                }
                                 ++context_reg_changes;
                                 if (seg->has_instances)
                                     regs.num_instances.num_instances = seg->final_instances;
@@ -2315,8 +2347,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                 np::Finish(*seg, true, tick);
                                 dcb = dcb.subspan(resume - dcb.data());
                                 continue;
+                            } else {
+                                np::Finish(*seg, false, 0);
                             }
-                            np::Finish(*seg, false, 0);
                         }
                     }
                 }
@@ -2526,11 +2559,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             const bool fits = seg->end > reinterpret_cast<const u32*>(header) &&
                                               seg->end <= dcb.data() + dcb.size();
                             if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
+                                rasterizer->PipeNativeInOrder()) {
+                                // ISS_DRAW_PIPE_NATIVE_INORDER: queued, its range decoded below
+                                // as the fallback the worker draws if it rejects the segment.
+                                if (rasterizer->PostNativeSegment(*seg)) native_fallback_end = seg->end;
+                                else np::Finish(*seg, false, 0);
+                            } else if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
                                 rasterizer->NativePassExecute(
                                     *seg, [this](const u32* packet) { BeginScoutDraw(packet); },
                                     [this] { EndScoutDraw(); }, tick)) {
-                                for (const auto& [reg, value] : seg->final_regs)
+                                for (const auto& [reg, value] : seg->final_regs) {
                                     regs.reg_array[reg] = value;
+                                    rasterizer->MarkDrawPipeReg(reg);
+                                }
                                 ++context_reg_changes;
                                 if (seg->has_instances)
                                     regs.num_instances.num_instances = seg->final_instances;
@@ -2549,8 +2590,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                 np::Finish(*seg, true, tick);
                                 dcb = dcb.subspan(resume - dcb.data());
                                 continue;
+                            } else {
+                                np::Finish(*seg, false, 0);
                             }
-                            np::Finish(*seg, false, 0);
                         }
                     }
                 }
@@ -2658,11 +2700,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             u64 tick = 0;
                             const bool fits = seg->end > first && seg->end <= dcb.data() + dcb.size();
                             if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
+                                rasterizer->PipeNativeInOrder()) {
+                                // ISS_DRAW_PIPE_NATIVE_INORDER: queued, its range decoded below
+                                // as the fallback the worker draws if it rejects the segment.
+                                if (rasterizer->PostNativeSegment(*seg)) native_fallback_end = seg->end;
+                                else np::Finish(*seg, false, 0);
+                            } else if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
                                 rasterizer->NativePassExecute(
                                     *seg, [this](const u32* packet) { BeginScoutDraw(packet); },
                                     [this] { EndScoutDraw(); }, tick)) {
-                                for (const auto& [reg, value] : seg->final_regs)
+                                for (const auto& [reg, value] : seg->final_regs) {
                                     regs.reg_array[reg] = value;
+                                    rasterizer->MarkDrawPipeReg(reg);
+                                }
                                 ++context_reg_changes;
                                 if (seg->has_instances)
                                     regs.num_instances.num_instances = seg->final_instances;
@@ -2681,8 +2731,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                 np::Finish(*seg, true, tick);
                                 dcb = dcb.subspan(resume - dcb.data());
                                 continue;
+                            } else {
+                                np::Finish(*seg, false, 0);
                             }
-                            np::Finish(*seg, false, 0);
                         }
                     }
                 }
@@ -2802,15 +2853,24 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             const bool fits = seg->end > reinterpret_cast<const u32*>(header) &&
                                               seg->end <= dcb.data() + dcb.size();
                             if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
+                                rasterizer->PipeNativeComputeInOrder()) {
+                                // ISS_DRAW_PIPE_NATIVE_INORDER: as a graphics segment.
+                                if (rasterizer->PostNativeComputeSegment(*seg, false))
+                                    native_fallback_end = seg->end;
+                                else
+                                    np::Finish(*seg, false, 0);
+                            } else if (fits && !CpSplitActive() && !iss::pause_guard::Blocked() &&
                                 rasterizer->NativeComputeExecute(*seg, tick)) {
                                 auto& cs = GetCsRegs();
                                 auto* cs_words = reinterpret_cast<u32*>(&cs);
                                 for (const auto& [reg, value] : seg->final_regs) {
                                     const u32 word = reg - np::CsBase;
-                                    if (reg >= np::CsBase && word < sizeof(ComputeProgram) / 4)
+                                    if (reg >= np::CsBase && word < sizeof(ComputeProgram) / 4) {
                                         cs_words[word] = value;
-                                    else
+                                    } else {
                                         regs.reg_array[reg] = value;
+                                        rasterizer->MarkDrawPipeReg(reg);
+                                    }
                                 }
                                 cs.dim_x = seg->last_dims[0];
                                 cs.dim_y = seg->last_dims[1];
@@ -2821,8 +2881,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                 np::Finish(*seg, true, tick);
                                 dcb = dcb.subspan(resume - dcb.data());
                                 continue;
+                            } else {
+                                np::Finish(*seg, false, 0);
                             }
-                            np::Finish(*seg, false, 0);
                         } else {
                             np::Finish(*seg, false, 0);
                         }
@@ -3417,6 +3478,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             break;
         }
     }
+    if (native_fallback_end) rasterizer->EndNativeSegment();
     if (pass_cost) {
         IssPassCostTick(pass_cost_class);
     }
@@ -3479,7 +3541,13 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
     // ISS_PASS_COST: the time before this queue's work (idle), then its packets (compute).
     const bool pass_cost = IssPassCostEnabled();
     u32 pass_cost_class = 11;
+    // ISS_DRAW_PIPE_NATIVE_INORDER: as in ProcessGraphics, for this ring's segments.
+    const u32* native_fallback_end = nullptr;
     while (!acb.empty()) {
+        if (native_fallback_end && acb.data() >= native_fallback_end) {
+            rasterizer->EndNativeSegment();
+            native_fallback_end = nullptr;
+        }
         if (pass_cost) {
             IssPassCostTick(pass_cost_class);
             pass_cost_class = 13;
@@ -3788,7 +3856,13 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
                             }
                             u64 tick = 0;
                             rasterizer->AscSetVqid(vqid);
-                            if (usable && rasterizer->NativeComputeExecute(*seg, tick, true)) {
+                            if (usable && rasterizer->PipeNativeComputeInOrder()) {
+                                // ISS_DRAW_PIPE_NATIVE_INORDER: as a graphics segment.
+                                if (rasterizer->PostNativeComputeSegment(*seg, true))
+                                    native_fallback_end = seg->end;
+                                else
+                                    np::Finish(*seg, false, 0);
+                            } else if (usable && rasterizer->NativeComputeExecute(*seg, tick, true)) {
                                 auto& cs = GetCsRegs();
                                 auto* cs_words = reinterpret_cast<u32*>(&cs);
                                 for (const auto& [reg, value] : seg->final_regs) {
@@ -3809,8 +3883,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
                                 iss::phase::g_boundary.store(true, std::memory_order_relaxed);
                                 acb = acb.subspan(resume - acb.data());
                                 continue;
+                            } else {
+                                np::Finish(*seg, false, 0);
                             }
-                            np::Finish(*seg, false, 0);
                         } else {
                             np::Finish(*seg, false, 0);
                         }
@@ -4111,6 +4186,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
             }
         }
     }
+    if (native_fallback_end) rasterizer->EndNativeSegment();
 
     if (rasterizer) {
         rasterizer->SetAsyncCompute(false);

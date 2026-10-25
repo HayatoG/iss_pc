@@ -124,6 +124,21 @@ public:
     [[nodiscard]] bool IsCurrentCpThread() const noexcept {
         return thread_context.owner == this;
     }
+    /// ISS_DRAW_PIPE: the worker runs a queued packet as the command processor (which does not
+    /// touch the caches until it drained the worker): the caches' command processor paths, and
+    /// readbacks inline rather than a command to the command processor waiting on the worker.
+    void EnterCpContext(s32 qid) noexcept {
+        thread_context = CpThreadContext{this, qid, {}};
+    }
+    void LeaveCpContext() noexcept {
+        thread_context = CpThreadContext{};
+    }
+    /// ISS_DRAW_PIPE_COMMANDS: the worker runs the guest threads' commands between its packets
+    /// (at its own position, the caches' one), so they do not wait for the whole queue.
+    [[nodiscard]] bool HasCommands() const noexcept {
+        return num_commands.load(std::memory_order_acquire) != 0;
+    }
+    bool RunOneCommand();
 
     using CpCoordination = iss::g4::CpCoordination<NumTotalQueues>;
     using CpLane = iss::g4::CpLane;

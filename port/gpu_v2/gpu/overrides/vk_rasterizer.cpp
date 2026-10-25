@@ -1359,7 +1359,8 @@ std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::Draw};
     ObserveNativeVisualDraw();
     if (g_draw_cycles.enabled) g_draw_cycles.Mark(13);
-    const bool pipelined=UseDrawPipe() && FilterDrawPasses();
+    // A native pass learn request takes the full path here (it keeps the template).
+    const bool pipelined=UseDrawPipe() && FilterDrawPasses() && native_pass_learn == 0;
     // ISS_NATIVE_PASSES learn request: the full path (DrawRecord), which keeps the template.
     const bool pass_learn = native_pass_learn != 0 && !pipelined;
     // Pause guard (pause_guard.h): in the pause every native/fast path below is off.
@@ -1426,9 +1427,11 @@ std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
         PrefetchDrawLookups(is_indexed, index_offset);
     }
     if (g_draw_cycles.enabled) g_draw_cycles.Mark(0);
+    const u64 lookup_start = pipelined ? __rdtsc() : 0;
     const GraphicsPipeline* pipeline =
         fast_lookup_set ? fast_lookup : LookupNativeGraphicsPipeline();
     fast_lookup_set = false;
+    if (pipelined) NoteDrawPipeCycles(0, __rdtsc() - lookup_start);
     if (g_draw_cycles.enabled) g_draw_cycles.Mark(1);
     if (!pipeline) {
         return 0;
@@ -1459,7 +1462,12 @@ std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
         return 0;
     }
 
-    if(pipelined && PostDrawPipe(pipeline,false,is_indexed,index_offset))return 0;
+    if(pipelined){
+        const u64 post_start=__rdtsc();
+        const bool posted=PostDrawPipe(pipeline,false,is_indexed,index_offset);
+        NoteDrawPipeCycles(1,__rdtsc()-post_start);
+        if(posted)return 0;
+    }
     if(pipelined){DrainDrawPipe(5);SubmitFeedbackBatch(scheduler);scheduler.PopPendingOperations();}
     if (!native_off && !iss::native_passes::Enabled() && !pipelined && is_indexed && index_offset == 0 && !following_commands.empty() && native_packet_budget) {
         if (const auto consumed = TryNativeCpuRun(pipeline, following_commands, native_packet_budget)) return consumed;
@@ -1653,7 +1661,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     };
     // ISS_DRAW_PIPE_DEFER: queued to the draw pipe worker behind the draws before it (the
     // arguments are read there, in order), instead of draining the pipe.
-    if (draw_pipe_state && draw_pipe_state->defer && UseDrawPipe() && FilterDrawPasses() &&
+    if (draw_pipe_state && draw_pipe_state->Defer() && UseDrawPipe() && FilterDrawPasses() &&
         g_dump.frames_left == 0 &&
         Common::Perf::GetTuning().trace_draw.load(std::memory_order_relaxed) == 0) {
         const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
@@ -2959,7 +2967,8 @@ void Rasterizer::DispatchDirect() {
     iss::diagnostics::Scope phase_scope(iss::diagnostics::Dispatch);
     RENDERER_TRACE;
 
-    const bool pipelined=UseDrawPipe();
+    // A native compute learn request takes the full path here (it keeps the template).
+    const bool pipelined=UseDrawPipe() && native_compute_learn == 0;
     if(!pipelined){DrainDrawPipe(5);scheduler.PopPendingOperations();}
 
     const auto& cs_program = DrawCsRegs();

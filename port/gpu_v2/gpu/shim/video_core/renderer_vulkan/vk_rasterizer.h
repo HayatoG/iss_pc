@@ -405,9 +405,21 @@ public:
     /// (native_passes.h); the command processor executes a segment at its first draw (false:
     /// interpret it) or learns the template of a draw an engine thread asked for.
     void NativePassesSetup();
+    /// ISS_DRAW_PIPE_NATIVE_INORDER: Regs runs the checks of the command processor's registers (on
+    /// it), Run the rest and the execution (on the draw pipe worker, in queue order).
+    enum class NativePart : u8 { All, Regs, Run };
     bool NativePassExecute(iss::native_passes::Segment& segment,
                            const std::function<void(const u32*)>& begin_draw,
-                           const std::function<void()>& end_draw, u64& tick);
+                           const std::function<void()>& end_draw, u64& tick,
+                           NativePart part = NativePart::All);
+    /// ISS_DRAW_PIPE_NATIVE_INORDER: the segment's register checks passed and it is queued to the
+    /// worker, which executes it or draws the packets that follow it (the command processor goes
+    /// on decoding the segment's range: those packets are its fallback). False: not queued.
+    bool PostNativeSegment(iss::native_passes::Segment& segment);
+    /// The command processor reached the end of the queued segment's range.
+    void EndNativeSegment();
+    bool PipeNativeInOrder() const;
+    bool PipeNativeComputeInOrder() const;
     u64 NativePassLearnKey(u64 engine_key);
     void NativePassLearn(u64 key, const GraphicsPipeline* pipeline, const RenderState& render);
     /// Set by the command processor for the draw of a learn request (its key), 0 otherwise.
@@ -419,7 +431,11 @@ public:
     /// first dispatch packet; a learn request's key for the dispatch (DispatchRecord learns its
     /// template, or the command processor counts the attempt failed).
     /// asc: a segment of an asynchronous compute queue (ISS_NATIVE_ASC; recorded at the DingDong).
-    bool NativeComputeExecute(iss::native_passes::Segment& segment, u64& tick, bool asc = false);
+    bool NativeComputeExecute(iss::native_passes::Segment& segment, u64& tick, bool asc = false,
+                              NativePart part = NativePart::All);
+    /// ISS_DRAW_PIPE_NATIVE_INORDER: as PostNativeSegment, for a compute segment (asc: of an
+    /// asynchronous compute queue).
+    bool PostNativeComputeSegment(iss::native_passes::Segment& segment, bool asc);
     void NativeComputeLearn(u64 key, const ComputePipeline* pipeline,
                             const std::vector<NativeImageCapture>& caps);
     void NativeComputeLearnFailed(u64 key);
@@ -444,6 +460,12 @@ public:
     /// True when the packet was queued to the draw pipe worker (the caller skips it).
     bool BeforeDrawPipePacket(u32 opcode,const u32* words,u32 count,int asc_pipe_id=-1);
     void DrainDrawPipe(u32 reason=5);
+    /// ISS_DRAW_PIPE_COMMANDS: the draw pipe worker has packets queued and runs the guest's
+    /// commands itself between them (the command processor leaves them).
+    bool DrawWorkerTakesCommands() const;
+    /// A register the command processor wrote outside a SET_* packet (a native segment's final
+    /// state): sent with the next draw pipe packet.
+    void MarkDrawPipeReg(u32 reg);
     bool PrepareDrawPipeFault(bool is_write);
     void DrainDrawPipeForIdle();
     void DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 size, u32 max_count,
@@ -638,6 +660,9 @@ public:
 private:
     void InitializeDrawPipe();
     bool UseDrawPipe() const;
+    bool PipeNativeSegments() const;
+    /// A's cost per pipelined draw, for the AB_PIPE line: 0 pipeline lookup, 1 packet.
+    void NoteDrawPipeCycles(u32 what, u64 cycles);
     bool FilterDrawPasses() const;
     bool PostDrawPipe(const Pipeline* pipeline,bool compute,bool indexed,u32 index_offset,
                       const std::array<u64,5>* indirect=nullptr);
@@ -645,6 +670,8 @@ private:
                             u32 offset,u32 stride,u32 max_count,VAddr count_address);
     bool PostDrawPipeGdsFill(VAddr address,u32 size,u32 value);
     static void RunDrawPipePacket(void* context,const u8* data,u32 size);
+    static void DrawPipeBetween(void* context);
+    bool PostSegmentPacket(iss::native_passes::Segment& segment, bool compute, bool asc);
     void DrawRecord(const GraphicsPipeline* pipeline,bool indexed,u32 index_offset);
     void DispatchRecord(const ComputePipeline* pipeline);
     AmdGpu::Regs& DrawRegs() const;

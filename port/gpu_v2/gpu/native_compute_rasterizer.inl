@@ -571,27 +571,39 @@ static void Report() {
 }
 } // namespace NativeCompute
 
-bool Rasterizer::NativeComputeExecute(iss::native_passes::Segment& s, u64& tick, bool asc) {
+bool Rasterizer::NativeComputeExecute(iss::native_passes::Segment& s, u64& tick, bool asc,
+                                      NativePart part) {
     // ISS_CP_PATH_CYCLES: reported as rec_submit (the native recorder's phase, unused here).
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::RecSubmit};
     using namespace NativeCompute;
     auto& c = stats;
-    if ((++c.report & 1023) == 1) Report();
-    c.asc_calls += asc;
+    if (part != NativePart::Run) {
+        if ((++c.report & 1023) == 1) Report();
+        c.asc_calls += asc;
+    }
     const auto reject = [&](Reject why) {
         ++c.reject[why];
         return false;
     };
     // An asynchronous compute queue's segment runs where its full path dispatches do: in the
     // graphics scheduler's command buffer (asc_queue routing off, no compute record context).
-    if (cp_split_enabled || draw_pipe_state || OnDrawWorker() || (DrawQueue() != 0 && !asc) ||
-        (asc && OnComputeRecordQueue()) || ComputeBindingsActive() || iss::command_trace::enabled || IsDumping() ||
+    // ISS_DRAW_PIPE: as NativePassExecute.
+    if (part == NativePart::All && draw_pipe_state) {
+        if (UseDrawPipe() && !PipeNativeSegments()) return reject(RejectEnv);
+        DrainDrawPipe(iss::DrawPipe::Native);
+    }
+    if (cp_split_enabled || (OnDrawWorker() && part != NativePart::Run) ||
+        (DrawQueue() != 0 && !asc) || iss::command_trace::enabled || IsDumping() ||
         host_markers_enabled || guest_markers_enabled || GpuCrashDiag::Enabled() ||
-        EmulatorSettings.IsPatchShaders() || buffer_cache.HasComputeQueue() ||
-        iss::hazard_probe::Enabled())
+        EmulatorSettings.IsPatchShaders() || iss::hazard_probe::Enabled())
+        return reject(RejectEnv);
+    // The worker's state (it may be recording on the command processor's Regs part).
+    if (part != NativePart::Regs && ((asc && OnComputeRecordQueue()) || ComputeBindingsActive() ||
+                                     buffer_cache.HasComputeQueue()))
         return reject(RejectEnv);
     auto* r = static_cast<Rec*>(s.compute_recording);
     if (!r || r->templates.empty() || r->generation != s.generation) return reject(RejectEnv);
+    if (part != NativePart::Run) {
     // The registers the pool thread recorded the first dispatch with are these (exact in submit
     // mode: a check against a scan gone wrong).
     const auto& cs = DrawCsRegs();
@@ -644,6 +656,8 @@ bool Rasterizer::NativeComputeExecute(iss::native_passes::Segment& s, u64& tick,
             return reject(RejectFlat);
         }
     }
+    } // part != Run
+    if (part == NativePart::Regs) return true;
     iss::cp_path::Switch(iss::cp_path::CsTextures);
     for (const auto& t : r->templates) {
         if (!t->pipeline->IsReady()) return reject(RejectPipeline);

@@ -1541,24 +1541,33 @@ void Rasterizer::NativePassesSetup() {
 
 bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
                                    const std::function<void(const u32*)>& begin_draw,
-                                   const std::function<void()>& end_draw, u64& tick) {
+                                   const std::function<void()>& end_draw, u64& tick,
+                                   NativePart part) {
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::RecorderExecute};
     using namespace NativePasses;
     auto& c = cp_stats;
-    if ((++c.report & 1023) == 1) Report();
+    if (part != NativePart::Run && (++c.report & 1023) == 1) Report();
     const bool indirect_first = ((s.first_draw[0] >> 8) & 0xFF) == 0x25;
     const auto reject = [&](Reject why) {
         ++c.reject[why];
         if (indirect_first) ++c.indirect_reject[why];
         return false;
     };
-    if (cp_split_enabled || draw_pipe_state || OnDrawWorker() || DrawQueue() != 0 ||
+    // ISS_DRAW_PIPE: the checks below read the caches its worker owns while draws are queued, so
+    // a segment runs after them (ISS_DRAW_PIPE_NATIVE), or not while the pipe takes draws.
+    if (part == NativePart::All && draw_pipe_state) {
+        if (UseDrawPipe() && !PipeNativeSegments()) return reject(RejectEnv);
+        DrainDrawPipe(iss::DrawPipe::Native);
+    }
+    if (cp_split_enabled || (OnDrawWorker() && part != NativePart::Run) || DrawQueue() != 0 ||
         iss::command_trace::enabled || IsDumping() || host_markers_enabled ||
         guest_markers_enabled || GpuCrashDiag::Enabled() || EmulatorSettings.IsPatchShaders() ||
-        occlusion.HasOpen() || buffer_cache.HasComputeQueue() ||
         !instance.IsVertexInputDynamicState() || iss::hazard_probe::Enabled())
         return reject(RejectEnv);
-    if (auto& m = Misses(); m.pending.load(std::memory_order_acquire)) {
+    // The worker's state (it may be recording on the command processor's Regs part).
+    if (part != NativePart::Regs && (occlusion.HasOpen() || buffer_cache.HasComputeQueue()))
+        return reject(RejectEnv);
+    if (auto& m = Misses(); part != NativePart::Regs && m.pending.load(std::memory_order_acquire)) {
         std::vector<std::pair<VAddr, u32>> ranges;
         {
             std::scoped_lock lock{m.mutex};
@@ -1578,6 +1587,7 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
     if (!r || r->templates.empty()) return reject(RejectPipeline);
     iss::cp_path::Switch(iss::cp_path::RecChain);
     auto& regs = DrawRegs();
+    if (part != NativePart::Run) {
     // The first draw's registers the lane wrote are these, and every key the segment used was
     // learned with the words it inherits here.
     if (r->keys.empty()) return reject(RejectContext);
@@ -1666,6 +1676,8 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
     if (regs.index_buffer_type.raw != s.first_index_type ||
         regs.num_instances.num_instances != s.first_instances)
         return reject(RejectInherited);
+    } // part != Run
+    if (part == NativePart::Regs) return FlatCheck() == 0; // the flat check refreshes on the worker's side
     for (const auto& t : r->templates) {
         if (!t->pipeline->IsReady()) return reject(RejectPipeline);
         if (t->has_samplers && texture_cache.SamplersGeneration() != t->samplers_generation)
