@@ -1,6 +1,7 @@
 #include <atomic>
 #include "deep_profile.h"
 #include "repeat_census.h"
+#include "ab_switch.h"
 #include "compute_phase.h"
 #include "runtime_timeline.h"
 #include "unified_memory.h"
@@ -115,11 +116,13 @@ void ParallelGuestCopy(Core::MemoryManager* memory, VAddr source, u8* dest, u64 
 }
 
 bool SmallReadMemoEnabled() {
-    static const bool enabled = [] {
+    // ISS_SMALL_READ_MEMO=ab0: on only in A/B mode 0 (ab_switch.h; the stamp proves each entry,
+    // so it may switch at any time).
+    static const int enabled = [] {
         const char* flag = std::getenv("ISS_SMALL_READ_MEMO");
-        return flag && flag[0] == '1';
+        return !flag ? 0 : flag[0] == '1' ? 1 : !std::strcmp(flag, "ab0") ? 2 : 0;
     }();
-    return enabled;
+    return enabled == 2 ? iss::ab::Off() : enabled != 0;
 }
 // Cache only alias metadata, never content or GPU completion. Native remaps and
 // GPU mapping changes invalidate every cached answer through their generations.

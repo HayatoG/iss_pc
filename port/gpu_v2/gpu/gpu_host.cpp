@@ -11,6 +11,7 @@
 #include <vector>
 #include <imgui.h>
 #include <SDL3/SDL.h>
+#include "ab_switch.h"
 #include "iss_gpu.h"
 #include "tlggpu.h"
 #include "common/types.h"
@@ -28,6 +29,7 @@ uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
 void runtime_memory_visit(void (*visit)(uint64_t address, uint64_t size, uint8_t* backing));
 uint64_t runtime_memory_epoch(void);
+int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
 uint64_t runtime_memory_lock_shared(void);
 void runtime_memory_unlock_shared(void);
 typedef void (*RuntimeGpuRange)(uintptr_t address, uint64_t size);
@@ -47,8 +49,42 @@ namespace {
 std::string g_title, g_serial, g_user_dir;
 std::atomic<uint64_t> g_flips{0};
 
+// ISS_VIEW_CACHE (default 1, =0 off, =ab the A/B switch): the backing view of the last direct
+// mappings this thread read, valid while the runtime's table generation is unchanged (as its own
+// region cache), instead of the table's lock for every guest read (CopySparseMemory: ~8% of the
+// command processor and of the draw pipe worker, mostly winpthreads mutex calls). City, pipe off:
+// +1.3 FPS over 4 pairs of 30 s phases (i3-12100/RTX 2060 SUPER, dp6 2026-10-25).
+bool ViewCacheOn() {
+    static const int mode = [] {
+        const char* p = std::getenv("ISS_VIEW_CACHE");
+        return !p ? 1 : p[0] == 'a' ? 2 : p[0] != '0' ? 1 : 0;
+    }();
+    return mode == 2 ? !iss::ab::Off() : mode != 0;
+}
 uint8_t* Backing(uint64_t address, uint64_t size) {
-    return static_cast<uint8_t*>(runtime_memory_backing_view(address, size));
+    struct View {
+        uint64_t generation;
+        uintptr_t start, end;
+        uint8_t* base; // the view of start
+    };
+    static thread_local View views[4];
+    static thread_local unsigned next;
+    const bool cache = ViewCacheOn();
+    const uint64_t generation = cache ? runtime_memory_epoch() : 1;
+    if (!(generation & 1) && size) {
+        for (const auto& v : views)
+            if (v.generation == generation && v.start <= address && size <= v.end - address &&
+                address < v.end)
+                return v.base + (address - v.start);
+    }
+    auto* view = static_cast<uint8_t*>(runtime_memory_backing_view(address, size));
+    uintptr_t start, end;
+    int mapped;
+    // One mapping (the region around address) holds the whole range: its view is linear.
+    if (view && !(generation & 1) && runtime_memory_region(address, &start, &end, &mapped) &&
+        mapped && start <= address && size <= end - address && runtime_memory_epoch() == generation)
+        views[next++ % 4] = View{generation, start, end, view - (address - start)};
+    return view;
 }
 uint64_t Clamp(uint64_t address, uint64_t size) {
     return runtime_memory_clamp(address, size);
@@ -138,6 +174,13 @@ extern "C" int tlggpu_cpu_write(void*, const void*, int, uint64_t) {
 
 extern "C" void tlggpu_frame_counters(TlgGpuFrameCounters* out) {
     *out = {};
+    // ISS_FRAME_COUNTERS=1: presented frames as shown ones, for the scripted routes' gameplay
+    // check (runtime_pad.c). Off by default: the runtime's freeze report also reads them.
+    static const bool counters = [] {
+        const char* p = std::getenv("ISS_FRAME_COUNTERS");
+        return p && p[0] == '1';
+    }();
+    if (counters) out->shown = out->presented = out->submitted = iss::ab::Frames();
 }
 namespace Vulkan { extern std::atomic<u64> g_iss_total_draws; }
 extern "C" uint64_t tlggpu_total_draws(void) {

@@ -18,6 +18,7 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
+#include "ab_switch.h"
 #include "compute_phase.h"
 
 #include <vulkan/vulkan_format_traits.hpp>
@@ -38,13 +39,17 @@ bool BarrierPool() {
 } // namespace
 
 bool Runtime::LazyReadList::Lazy() {
-    static const bool enabled = [] {
+    // Default on (=0 off): with the backing view cache, +0.3 FPS in the city over 5 pairs of 30 s
+    // phases, the same sign in every pair (i3-12100/RTX 2060 SUPER, dp6 2026-10-25).
+    // ISS_LAZY_READ_RANGES=ab: on in the A/B phases of the feature under test (ab_switch.h), ab2:
+    // in mode 2 only. Safe to flip at any time: every query merges what is pending first.
+    static const int enabled = [] {
         const char* value = std::getenv("ISS_LAZY_READ_RANGES");
-        const bool on = value && value[0] == '1';
-        std::fprintf(stderr, "PORT_TUNING lazy_read_ranges=%d\n", on ? 1 : 0);
+        const int on = !value ? 1 : value[0] == '1' ? 1 : !std::strcmp(value, "ab2") ? 3 : value[0] == 'a' ? 2 : 0;
+        std::fprintf(stderr, "PORT_TUNING lazy_read_ranges=%d\n", on);
         return on;
     }();
-    return enabled;
+    return enabled == 3 ? iss::ab::Mode() >= 2 : enabled == 2 ? !iss::ab::Off() : enabled != 0;
 }
 
 void Runtime::LazyReadList::Merge() {
