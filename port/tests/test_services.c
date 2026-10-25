@@ -9,6 +9,8 @@ int tlggpu_text_input_poll(char *text, uint64_t size) { (void)text; (void)size; 
 int64_t runtime_file_open(const char *path, int flags, int mode) { (void)path; (void)flags; (void)mode; return -1; }
 int64_t runtime_file_read(int fd, void *buffer, uint64_t size) { (void)fd; (void)buffer; (void)size; return -1; }
 int64_t runtime_file_close(int fd) { (void)fd; return 0; }
+// Native resolution is off in these tests: the full 16:9 frame is safe (runtime_native_resolution.c).
+float runtime_native_safe_area(void) { return 1.0f; }
 static int choice_next=-1, message_next=-1, message_code=0, progress_shown=0, toasts=0;
 int tlggpu_save_list_begin(int kind, const TlgSaveEntry *entries, int count, int focus) { (void)kind; (void)entries; (void)focus; return count>0; }
 int tlggpu_save_list_poll(void) { return choice_next; }

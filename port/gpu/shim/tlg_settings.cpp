@@ -127,6 +127,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.mouse_enabled = i != 0;
     } else if (key == "mouse_invert_y") {
         v.mouse_invert_y = i != 0;
+    } else if (key == "rumble") {
+        v.rumble = i != 0;
     } else if (key == "mouse_sensitivity") {
         v.mouse_sensitivity = Clamp(value.empty() ? 1.0f : f, 0.05f, 10.0f);
     } else if (key == "mouse_sensitivity_y") {
@@ -157,6 +159,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.rcas_strength = TlgGraphics::ParseRcasStrength(value.empty() ? -1 : i);
     } else if (key == "frames_queued") {
         v.frames_queued = TlgGraphics::ParseFramesQueued(value.empty() ? -1 : i);
+    } else if (key == "iss_native_output") {
+        v.iss_native_output = std::clamp(i,0,5);
+    } else if (key == "iss_native_percent") {
+        v.iss_native_percent = std::clamp(i,25,200);
+    } else if (key == "iss_native_hud_edges") {
+        v.iss_native_hud_edges = i != 0;
+    } else if (key == "iss_native_ui_16_9") {
+        v.iss_native_ui_16_9 = std::clamp(i,0,2);
     } else if (key == "render_resolution") {
         v.render_resolution = TlgGraphics::ParseResolution(value);
     } else if (key == "engine_fps") {
@@ -251,6 +261,7 @@ void Load() {
         {"TLG_MOUSE_SENS_Y", "mouse_sensitivity_y"},
         {"TLG_MOUSE_INVERT_Y", "mouse_invert_y"}, {"TLG_MOUSE_SMOOTHING", "mouse_smoothing"},
         {"TLG_MOUSE_ACCEL", "mouse_accel"},       {"TLG_MOUSE_DEADZONE", "mouse_deadzone"},
+        {"TLG_RUMBLE", "rumble"},
         {"TLG_LOD_SCALE", "lod_scale"},           {"TLG_LOD_BANDS", "lod_bands"},
         {"TLG_REGION_LOD", "region_lod"},         {"TLG_REGION_FADE", "region_fade"},
         {"TLG_NEAR_CLIP", "near_clip"},           {"TLG_FAR_CLIP", "far_clip"},
@@ -349,6 +360,9 @@ void Save() {
                  v.debug_view.load(), int(v.show_fps.load()),
                  int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));
     std::fprintf(file, "output_res=%dx%d\n", OutputWidths[v.output_res], OutputHeights[v.output_res]);
+    std::fprintf(file, "iss_native_output=%d\niss_native_percent=%d\niss_native_hud_edges=%d\n",
+                 v.iss_native_output.load(),v.iss_native_percent.load(),int(v.iss_native_hud_edges.load()));
+    std::fprintf(file, "iss_native_ui_16_9=%d\n",int(v.iss_native_ui_16_9.load()));
     std::fprintf(file, "red_orb_multiplier=%.3f\n", v.red_orb_multiplier.load());
     std::fprintf(file, "damage_dealt=%.3f\n", v.damage_dealt.load());
     std::fprintf(file, "damage_taken=%.3f\n", v.damage_taken.load());
@@ -374,7 +388,7 @@ void Save() {
                  "fsr1=%d\nrcas=%d\nrcas_strength=%d\nframes_queued=%d\n"
                  "render_resolution=%s\nengine_fps=%d\ndeferred_readback=%d\nstale_readback=%d\n"
                  "restart_unconfirmed=%d\n",
-                 TlgGraphics::DisplayModeKeys[std::clamp(v.display_mode.load(), 0, 2)].data(),
+                 TlgGraphics::DisplayModeKeys[std::clamp(v.display_mode.load(), 0, int(TlgGraphics::DisplayModeCount)-1)].data(),
                  int(v.vsync.load()), v.fps_limit.load(), int(v.async_shaders.load()),
                  int(v.fsr1.load()), int(v.rcas.load()), v.rcas_strength.load(), v.frames_queued.load(),
                  TlgGraphics::Resolutions[std::clamp(v.render_resolution.load(), 0, 5)].data(),
@@ -398,9 +412,10 @@ void Save() {
     }
     std::fprintf(file,
                  "mouse_enabled=%d\nmouse_sensitivity=%.2f\nmouse_sensitivity_y=%.2f\nmouse_invert_y=%d\nmouse_smoothing=%.2f\n"
-                 "mouse_accel=%.2f\nmouse_deadzone=%.2f\nkey_map=%s\n",
+                 "mouse_accel=%.2f\nmouse_deadzone=%.2f\nrumble=%d\nkey_map=%s\n",
                  int(v.mouse_enabled.load()), v.mouse_sensitivity.load(), v.mouse_sensitivity_y.load(), int(v.mouse_invert_y.load()),
-                 v.mouse_smoothing.load(), v.mouse_accel.load(), v.mouse_deadzone.load(), v.key_map.c_str());
+                 v.mouse_smoothing.load(), v.mouse_accel.load(), v.mouse_deadzone.load(),
+                 int(v.rumble.load()), v.key_map.c_str());
     // Read by run.sh at start.
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");

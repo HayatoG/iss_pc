@@ -430,6 +430,24 @@ nothing else running, and the laptop on mains power. A difference smaller than t
 rounds needs more rounds, not a conclusion. For a cold-cache variant, point
 `ISS_PIPELINE_CACHE_ROOT` at an empty folder in that variant only (not with `-SharePlayerCache`).
 
+## Runtime defaults 2026-10-25 (renderer v2)
+
+`port/gpu_v2/defaults.env` (applied by the launcher, so also by `bench.ps1`, and by `play_v2.sh`;
+a variable already set in the environment wins) now has `ISS_LOG_BUFFER=1`,
+`ISS_NATIVE_STATS_INTERVAL_MS=5000`, `ISS_MINIMAL_LOGS=1`, `ISS_UPLOAD_IDLE=sleep` and
+`ISS_PENDING_OPS_PRIO=1`: together +5.3% FPS (95% CI +2.5..+8.1%) and +11% 1% low against the old
+values on the bench route (paired rounds). `ISS_GPU_BLACKBOX=0` is the default too: another +3.0%
+(95% CI +1.6..+4.4%). Each one's old behavior is its old value (`0`, `0`, `0`, `poll`, `0`; black
+box `1`).
+
+**To report a GPU hang, run with `ISS_GPU_BLACKBOX=1`**: the run folder then gets
+`gpu-stall-N.txt` (the GPU stopped advancing for 1 s) and `gpu-crash.txt`/`.json` (device lost);
+attach them to the report. With the default (off) no such report is written.
+
+Follow-up: the command processor still waits for a video-out label in 1 ms timed steps
+(`WaitVoLabelFor`, `port/gpu_v2/gpu/overrides/liverpool.cpp:~3384`), a remaining 1 ms spin like
+the old upload worker idle wait.
+
 ## Tests and rollout
 
 The standalone recorder test does not need Vulkan or MSYS2:

@@ -11,6 +11,11 @@ void runtime_wait_begin(const char *kind, const void *object, const char *name, 
 void runtime_wait_end(void) {}
 /* Region trace hook (GPU library, not linked here). */
 void tlggpu_note_open(const char *guest_path) { (void)guest_path; }
+// Karma save hooks (runtime_karma.c, libtlggpu); file tests never open the karma save.
+void runtime_karma_observe_save_read(void) {}
+void iss_karma_save_open(int fd, int writing, uint64_t length) { (void)fd; (void)writing; (void)length; }
+void iss_karma_save_part(int fd, const void *bytes, int64_t offset, int64_t size, int writing) { (void)fd; (void)bytes; (void)offset; (void)size; (void)writing; }
+void iss_karma_save_close(int fd) { (void)fd; }
 uintptr_t runtime_lookup(const RuntimeExport *table,size_t n,const char *name) {
     for (size_t i=0;i<n;++i) if (!strcmp(table[i].name,name)) return (uintptr_t)table[i].function;
     return 0;

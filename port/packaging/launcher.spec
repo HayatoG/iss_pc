@@ -7,6 +7,7 @@
 #   ISS_SPEC_ICON   .ico (Windows only)       ISS_SPEC_HIDDEN space-separated modules for --script
 #   ISS_SPEC_QT     launcher script (Qt)      ISS_SPEC_TK     launcher script (Tk)
 import os
+import sys
 from pathlib import Path
 
 name = os.environ['ISS_SPEC_NAME']
@@ -82,6 +83,8 @@ keep_anyway = ('/qml/Qt/labs/folderlistmodel',)
 
 def keep(entry):
     path = '/' + entry[0].replace('\\', '/')
+    if sys.platform == 'win32' and path.rsplit('/', 1)[-1].lower() == 'icuuc.dll':
+        return False
 
     def matches(marks):
         return any(mark in path or path.endswith('/' + mark) or path.startswith('/' + mark)
@@ -98,7 +101,8 @@ tk_a = analysis(os.environ['ISS_SPEC_TK'], excludes=['PySide6', 'shiboken6'])
 
 def program(a, exe_name):
     return EXE(PYZ(a.pure), a.scripts, [], exclude_binaries=True, name=exe_name, console=False, icon=icon,
-               debug=False, strip=False, upx=False)
+               debug=False, strip=False, upx=False,
+               contents_directory=os.environ.get('ISS_SPEC_CONTENTS', '_internal'))
 
 
 qt_exe = program(qt_a, name)

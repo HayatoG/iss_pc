@@ -573,7 +573,7 @@ bool Rasterizer::NativeComputeExecute(iss::native_passes::Segment& s, u64& tick,
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::RecSubmit};
     using namespace NativeCompute;
     auto& c = stats;
-    if ((++c.report & 1023) == 1) Report();
+    if (np::ReportDue(np::Reporter::Compute, c.report)) Report();
     c.asc_calls += asc;
     const auto reject = [&](Reject why) {
         ++c.reject[why];
@@ -970,7 +970,7 @@ void Rasterizer::NativeComputeLearn(u64 key, const ComputePipeline* pipeline,
             u.keys.insert(key);
         }
     };
-    if ((c.learned + c.learn_failed) % 256 == 255) Report();
+    if ((c.learned + c.learn_failed) % 256 == 255 && np::ReportTimeDue(np::Reporter::Compute)) Report();
     if (ComputeKey(DrawCsRegs()) != key) {
         ++c.learn_mismatch;
         return;

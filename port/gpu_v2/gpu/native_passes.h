@@ -197,6 +197,15 @@ bool AscRecorded(const u32* ring);
 /// Command processor, at a learn request: which registers the lane assumed differently.
 void NoteDivergence(const Segment& segment, const u32* reg_array);
 void Report();
+/// The periodic NATIVE_* reports (NATIVE_PASSES_*, with Report and the materials' lines, and
+/// NATIVE_COMPUTE): due at the caller's count's 1st, 1025th... call (about 9 times a second in
+/// the city, ~2.6 KB each, on the command processor) or, with ISS_NATIVE_STATS_INTERVAL_MS=N
+/// (N > 0), at most once per N ms per reporter, from whichever thread finds it due.
+enum class Reporter : u32 { Passes, Compute, Count };
+bool ReportDue(Reporter reporter, u64& count);
+/// Only the time limit (true without ISS_NATIVE_STATS_INTERVAL_MS), for the reports that keep
+/// their own count: the draw hook's every 0x40000 draws, the compute learn attempts.
+bool ReportTimeDue(Reporter reporter);
 /// Pool recording vs image destruction: a freed image's generation is bumped, then the views are
 /// destroyed only once every job that started before RecordingTicket() has finished (a job that
 /// checked the generation before the bump may still be writing the old view into a command

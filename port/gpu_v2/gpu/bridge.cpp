@@ -114,7 +114,11 @@ bool thread_priority_enabled(){static const bool on=[]{const char *p=std::getenv
 void raise_gpu_threads(){}
 #else
 void raise_gpu_threads(){
-    static const wchar_t *names[]={L"shadPS4:GpuCommandProcessor",L"shadPS4:GpuCommandRecorder",L"shadPS4:PresentThread",L"shadPS4:GpuUploadWorker",L"iss:DrawStageB"};
+    // ISS_PENDING_OPS_PRIO=1 (default 0): also the thread that writes the deferred labels, EOPs
+    // and interrupts the guest waits on once the GPU reaches their tick (vk_scheduler.cpp).
+    static const bool pending_ops=[]{const char *p=std::getenv("ISS_PENDING_OPS_PRIO");return p&&p[0]=='1';}();
+    static const wchar_t *names[]={L"shadPS4:GpuCommandProcessor",L"shadPS4:GpuCommandRecorder",L"shadPS4:PresentThread",L"shadPS4:GpuUploadWorker",L"iss:DrawStageB",
+                                   pending_ops?L"shadPS4:GpuSchedPriorityPendingOpsRunner":nullptr};
     const DWORD pid=GetCurrentProcessId();
     HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);if(snap==INVALID_HANDLE_VALUE)return;
     THREADENTRY32 te{};te.dwSize=sizeof(te);
@@ -123,7 +127,7 @@ void raise_gpu_threads(){
         HANDLE t=OpenThread(THREAD_SET_LIMITED_INFORMATION|THREAD_QUERY_LIMITED_INFORMATION,FALSE,te.th32ThreadID);if(!t)continue;
         PWSTR desc=nullptr;
         if(SUCCEEDED(GetThreadDescription(t,&desc))&&desc){
-            for(const wchar_t *n:names)if(!wcscmp(desc,n)&&GetThreadPriority(t)<THREAD_PRIORITY_ABOVE_NORMAL){
+            for(const wchar_t *n:names)if(n&&!wcscmp(desc,n)&&GetThreadPriority(t)<THREAD_PRIORITY_ABOVE_NORMAL){
                 if(SetThreadPriority(t,THREAD_PRIORITY_ABOVE_NORMAL))std::fprintf(stderr,"PORT_TUNING thread_priority %ls=above_normal\n",desc);
             }
             LocalFree(desc);
@@ -418,6 +422,51 @@ extern "C" void IssPreciseSleepUs(unsigned us){
     else SwitchToThread();
 #endif
 }
+// An idle wait that sleeps, for one waiting thread (ISS_UPLOAD_IDLE=sleep, the upload worker in
+// buffer_cache.cpp): IssIdleWaitFor returns after us microseconds on a high resolution timer, or
+// once IssIdleWaitWake is called (a wake while nobody waits ends the next wait at once). Windows
+// only (IssIdleWaitCreate returns null elsewhere): libc++ there rounds a timed condition variable
+// wait down to whole milliseconds, so a 1 ms wait returns at once and its caller spins; the POSIX
+// timed waits sleep.
+#ifdef _WIN32
+namespace {struct IssIdleWait{HANDLE event,timer;};}
+#endif
+extern "C" void* IssIdleWaitCreate(){
+#ifndef _WIN32
+    return nullptr;
+#else
+    HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+    if(!timer)return nullptr;
+    HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr); // auto-reset: no wake is lost
+    if(!event){CloseHandle(timer);return nullptr;}
+    return new IssIdleWait{event,timer};
+#endif
+}
+extern "C" void IssIdleWaitWake(void* wait){
+#ifdef _WIN32
+    SetEvent(static_cast<IssIdleWait*>(wait)->event);
+#else
+    (void)wait;
+#endif
+}
+extern "C" void IssIdleWaitFor(void* wait,unsigned us){
+#ifdef _WIN32
+    auto* w=static_cast<IssIdleWait*>(wait);
+    LARGE_INTEGER due;due.QuadPart=-static_cast<LONGLONG>(us)*10;
+    const HANDLE handles[2]={w->event,w->timer};
+    if(SetWaitableTimer(w->timer,&due,0,nullptr,nullptr,FALSE))WaitForMultipleObjects(2,handles,FALSE,INFINITE);
+    else WaitForSingleObject(w->event,1);
+#else
+    (void)wait;(void)us;
+#endif
+}
+extern "C" void IssIdleWaitDestroy(void* wait){
+#ifdef _WIN32
+    if(auto* w=static_cast<IssIdleWait*>(wait)){CloseHandle(w->event);CloseHandle(w->timer);delete w;}
+#else
+    (void)wait;
+#endif
+}
 // The present thread's vblank clock (ISS_VBLANK_TIMER=hr|hrspin, videoout_driver.cpp): sleeps
 // ns on a per-thread timer created once, high resolution when Windows has it (a plain one, about
 // 15.6 ms granular, otherwise). Returns 1 when that timer is high resolution; ns<=0 only creates it.
@@ -678,7 +727,7 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
                 if(stop_path&&now-last_stop_check>std::chrono::milliseconds(100)){std::error_code ec;stop|=std::filesystem::exists(stop_path,ec);last_stop_check=now;}
                 stop|=IssHostStopRequested();
                 if(stop){
-                    if(renderer&&checkpoints)renderer->GetPipelineCache().CheckpointDriverCache();
+                    if(renderer&&checkpoints)renderer->GetPipelineCache().CheckpointDriverCache(true);
                     // Our atomic checkpoint replaces the old destructor-only snapshot.
                     Storage::DataBase::Instance().SetBeforeClose({});Storage::DataBase::Instance().Close();
                     std::fputs("PORT_STOP cache writes drained; closing all guest threads and audio\n",stderr);std::fflush(nullptr);

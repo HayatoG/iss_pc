@@ -180,8 +180,9 @@ public:
 
     void WarmUp();
     void Sync();
-    // PC port: thread-safe driver-cache checkpoint; no draws are dropped.
-    bool CheckpointDriverCache();
+    // PC port: thread-safe driver-cache checkpoint; no draws are dropped. final (stop/exit):
+    // always snapshots, even with no pipeline creation counted since the last checkpoint.
+    bool CheckpointDriverCache(bool final = false);
 
     bool LoadComputePipeline(Serialization::Archive& ar);
     bool LoadGraphicsPipeline(Serialization::Archive& ar);

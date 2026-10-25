@@ -2,6 +2,9 @@
 #include <assert.h>
 #include <unistd.h>
 #include "../src/runtime_pad.c"
+// runtime_mouse_aim.c (the native aim hook) needs the guest; pad tests run without it.
+int runtime_mouse_aim_installed(void) { return 0; }
+int runtime_mouse_aim_motion(float dx, float dy, float sensitivity, int invert_y, int active) { (void)dx; (void)dy; (void)sensitivity; (void)invert_y; (void)active; return 0; }
 #ifdef _WIN32
 #define setenv(name, value, overwrite) _putenv_s(name, value)
 #endif

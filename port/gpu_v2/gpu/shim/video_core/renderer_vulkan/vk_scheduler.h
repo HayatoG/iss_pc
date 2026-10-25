@@ -1401,7 +1401,7 @@ struct Context {
     u64 depth_uid;       ///< Image uid of the depth target.
 };
 
-/// GPU black box: on (ISS_GPU_BLACKBOX, default) and the marker buffer exists.
+/// GPU black box: on (ISS_GPU_BLACKBOX unless =0; defaults.env: 0) and the marker buffer exists.
 bool Blackbox();
 
 /// GPU black box: marks a command of the scheduler `owner` (its queue's order).

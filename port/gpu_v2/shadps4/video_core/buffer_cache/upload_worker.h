@@ -68,8 +68,13 @@ private:
     PageManager& page_manager;
     std::mutex queue_mutex;
     std::condition_variable_any queue_cv;
+    /// ISS_UPLOAD_IDLE=sleep (Windows): the worker sleeps on this (bridge.cpp IssIdleWait*) instead
+    /// of queue_cv's 1 ms timed wait, which returns at once there (it polled queue_mutex).
+    void* idle_wait{};
     std::vector<Job> queue;
     bool worker_sleeping{};
+    /// ISS_UPLOAD_IDLE=sleep: the event was set during this sleep (Enqueue sets it once per sleep).
+    bool idle_woken{};
     std::mutex exec_mutex; ///< Held while jobs are done: they are done in order.
     std::vector<Job> batch;
     std::vector<std::pair<u64, u64>> ranges;

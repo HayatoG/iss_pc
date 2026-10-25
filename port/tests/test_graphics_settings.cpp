@@ -110,6 +110,19 @@ int main() {
         assert(fixes.find(line) != std::string::npos);
     }
     assert(fixes.find("bp01=") == std::string::npos && fixes.find("bp99") == std::string::npos);
+    v.display_mode=G::ExclusiveFullscreen;
+    TlgSettings::Save();
+    assert(Read(path).find("display_mode=exclusive\n")!=std::string::npos);
+    v.display_mode=G::Windowed;
+    TlgSettings::Load();
+    assert(v.display_mode==G::ExclusiveFullscreen);
+    // Changing unrelated overlay settings must preserve the menu-canvas fix.
+    v.iss_native_ui_16_9=true;
+    TlgSettings::Save();
+    v.iss_native_ui_16_9=false;
+    TlgSettings::Load();
+    assert(v.iss_native_ui_16_9);
+    assert(Read(path).find("iss_native_ui_16_9=1\n")!=std::string::npos);
     std::remove(path);
     std::puts("PASS: graphics settings");
 }

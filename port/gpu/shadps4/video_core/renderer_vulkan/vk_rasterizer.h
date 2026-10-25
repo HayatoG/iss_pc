@@ -141,6 +141,13 @@ public:
     [[nodiscard]] bool DrawPipeReached(u64 position) const {
         return !draw_pipe || draw_pipe->Reached(position);
     }
+    /// tlg: statistics only (TLG_DCB_STATS): cycles one step of an ACB packet took on stage A.
+    void AddComputeStep(u32 slot, u64 cycles) {
+        if (draw_pipe && slot < DrawPipe::NumReasons) {
+            draw_pipe->compute_cycles[slot] += cycles;
+            ++draw_pipe->compute_packets[slot];
+        }
+    }
     /// Stage A: no draws waiting for the recording thread.
     [[nodiscard]] bool DrawPipeIdle() const {
         return !draw_pipe || draw_pipe->Idle();

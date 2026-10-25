@@ -24,6 +24,7 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "tlg_freeze.h"
+#include "tlg_toggles.h" // tlg: TlgStats (the submit-done wait)
 
 extern Frontend::WindowSDL* g_window;
 std::unique_ptr<Vulkan::Presenter> presenter;
@@ -88,7 +89,17 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
 static void WaitGpuIdle() {
     HLE_TRACE;
     TlgFreeze::WaitScope wait{"GPU idle (submit done)"}; // tlg: freeze report
+    // tlg: the guest stands still here before every submission and in sceGnmSubmitDone, until
+    // the GPU command thread has drained the draw pipe (ReasonSubmissionEnd) and written the
+    // fences it deferred, which is what signals GpuIdle. Timed so the frame stats can say how
+    // much of the frame that costs the guest, not just how much it costs the GPU thread.
+    TlgStats::submit_idle_calls.fetch_add(1, std::memory_order_relaxed);
     std::unique_lock lock{m_wait_idle};
+    if (submission_lock == 0) {
+        return; // did not block: no clock read on the common path
+    }
+    TlgStats::submit_idle_blocks.fetch_add(1, std::memory_order_relaxed);
+    TlgStats::WaitTimer timer{TlgStats::submit_idle_wait_ns};
     cv_lock.wait(lock, [] { return submission_lock == 0; });
 }
 

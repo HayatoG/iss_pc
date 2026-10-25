@@ -147,6 +147,11 @@ inline std::atomic<std::uint64_t> reduced_draws{0}, scene_draws{0};
 /// for host copies before a submission or fence, and for GPU ticks.
 inline std::atomic<std::uint64_t> sync_recording_ns{0}, host_copies_wait_ns{0}, tick_wait_ns{0},
     copy_threads_wait_ns{0}, host_copy_waits{0};
+/// Wall time guest threads spent blocked in WaitGpuIdle (sceGnmSubmitDone and every submit:
+/// the submission-end drain and the deferred fence writes happen before GpuIdle is signalled),
+/// and how many of those calls actually blocked.
+inline std::atomic<std::uint64_t> submit_idle_wait_ns{0}, submit_idle_blocks{0},
+    submit_idle_calls{0};
 struct WaitTimer {
     std::atomic<std::uint64_t>& total;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();

@@ -355,6 +355,7 @@ extern "C" int tlggpu_init(const TlgGpuConfig* config) {
         runtime_report();
         std::fflush(stdout);
         TlgPerf::Stop(); // _Exit bypasses atexit; finish diagnostics on normal window close.
+        std::fflush(stderr); // TLG_LOG_BUFFER: buffered
         std::_Exit(0);
     });
     g_window_thread.detach();
@@ -513,6 +514,7 @@ extern "C" void tlggpu_input_settings(TlgGpuInputSettings* out) {
     const auto& s = TlgSettings::Get();
     out->mouse_enabled = s.mouse_enabled ? 1 : 0;
     out->invert_y = s.mouse_invert_y ? 1 : 0;
+    out->rumble = s.rumble ? 1 : 0;
     out->sensitivity = s.mouse_sensitivity;
     out->vertical = s.mouse_sensitivity_y;
     out->smoothing = s.mouse_smoothing;

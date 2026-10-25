@@ -124,6 +124,14 @@ extern "C" int tlggpu_init(const TlgGpuConfig* config) {
     callbacks.mapping_lock_shared = runtime_memory_lock_shared;
     callbacks.mapping_unlock_shared = runtime_memory_unlock_shared;
     TlgSettings::Load(); // tlg.ini: the overlay, the menu and the input settings
+    // Initial host window shape follows the requested output, independently of
+    // scene scale. The game's actual buffers remain guarded in probe.c.
+    const int native_output=TlgSettings::Get().iss_native_output;
+    if(native_output>0 && native_output<6){
+        constexpr uint32_t widths[]={0,1920,2560,3440,3840,5120};
+        constexpr uint32_t heights[]={0,1080,1440,1440,2160,1440};
+        callbacks.width=widths[native_output];callbacks.height=heights[native_output];
+    }
     // The launcher's choices (backports_table.py): TLG_RENDERER=2 picked this renderer, and
     // TLG_NATIVE_PASSES sets ISS_NATIVE_PASSES (off by default: NVIDIA's Linux driver).
     const char* native = std::getenv("ISS_NATIVE_PASSES");
@@ -648,6 +656,7 @@ extern "C" void tlggpu_input_settings(TlgGpuInputSettings* out) {
     const auto& s = TlgSettings::Get();
     out->mouse_enabled = s.mouse_enabled ? 1 : 0;
     out->invert_y = s.mouse_invert_y ? 1 : 0;
+    out->rumble = s.rumble ? 1 : 0;
     out->sensitivity = s.mouse_sensitivity;
     out->vertical = s.mouse_sensitivity_y;
     out->smoothing = s.mouse_smoothing;

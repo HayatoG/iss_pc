@@ -10,7 +10,7 @@ from . import gfxlogic
 from .logic import backports_table, tlg_run
 from .rowsmodel import RowsModel
 
-# ids: 'c:' launcher setting, 'm:' tlg.ini mouse key, 'p:' touchpad-mode setting, item ids of the table.
+# ids: 'c:' launcher setting, 'm:' tlg.ini mouse key, 'i:' other tlg.ini key (rumble), 'p:' touchpad-mode setting, item ids of the table.
 MOUSE_ROWS = ('mouse_sensitivity', 'mouse_sensitivity_y', 'mouse_invert_y', 'mouse_smoothing', 'mouse_accel', 'mouse_deadzone')
 PAD_KEY_LABELS = {'': 'ctl_key_default', 'Left Ctrl': 'ctl_key_lctrl', 'Mouse X1': 'ctl_key_x1',
                   'Mouse X2': 'ctl_key_x2', 'Right Ctrl|Mouse X1': 'ctl_key_rctrl_x1'}
@@ -63,6 +63,9 @@ class Controls(QObject):
         rows = [self._row('c:stick_deadzone', self.t('deadzone'), self.t('deadzone_hint'), 'slider', False,
                           zone != tlg_run.DEFAULT_SETTINGS['stick_deadzone'], lo=0, hi=40, step=1, unit='%',
                           value=zone, valueText=f'{zone}%')]
+        rumble = self.ini().get('rumble', '1') != '0'     # tlg.ini, shared with the in-game menu
+        rows.append(self._row('i:rumble', self.t('ctl_rumble'), self.t('ctl_what_rumble'), 'switch', True,
+                              not rumble, on=rumble))
         item = gfxlogic.item_by_id('menu:sensor_aim')
         value = int(backports_table.effective(item, self.backend.fix_states))
         rows.append(self._row(item.id, self.backend.t_.pair(item.name), self.backend.t_.pair(item.what), 'slider',
@@ -131,6 +134,8 @@ class Controls(QObject):
         if rid == 'c:stick_deadzone':
             s['stick_deadzone'] = min(max(int(float(value)), 0), 40)
             tlg_run.save_settings(s)
+        elif rid == 'i:rumble':
+            backports_table.write_ini(self.ini_path(), {'rumble': None if value in ('1', 'true') else '0'})
         elif rid.startswith('m:'):
             key = rid[2:]
             kind = padsettings.MOUSE_SPEC[key][1]

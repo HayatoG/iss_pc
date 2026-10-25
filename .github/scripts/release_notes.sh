@@ -13,7 +13,7 @@
 # Usage: release_notes.sh <commit sha>   (needs GH_TOKEN and GH_REPO)
 set -euo pipefail
 sha=$1
-prev=${PREV:-}; [[ -n $prev ]] || prev=$(gh release list --exclude-drafts --limit 20 --json tagName --jq '.[].tagName' | grep -vx nightly | head -1 || true)
+prev=${PREV:-}; [[ -n $prev ]] || prev=$(gh release list --exclude-drafts --limit 100 --json tagName --jq '.[].tagName' | grep -vxE 'nightly|beta-.*' | head -1 || true)
 if [[ -n $prev ]]; then
   commits=$(gh api --paginate "repos/$GH_REPO/compare/$prev...$sha?per_page=100" --jq '.commits[].sha')
 else

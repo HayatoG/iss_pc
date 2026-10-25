@@ -104,6 +104,12 @@ public:
     std::array<u64, NumReasons> drains_by_reason{};
     std::array<u64, NumReasons> cycles_by_reason{};
 
+    /// tlg: where the asynchronous compute queues spend stage A, by step (TLG_DCB_STATS): a PM4
+    /// opcode of the ACB, or ReasonCommands for the ProcessCommands call before each packet. The
+    /// drain of each packet is counted apart, in cycles_by_reason[ReasonCompute].
+    std::array<u64, NumReasons> compute_cycles{};
+    std::array<u64, NumReasons> compute_packets{};
+
     /// Stage A: waits until stage B has run every committed packet.
     void Drain(u32 reason = ReasonRasterizer) {
         if (consumed.load(std::memory_order_acquire) == head) {

@@ -1,5 +1,6 @@
 #include <atomic>
 #include "deep_profile.h"
+#include "minimal_logs.h"
 #include "repeat_census.h"
 #include "compute_phase.h"
 #include "runtime_timeline.h"
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <intrin.h>
 #include <limits>
@@ -82,6 +84,11 @@ void Print(){
 namespace iss::asc_stats_api {void Print(){iss::asc_stats::Print();}}
 // The command buffer segment the command processor reads (liverpool.cpp).
 u64 g_iss_dcb_lo{}, g_iss_dcb_hi{};
+// ISS_UPLOAD_IDLE=sleep (UploadWorker): bridge.cpp.
+extern "C" void* IssIdleWaitCreate();
+extern "C" void IssIdleWaitWake(void* wait);
+extern "C" void IssIdleWaitFor(void* wait, unsigned us);
+extern "C" void IssIdleWaitDestroy(void* wait);
 
 namespace VideoCore {
 namespace {
@@ -751,15 +758,29 @@ BufferCache::~BufferCache() {
 }
 
 UploadWorker::UploadWorker(PageManager& page_manager_) : page_manager{page_manager_} {
+    // ISS_UPLOAD_IDLE=sleep: between jobs the worker sleeps (a high resolution timer for the
+    // 1 ms cadence, an event for the wake at UploadWorkerWakeJobs) instead of the timed condition
+    // variable wait, which libc++ on Windows rounds down to 0 ms: the worker spun on queue_mutex
+    // (~17 ms of a core per frame), which the command processor takes in Enqueue. Default: the
+    // old wait. POSIX: the old wait (it sleeps there).
+    if (const char* p = std::getenv("ISS_UPLOAD_IDLE"); p && !std::strcmp(p, "sleep")) {
+        idle_wait = IssIdleWaitCreate();
+        std::fprintf(stderr, "PORT_TUNING upload_idle=sleep%s\n",
+                     idle_wait ? "" : " (no high resolution timer, or not Windows: timed wait)");
+    }
     thread = std::jthread([this](std::stop_token stoken) { Run(stoken); });
 }
 
 UploadWorker::~UploadWorker() {
     thread.request_stop();
     queue_cv.notify_all();
+    if (idle_wait) {
+        IssIdleWaitWake(idle_wait);
+    }
     if (thread.joinable()) {
         thread.join();
     }
+    IssIdleWaitDestroy(idle_wait);
 }
 
 namespace {
@@ -777,9 +798,19 @@ u64 UploadWorker::Enqueue(Job&& job) {
         queue.push_back(std::move(job));
         seq = enqueued.fetch_add(1, std::memory_order_acq_rel) + 1;
         wake = worker_sleeping && queue.size() >= UploadWorkerWakeJobs;
+        if (idle_wait) {
+            // One SetEvent per sleep: the jobs queued after it until the worker takes the lock
+            // again would only repeat the system call on the command processor.
+            wake = wake && !idle_woken;
+            idle_woken = idle_woken || wake;
+        }
     }
     if (wake) {
-        queue_cv.notify_one();
+        if (idle_wait) {
+            IssIdleWaitWake(idle_wait);
+        } else {
+            queue_cv.notify_one();
+        }
     }
     return seq;
 }
@@ -801,8 +832,19 @@ void UploadWorker::Run(std::stop_token stoken) {
         {
             std::unique_lock lk{queue_mutex};
             worker_sleeping = true;
-            queue_cv.wait_for(lk, stoken, std::chrono::milliseconds{1},
-                              [this] { return queue.size() >= UploadWorkerWakeJobs; });
+            idle_woken = false;
+            if (idle_wait) {
+                // Enqueue wakes it once the threshold is reached (the event keeps a wake that
+                // comes before the wait); otherwise it looks again after 1 ms.
+                if (queue.size() < UploadWorkerWakeJobs) {
+                    lk.unlock();
+                    IssIdleWaitFor(idle_wait, 1000);
+                    lk.lock();
+                }
+            } else {
+                queue_cv.wait_for(lk, stoken, std::chrono::milliseconds{1},
+                                  [this] { return queue.size() >= UploadWorkerWakeJobs; });
+            }
             worker_sleeping = false;
             if (queue.empty()) {
                 continue;
@@ -3565,7 +3607,12 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.memory = device_memory;
         backing.offset = memory_offset >> block_shift;
 
-        LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
+        // ISS_MINIMAL_LOGS: counted (RESIDENT_RANGES every 5 s) after the first 16 lines.
+        static iss::minimal_logs::Summary resident_ranges_log{"RESIDENT_RANGES", "kb", 16};
+        if (Common::Log::ShouldLog(Common::Log::Class::Render, Common::Log::Level::Info) &&
+            (!iss::minimal_logs::Enabled() ||
+             resident_ranges_log.Note(((backing.end - backing.start) << block_shift) >> 10)))
+            LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
 
         const vk::SparseMemoryBind bind{
             .resourceOffset = (range.start << block_shift) - arena->cpu_addr,

@@ -29,6 +29,7 @@
 #endif
 
 namespace Vulkan {
+bool g_iss_surface_capabilities2 = false;
 
 static const char* const VALIDATION_LAYER_NAME = "VK_LAYER_KHRONOS_validation";
 static const char* const CRASH_DIAGNOSTIC_LAYER_NAME = "VK_LAYER_LUNARG_crash_diagnostic";
@@ -175,6 +176,7 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     case Frontend::WindowSystemType::Windows:
         extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+        extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
         break;
 #elif defined(VK_USE_PLATFORM_XLIB_KHR) || defined(VK_USE_PLATFORM_WAYLAND_KHR)
     case Frontend::WindowSystemType::X11:
@@ -219,6 +221,9 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
         return false;
     });
 
+    g_iss_surface_capabilities2=std::any_of(extensions.begin(),extensions.end(),[](const char* name){
+        return !std::strcmp(name,VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+    });
     return extensions;
 }
 

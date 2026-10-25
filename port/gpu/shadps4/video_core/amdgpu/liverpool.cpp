@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <chrono>
+#include <utility>
 #include <pthread.h>
 #ifndef _WIN32
 #include <sys/resource.h>
@@ -1555,6 +1557,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     FIBER_EXIT;
 }
 
+// tlg: TLG_DCB_STATS - cycles the packets nested inside the one being timed took, so
+// a packet that re-enters this loop (IndirectBuffer) reports its own time only. At file
+// scope on purpose: ProcessCompute is a template and both instantiations share it.
+static thread_local u64 compute_child_cycles = 0;
+
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
@@ -1568,8 +1575,17 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
 
     auto base_addr = reinterpret_cast<VAddr>(acb.data());
     size_t acb_size = acb.size_bytes();
+    // tlg: TLG_DCB_STATS — where this queue spends stage A, step by step. With the queue
+    // pipelined (#148) the drains are gone and ProcessCompute still costs the thread (#169,
+    // 9.3% on an RTX 4070); on RADV that time hides behind the drains.
+    static const bool step_stats = EmulatorSettingsImpl::Flag("TLG_DCB_STATS", false);
     while (!acb.empty()) {
+        const u64 commands_start = step_stats ? __rdtsc() : 0;
         ProcessCommands();
+        if (step_stats && rasterizer) {
+            rasterizer->AddComputeStep(Vulkan::DrawPipe::ReasonCommands,
+                                       __rdtsc() - commands_start);
+        }
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
         u32 next_dw_off = header->type3.NumWords() + 1;
@@ -1611,6 +1627,29 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+
+        // tlg: TLG_DCB_STATS, the packet itself (ProcessCommands above is counted apart).
+        // Destroyed at the end of the iteration, including its early exits.
+        struct StepTimer {
+            Vulkan::Rasterizer* rasterizer;
+            u32 slot;
+            u64 start;
+            u64 outer_children;
+            StepTimer(Vulkan::Rasterizer* rasterizer_, u32 slot_)
+                : rasterizer{rasterizer_}, slot{slot_}, start{rasterizer_ ? __rdtsc() : 0},
+                  outer_children{std::exchange(compute_child_cycles, u64{0})} {}
+            ~StepTimer() {
+                if (!rasterizer) {
+                    return;
+                }
+                // A packet that runs nested packets (IndirectBuffer re-enters this loop)
+                // reports its own time only; the nested ones report theirs under their own
+                // opcode, so the steps of a window add up to the queue, not to more.
+                const u64 total = __rdtsc() - start;
+                rasterizer->AddComputeStep(slot, total - std::min(total, compute_child_cycles));
+                compute_child_cycles = outer_children + total;
+            }
+        } const step_timer{step_stats ? rasterizer : nullptr, static_cast<u32>(opcode)};
         // tlg: compute work uses the caches: without PipelinedCompute every packet first waits
         // for the draw recording thread to run dry.
         const bool pipelined = rasterizer && !TlgToggle::Disabled(TlgToggle::PipelinedCompute);

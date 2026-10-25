@@ -10,11 +10,11 @@
 
 namespace TlgGraphics {
 
-enum DisplayMode : int { Windowed = 0, Borderless = 1, Fullscreen = 2, DisplayModeCount };
+enum DisplayMode : int { Windowed = 0, Borderless = 1, Fullscreen = 2, ExclusiveFullscreen = 3, DisplayModeCount };
 inline constexpr std::array<std::string_view, DisplayModeCount> DisplayModeKeys = {
-    "windowed", "borderless", "fullscreen"};
+    "windowed", "borderless", "fullscreen", "exclusive"};
 inline constexpr std::array<const char*, DisplayModeCount> DisplayModeNames = {
-    "Windowed", "Borderless", "Fullscreen"};
+    "Windowed", "Borderless", "Fullscreen (borderless)", "Exclusive fullscreen"};
 
 /// Present rate limits; 0 = unlimited.
 inline constexpr std::array<int, 5> FpsLimits = {30, 60, 120, 240, 0};

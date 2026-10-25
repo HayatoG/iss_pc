@@ -586,6 +586,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         "%.0f write faults/s, %lld hot pages; GPU thread %.2f us/draw, "
                         "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%%, host copies "
                         "%.1f%% (%.0f/frame), copy threads %.1f%%, GPU ticks %.1f%%; "
+                        "guest blocked in submit-done %.1f%% (%.0f/frame of %.0f calls); "
                         "reduced-size draws %.0f/frame of %.0f in the scene\n",
                         frames / window, worst_ms, EmulatorSettings.GetVblankFrequency(), compiles,
                         compile_ns / 1e6, capture_ms, async_ms, wait_ms, snapshot_ms, guest_wait_ms,
@@ -599,6 +600,9 @@ void VideoOutDriver::Flip(const Request& req) {
                         frames ? double(TlgStats::host_copy_waits.exchange(0)) / frames : 0.0,
                         TlgStats::copy_threads_wait_ns.exchange(0) / (window * 1e7),
                         TlgStats::tick_wait_ns.exchange(0) / (window * 1e7),
+                        TlgStats::submit_idle_wait_ns.exchange(0) / (window * 1e7),
+                        frames ? double(TlgStats::submit_idle_blocks.exchange(0)) / frames : 0.0,
+                        frames ? double(TlgStats::submit_idle_calls.exchange(0)) / frames : 0.0,
                         frames ? double(TlgStats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(TlgStats::scene_draws.exchange(0)) / frames : 0.0);
             presenter->GetRasterizer().GetPipelineCache().ReportCompilerStats();

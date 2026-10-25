@@ -5,6 +5,7 @@
  * Paths containing ".." components are rejected rather than normalized. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "iss_karma.h"
 #include "gpu/tlggpu.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,6 +64,17 @@ static size_t mount_count, opens, reads, writes, missing;
 static size_t bounce_reads, direct_reads; /* TLG_FILE_DIRECT: which path each chunk of a read took */
 static uint64_t bytes_read;
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
+/* Save-identity research only. No buffer edits or guest save-format assumptions. */
+static int karma_save_trace(void){const char *v=getenv("ISS_KARMA_SAVE_TRACE");return v&&v[0]=='1';}
+static int karma_save_file(const File *f){return f&&!strncmp(f->path,"/savedata",9)&&strstr(f->path,"/dis.dat")&&strlen(strstr(f->path,"/dis.dat"))==8;}
+extern void runtime_karma_observe_save_read(void);
+static void karma_trace_io(int fd,const char *operation,int64_t offset,int64_t count){
+    if(!karma_save_trace())return;
+    File *f=fd>=3&&fd<MAX_FILES&&files[fd].used?&files[fd]:NULL;
+    if(!karma_save_file(f))return;
+    fprintf(stderr,"KARMA_SAVE_IO op=%s guest=%s offset=%lld bytes=%lld\n",operation,f->path,(long long)offset,(long long)count);
+    if(count>0&&(!strcmp(operation,"read")||!strcmp(operation,"pread")))runtime_karma_observe_save_read();
+}
 
 int runtime_file_mount(const char *guest,const char *host) {
     pthread_mutex_lock(&lock);
@@ -262,9 +274,11 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     files[fd]=(File){.used=1,.host=host,.dir=dir,.append=(flags&0x8)!=0};
     pthread_mutex_init(&files[fd].io,NULL);
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
+    if(karma_save_trace()&&karma_save_file(&files[fd]))fprintf(stderr,"KARMA_SAVE_OPEN guest=%s host=%s flags=%x size=%lld\n",guest,path,flags,(long long)s.st_size);
     tlggpu_note_open(guest); /* region trace (TLG_REGION_TRACE=1) */
     ++opens;
     pthread_mutex_unlock(&lock);
+    if(karma_save_file(&files[fd]))iss_karma_save_open(fd,(flags&3)!=0,(uint64_t)s.st_size);
     if (runtime_verbose()) {
         static unsigned verbose_opens;
         const unsigned n=__atomic_fetch_add(&verbose_opens,1,__ATOMIC_RELAXED);
@@ -289,12 +303,14 @@ static int64_t do_close(int fd) {
     pthread_mutex_lock(&lock);
     File *f=get(fd);
     if (!f) { pthread_mutex_unlock(&lock); return -EBADF; }
+    if(karma_save_trace()&&karma_save_file(f))fprintf(stderr,"KARMA_SAVE_CLOSE guest=%s\n",f->path);
     if (runtime_verbose()) {
         static unsigned verbose_closes;
         const unsigned n=__atomic_fetch_add(&verbose_closes,1,__ATOMIC_RELAXED);
         if (n<256 || !(n%1000)) printf("Verbose: file close #%u (%s) fd %d\n",n,f->path,fd);
     }
     if (f->host>=0) close(f->host);
+    if(karma_save_file(f))iss_karma_save_close(fd);
     free_listing(f->dir);
     pthread_mutex_destroy(&f->io);
     *f=(File){0};
@@ -416,20 +432,25 @@ static ssize_t full_io(int h,void *buffer,uint64_t size,int64_t offset) {
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
+    int64_t karma_offset=-1;
 #ifdef _WIN32
     File *f=fd>=3 ? get(fd) : NULL;
     ssize_t n;
     if (f) {
         pthread_mutex_lock(&f->io);
+        karma_offset=f->offset;
         n=full_io(h,buffer,size,f->offset);
         if (n>0) f->offset+=n;
         pthread_mutex_unlock(&f->io);
     } else n=full_io(h,buffer,size,-1);
 #else
+    if(fd>=3&&karma_save_file(get(fd)))karma_offset=host_lseek(h,0,SEEK_CUR);
     ssize_t n=full_io(h,buffer,size,-1);
 #endif
     if (n<0) { int e=errno; log_read_problem("read",fd,size,-1,n,e); return -e; }
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
+    karma_trace_io(fd,"read",karma_offset,n);
+    if(n>0&&karma_save_file(get(fd)))iss_karma_save_part(fd,buffer,karma_offset,n,0);
     return n;
 }
 static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
@@ -438,6 +459,8 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     ssize_t n=full_io(h,buffer,size,offset);
     if (n<0) { int e=errno; log_read_problem("pread",fd,size,offset,n,e); return -e; }
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
+    karma_trace_io(fd,"pread",offset,n);
+    if(n>0&&karma_save_file(get(fd)))iss_karma_save_part(fd,buffer,offset,n,0);
     return n;
 }
 #ifdef _WIN32
@@ -462,6 +485,7 @@ static ssize_t bounce_write(int h,const unsigned char *at,uint64_t size,int64_t 
 static int64_t do_write(int fd,const void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
+    const int64_t karma_write_offset=karma_save_file(get(fd))?host_lseek(h,0,SEEK_CUR):-1;
 #ifdef _WIN32
     /* The CRT writes at its own file pointer: put it at the descriptor's position first. */
     File *f=fd>=3 ? get(fd) : NULL;
@@ -485,6 +509,8 @@ static int64_t do_write(int fd,const void *buffer,uint64_t size) {
         return -e;
     }
     __atomic_add_fetch(&writes,1,__ATOMIC_RELAXED);
+    karma_trace_io(fd,"write",-1,n);
+    if(n>0&&karma_save_file(get(fd)))iss_karma_save_part(fd,buffer,karma_write_offset,n,1);
     return n;
 }
 static int64_t do_pwrite(int fd,const void *buffer,uint64_t size,int64_t offset) {
@@ -501,6 +527,8 @@ static int64_t do_pwrite(int fd,const void *buffer,uint64_t size,int64_t offset)
         log_io_problem("pwrite",what,n,e);
         return -e;
     }
+    karma_trace_io(fd,"pwrite",offset,n);
+    if(n>0&&karma_save_file(get(fd)))iss_karma_save_part(fd,buffer,offset,n,1);
     return n;
 }
 static int64_t do_lseek(int fd,int64_t offset,int whence) {

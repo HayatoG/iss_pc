@@ -16,6 +16,8 @@
 #include "overlay.h"
 #include "visual_capture.h"
 
+#include <atomic>
+std::atomic<unsigned long long> g_iss_presented_frames{0}; // gpu_host.cpp: tlggpu_frame_counters
 namespace iss::save_ui {
 void LoadFonts(ImGuiIO& io);
 void Draw(float width, float height, float dt);
@@ -45,7 +47,7 @@ void Initialize(const ::Vulkan::Instance& instance,const Frontend::WindowSDL& w,
 void OnSurfaceFormatChange(vk::Format f){ImGui::Vulkan::OnSurfaceFormatChange(f);}
 void Shutdown(vk::Device d){d.waitIdle();TextureManager::StopWorker();ImGui::Vulkan::Shutdown();ImGui::DestroyContext();}
 ImGuiID NewFrame(bool reused){
-    static unsigned frames=0;++frames;
+    static unsigned frames=0;++frames;g_iss_presented_frames.fetch_add(1,std::memory_order_relaxed);
     if(frames==120){const char *p=std::getenv("ISS_CAPTURE_OVERLAY");if(p&&p[0]=='1')VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);}
     static uint64_t capture_tick=0;const uint64_t tick=SDL_GetTicks();
     static const bool capture=[] {const char *p=std::getenv("ISS_CAPTURE_FRAMES");return p&&p[0]=='1';}();

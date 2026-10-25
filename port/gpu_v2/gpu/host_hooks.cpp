@@ -32,6 +32,7 @@ static void FatalTrace(const char* what){
                          (unsigned long long)(static_cast<char*>(frames[i])-reinterpret_cast<char*>(module)));
         }
     }
+    std::fflush(stdout); // ISS_LOG_BUFFER: buffered too
     std::fflush(stderr);
 }
 static const bool terminate_hook=[]{

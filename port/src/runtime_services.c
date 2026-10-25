@@ -97,7 +97,8 @@ static ABI int32_t system_status(unsigned char *status) {
 }
 static ABI int32_t system_event(void *event) { (void)event; return SYSTEM_NO_EVENT; }
 static ABI int32_t hide_splash(void) { note("SystemService: splash screen hidden"); return 0; }
-static ABI int32_t safe_area(float *info) { if (!info) return SYSTEM_PARAMETER; *info=1.0f; return 0; } /* full screen */
+#include "iss_native_resolution.h"
+static ABI int32_t safe_area(float *info) { if (!info) return SYSTEM_PARAMETER; *info=runtime_native_safe_area(); return 0; }
 static ABI int32_t disable_music_player(void) { return 0; }
 static ABI int32_t launch_browser(void) { note("SystemService: web browser request ignored (offline)"); return 0; }
 

@@ -26,5 +26,14 @@ int runtime_memory_fill_backing(uintptr_t, int, uint64_t) { std::abort(); }
 int runtime_memory_read_backing(uintptr_t, void*, uint64_t) { std::abort(); }
 void* runtime_memory_backing_view(uintptr_t, uint64_t) { return nullptr; } // TLG_UNIFIED_MEMORY off
 void runtime_report() {}
+// Karma and save services (libtlggpu's karma shims); renderer tests never reach them.
+const char* runtime_file_user_dir() { return "."; }
+struct IssKarmaStatus;
+void runtime_karma_status(IssKarmaStatus*) { std::abort(); }
+const char* runtime_karma_compatibility_reason() { return ""; }
+void runtime_karma_load_begin() {}
+void runtime_karma_request(int) { std::abort(); }
+void runtime_karma_set_enabled(int) {}
+int runtime_mouse_aim_installed() { return 0; }
 }
 

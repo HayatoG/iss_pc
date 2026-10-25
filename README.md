@@ -22,7 +22,7 @@
 
 <p align="center"><a href="https://youtu.be/F5sD_HCGCWo"><img src="docs/screenshots/video-tutorial.jpg" width="640" alt="Como portar jogos de PS4 — vídeo no YouTube"></a></p>
 
-<p align="center">▶️ <a href="https://youtu.be/F5sD_HCGCWo"><b>Tutorial video:</b> how to port PS4 games to PC (English subtitles)</a></p>
+<p align="center">▶️ <a href="https://youtu.be/F5sD_HCGCWo"><b>Tutorial video:</b> how to port PS4 games to PC (in Portuguese)</a></p>
 
 > **Playable, in development.** The game boots, reaches gameplay and gets through the first chapters, but performance is still unstable (20–30 FPS typical on an RTX 2060) and there are known graphics glitches. See the [Status](#status).
 
@@ -342,7 +342,7 @@ The game asks for the motion sensor and the touchpad in many scenes: graffiti, a
 - A notice on screen confirms it: "Sensor mode ON (spray can): cross shakes, R2 sprays, left stick aims" or "Sensor mode off".
 - While it is on, the controller is **on its side**, like a spray can (what the graffiti asks for), **cross/A shakes** and the **left stick aims**, pointing the can left/right and up/down (this moves the graffiti cursor; it stays where you let go; a small push is slow, for tracing the stencil; the right stick works too). R2 still sprays. The sticks and cross/A are hidden from the game, so Delsin neither walks nor jumps and the camera does not turn: **turn the mode off after the scene**. L3+R3 together never reaches the game either.
 - While it is on, the simulated tilt replaces the real gyro.
-- **Keyboard** (no mode needed, any time): hold **T** or **G** to turn the controller sideways (one side or the other) and **Y** to shake it.
+- **Keyboard** (no mode needed, any time): hold **T** or **G** to turn the controller sideways (one side or the other; the arrow keys or the mouse aim) and **Y** to shake it, or wiggle the mouse quickly side to side (or spin the wheel) while T or G is held.
 
 **Touchpad on a controller without one:**
 - **View/Select/Back** is the touchpad click (right side; with L1 held, the left side). Holding the button holds the touchpad.
@@ -741,7 +741,7 @@ O jogo pede o sensor de movimento e o touchpad em várias cenas: grafite, absorv
 - Um aviso na tela confirma: "Modo sensor LIGADO (lata de spray): X sacode, R2 pinta, analógico esquerdo mira" ou "Modo sensor desligado".
 - Com o modo ligado, o controle fica **de lado**, como uma lata de spray (o que o grafite pede), **X/A sacode** e o **analógico esquerdo mira**, girando a lata para os lados e para cima/baixo (é o que move o cursor do grafite; ele fica onde você soltou; pouco inclinado vai devagar, para contornar o desenho; o direito também serve). R2 continua pintando. O analógico e o X/A ficam escondidos do jogo, então o Delsin não anda, não pula e a câmera não gira: **desligue o modo depois da cena**. O L3+R3 juntos também não chega ao jogo.
 - Com o modo ligado, a inclinação simulada substitui o giroscópio real.
-- **Teclado** (sem modo, a qualquer hora): segure **T** ou **G** para virar o controle de lado (um lado ou o outro) e **Y** para sacudir.
+- **Teclado** (sem modo, a qualquer hora): segure **T** ou **G** para virar o controle de lado (um lado ou o outro; as setas ou o mouse miram) e **Y** para sacudir, ou balance o mouse rápido para os lados (ou gire a rodinha) enquanto segura T ou G.
 
 **Touchpad em controle sem touchpad:**
 - **View/Select/Back** é o clique do touchpad (lado direito; com L1 segurado, o lado esquerdo). Segurar o botão é segurar o touchpad.

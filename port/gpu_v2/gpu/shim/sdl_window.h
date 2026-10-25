@@ -30,6 +30,8 @@ public:
     SDL_Window* GetSDLWindow() const { return window; }
     WindowSystemInfo GetWindowInfo() const { return window_info; }
     bool IsOpen() const { return is_open.load(std::memory_order_relaxed); }
+    bool WantsExclusive() const { return exclusive_requested.load(std::memory_order_acquire); }
+    bool CanPresent() const { return !display_transition.load(std::memory_order_acquire) && presentation_available.load(std::memory_order_acquire); }
     /// Processes pending window events. Returns false once the user closed the window.
     bool PollEvents();
     /// The loading screen (window thread, before the renderer presents): the step (bridge.cpp
@@ -43,6 +45,7 @@ public:
 private:
     std::atomic<s32> width, height;
     std::atomic<bool> is_open{true};
+    std::atomic<bool> exclusive_requested{false}, display_transition{false}, presentation_available{true};
     std::mutex text_mutex;
     bool text_requested{}, text_active{};
     int text_state{};
