@@ -15,6 +15,7 @@
 #include "damage_hook.h"
 #include "view_hook.h"
 #include "spin_hook.h"
+#include "havok_spin.h"
 #include "gpu/tlggpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
@@ -762,6 +763,43 @@ static void install_spin_pause(Segment *segments, uint64_t count, uint64_t size)
            (unsigned)tlg_spin_sites[0], (unsigned)tlg_spin_sites[1]);
 }
 
+/* Havok hkCriticalSection spin counts (src/havok_spin.h). ISS_HAVOK_SPIN=N (TLG_HAVOK_SPIN) lowers
+ * each constant count to min(original, N) in place, all 11 sites or none; unset or "orig" keeps
+ * the original 1000-4000. */
+static void install_havok_spin(Segment *segments, uint64_t count, uint64_t size) {
+    const char *policy = getenv("TLG_HAVOK_SPIN");
+    int match = 1;
+    for (unsigned i = 0; match && i < TLG_HAVOK_SPIN_SITES; ++i)
+        if (!mapped(segments, count, tlg_havok_spin_sites[i].site, TLG_HAVOK_SPIN_SITE_LENGTH)) match = 0;
+    if (!match || !tlg_havok_spin_signature_match(image, size)) {
+        /* another game or build: silent unless the clamp was asked for */
+        if (policy && *policy) printf("Havok spin: unavailable (code signature mismatch)\n");
+        return;
+    }
+    if (!policy || !*policy || !strcmp(policy, "orig")) {
+        printf("Havok spin: original counts\n");
+        return;
+    }
+    char *end = NULL;
+    const unsigned long long limit = strtoull(policy, &end, 10);
+    if (*policy < '0' || *policy > '9' || *end || limit > UINT32_MAX) {
+        printf("Havok spin: original counts (TLG_HAVOK_SPIN=%s is not orig or a count)\n", policy);
+        return;
+    }
+    unsigned clamped = 0;
+    for (unsigned i = 0; i < TLG_HAVOK_SPIN_SITES; ++i) {
+        const TlgHavokSpinSite *s = &tlg_havok_spin_sites[i];
+        if (s->count <= limit) continue;
+        const uint32_t value = (uint32_t)limit;
+        memcpy(image + s->site + 1, &value, 4);
+        ++clamped;
+    }
+    if (!clamped)
+        printf("Havok spin: %llu >= all original counts, nothing clamped\n", limit);
+    else
+        printf("Havok spin: clamped %u sites to %llu (orig 1000-4000)\n", clamped, limit);
+}
+
 /* G3PATCH2 (patches.py): the patches' image base, then byte writes at image offsets, applied
  * after relocation. A write may replace a whole base-relative pointer slot (60/90 FPS++ swap
  * function pointers): the patch holds the address at the patches' base, rebased here. */
@@ -1335,6 +1373,7 @@ int main(int argc, char **argv) {
     }
     /* After the rewrites: a site they changed no longer matches and is left alone. */
     install_spin_pause(segments, ns, size);
+    install_havok_spin(segments, ns, size);
     protect(traps, round_page((import_count + 1) * 32), 5);
     if (trace_stubs) protect(trace_stubs, round_page((import_count + 1) * TRACE_STUB_SIZE), 5);
     protect(image, round_page(size), 0);
