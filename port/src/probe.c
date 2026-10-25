@@ -59,9 +59,27 @@ static uintptr_t guest_code_end; /* end of the image and its stub areas (emulati
 static void isa_report_hook(void) { isa_rewrite_report(isa_table, stdout); }
 int vulkan_smoke(void);
 /* TLG_LOG_BUFFER=1: stdout and stderr are fully buffered (log_buffer_start); the crash paths
- * write out what is still buffered before their own report. */
+ * write out what is still buffered before their own report (log_flush_crash). stdout goes first:
+ * both streams share the log file, and stderr's reports usually follow stdout's progress lines. */
 static int log_buffered;
 static void log_flush(void) { fflush(stdout); fflush(stderr); }
+/* Crash and watchdog paths: never waits for a stream lock, which a thread stopped (or parked by
+ * a nested fault) in the middle of a printf may hold forever. Linux: a stream whose lock is taken
+ * is skipped (its lines are lost, the report is not). Windows: written without the lock (the
+ * other threads keep running and may race on the buffer; the report itself follows). */
+static void log_flush_crash(void) {
+#ifdef _WIN32
+    _fflush_nolock(stdout);
+    _fflush_nolock(stderr);
+#else
+    FILE *const streams[] = {stdout, stderr};
+    for (unsigned i = 0; i < 2; ++i)
+        if (!ftrylockfile(streams[i])) {
+            fflush_unlocked(streams[i]);
+            funlockfile(streams[i]);
+        }
+#endif
+}
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 static uint64_t read64(FILE *f) {
@@ -183,7 +201,7 @@ static int fatal_reported;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
     /* The buffered lines first: a fault inside this report parks the thread above (no exit). */
-    if (log_buffered) log_flush();
+    if (log_buffered) log_flush_crash();
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     const CONTEXT *c=info->ContextRecord;
     char where[MAX_PATH+64];
@@ -366,8 +384,8 @@ static void fault(int sig, siginfo_t *info, void *context) {
         return;
     }
     /* The process is terminating: dladdr/snprintf are acceptable here. TLG_LOG_BUFFER: the
-     * buffered lines go first, before the raw writes below. */
-    if (log_buffered) log_flush();
+     * buffered lines go first, before the raw writes below (no lock waits). */
+    if (log_buffered) log_flush_crash();
     ucontext_t *uc = context;
     uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
     char line[512];
@@ -511,7 +529,7 @@ static void dump_all_threads(void *context, const char *head) {
 }
 static void watchdog(int sig, siginfo_t *info, void *context) {
     (void)info;
-    if (log_buffered) log_flush(); /* before the other threads are interrupted */
+    if (log_buffered) log_flush_crash(); /* before the other threads are interrupted; no lock waits */
     dump_all_threads(context, "STOP: watchdog timeout; thread stacks:\n");
     _exit(128 + sig);
 }
@@ -1213,7 +1231,10 @@ static void boot_step(const char *what) {
  * too (the fault reports, abort, invalid CRT parameters, the watchdog, the _exit and
  * TerminateProcess calls), so a line reaches the file at most ~200 ms late and is only lost when
  * the process is killed from outside. Lines stay whole; within one period the lines of one stream
- * may land before older ones of the other. Started after the memory reservation (thread stack). */
+ * may land before older ones of the other (each flush writes stdout first, then stderr, so a
+ * stderr line can precede stdout lines written before it only within that period; interleaving
+ * them exactly would need a flush of stdout before every stderr write). Started after the memory
+ * reservation (thread stack). */
 static void (*log_previous_abort)(int);
 static void log_abort(int sig) {
     log_flush();
@@ -1222,8 +1243,10 @@ static void log_abort(int sig) {
         log_previous_abort(sig); /* the GPU library's report (renderer v2: host_hooks.cpp) */
 }
 #ifndef _WIN32
-/* SIGTERM (the launcher's Ctrl+C), SIGINT, SIGHUP: written out, then the default action. On
- * Windows the launcher's terminate is TerminateProcess, which nothing can intercept. */
+/* SIGHUP: written out, then the default action. SIGTERM and SIGINT stay unhandled here: SDL3
+ * installs its quit handler only where the action is still SIG_DFL, and that handler is the
+ * graceful shutdown (PORT_STOP, which flushes the streams on exit). On Windows the launcher's
+ * terminate is TerminateProcess, which nothing can intercept. */
 static void log_terminate(int sig) {
     log_flush();
     signal(sig, SIG_DFL);
@@ -1266,7 +1289,7 @@ static void log_buffer_start(void) {
 #ifdef _WIN32
     log_previous_invalid_parameter = _set_invalid_parameter_handler(log_invalid_parameter);
 #else
-    const int ends[] = {SIGTERM, SIGINT, SIGHUP};
+    const int ends[] = {SIGHUP};
     for (unsigned i = 0; i < sizeof ends / sizeof *ends; ++i) {
         void (*previous)(int) = signal(ends[i], log_terminate);
         if (previous != SIG_DFL) signal(ends[i], previous); /* someone else's (or ignored): kept */

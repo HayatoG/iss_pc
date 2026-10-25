@@ -798,6 +798,12 @@ u64 UploadWorker::Enqueue(Job&& job) {
         queue.push_back(std::move(job));
         seq = enqueued.fetch_add(1, std::memory_order_acq_rel) + 1;
         wake = worker_sleeping && queue.size() >= UploadWorkerWakeJobs;
+        if (idle_wait) {
+            // One SetEvent per sleep: the jobs queued after it until the worker takes the lock
+            // again would only repeat the system call on the command processor.
+            wake = wake && !idle_woken;
+            idle_woken = idle_woken || wake;
+        }
     }
     if (wake) {
         if (idle_wait) {
@@ -826,6 +832,7 @@ void UploadWorker::Run(std::stop_token stoken) {
         {
             std::unique_lock lk{queue_mutex};
             worker_sleeping = true;
+            idle_woken = false;
             if (idle_wait) {
                 // Enqueue wakes it once the threshold is reached (the event keeps a wake that
                 // comes before the wait); otherwise it looks again after 1 ms.

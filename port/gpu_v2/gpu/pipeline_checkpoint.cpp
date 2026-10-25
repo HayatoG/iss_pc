@@ -11,7 +11,7 @@
 #include "video_core/renderer_vulkan/driver_cache_data.h"
 
 namespace Vulkan {
-bool PipelineCache::CheckpointDriverCache(){
+bool PipelineCache::CheckpointDriverCache(bool final){
     // Vulkan internally synchronizes this cache (no EXTERNALLY_SYNCHRONIZED flag).
     // This mutex serializes our snapshot writers; no compiler or draw is skipped.
     static std::mutex mutex;
@@ -20,11 +20,13 @@ bool PipelineCache::CheckpointDriverCache(){
     // every graphics and compute creation, on every thread, and never goes back): with none since
     // the last checkpoint it is the one already saved, so its ~217 MB are neither copied nor hashed
     // again. Read before the snapshot: a creation that ends meanwhile makes the next one look.
+    // The final checkpoint (stop/exit) never skips: a creation can be in the driver cache before
+    // it is counted, and no later checkpoint would save it.
     static u64 checkpointed_creates=~0ull;
     std::scoped_lock guard{mutex};
     if(!EmulatorSettings.IsPipelineCacheEnabled()||!pipeline_cache)return false;
     const u64 creates=Common::Perf::Total(Common::Perf::PipelineCreates);
-    if(creates==checkpointed_creates)return true;
+    if(!final&&creates==checkpointed_creates)return true;
     const auto started=Common::Perf::NowNs();
     const auto snapshot=instance.GetDevice().getPipelineCacheData(*pipeline_cache);
     if(snapshot.result!=vk::Result::eSuccess||snapshot.value.size()<32||snapshot.value.size()>256ULL*1024*1024-24){

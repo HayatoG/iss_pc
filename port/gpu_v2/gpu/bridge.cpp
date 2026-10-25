@@ -727,7 +727,7 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
                 if(stop_path&&now-last_stop_check>std::chrono::milliseconds(100)){std::error_code ec;stop|=std::filesystem::exists(stop_path,ec);last_stop_check=now;}
                 stop|=IssHostStopRequested();
                 if(stop){
-                    if(renderer&&checkpoints)renderer->GetPipelineCache().CheckpointDriverCache();
+                    if(renderer&&checkpoints)renderer->GetPipelineCache().CheckpointDriverCache(true);
                     // Our atomic checkpoint replaces the old destructor-only snapshot.
                     Storage::DataBase::Instance().SetBeforeClose({});Storage::DataBase::Instance().Close();
                     std::fputs("PORT_STOP cache writes drained; closing all guest threads and audio\n",stderr);std::fflush(nullptr);
