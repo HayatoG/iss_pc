@@ -447,6 +447,31 @@ nothing else running, and the laptop on mains power. A difference smaller than t
 rounds needs more rounds, not a conclusion. For a cold-cache variant, point
 `ISS_PIPELINE_CACHE_ROOT` at an empty folder in that variant only (not with `-SharePlayerCache`).
 
+## Findings 2026-10-25 (renderer v2, bench route)
+
+**How the diagnosis run was made.** A bench variant with `ISS_GPU_PROFILE=1` (GPU timestamps),
+`SHADPS4_FRAME_CSV` (`-FrameCsv`), `ISS_CP_PATH_CYCLES=1` (command processor time by path) and
+`ISS_READBACK_DIAG=1` with `ISS_READBACK_DIAG_LOG=<csv path>` (without the log path the readback
+log stays off; `ISS_READBACK_DIAG_START_FRAME` / `_FRAMES` limit it). Together they cost about 16%
+FPS: compare such runs with each other, never with a plain run. `ISS_NATIVE_PASSES_MISS_DETAIL=1`
+splits the `buffer` misses of the `NATIVE_PASSES_VK` line by cause (`buffer_miss[...]`).
+
+- **Not GPU-bound.** The GPU was about 51% busy in the diagnosis run. The `idle` of the
+  `Frame stats` line (`GPU thread ... idle N%`) is the command processor thread sleeping, not GPU
+  idle time.
+- **Top guest readback sites** (eboot offsets in the readback log's `rip`):
+  `guest+0x3f3eff` reads the GPU particle feedback count: it must stay precise, never relax it.
+  `guest+0x1717c0` reads the auto-exposure luminance: relaxing it (`ISS_TUNING`
+  `relaxed_site=0x1717c0`) is safe but gave no measurable FPS gain.
+- **Keep off:** `ISS_FEEDBACK_PAGE_READBACK=1` cost about 50% FPS, `ISS_FEEDBACK_EARLY_SUBMIT=1`
+  about 19%.
+- **Write-fault readbacks are logged with `rip=0`:** the guest RIP is not passed on from the write
+  fault handler (`port/gpu_v2/gpu/overrides/page_manager.cpp:892`, `Rasterizer::InvalidateMemory`),
+  so those rows cannot be attributed to a site.
+- **Pool/CP CPU time is not the limiter.** A branch that cut the native passes pool's CPU time by
+  about 15% lost 2.4% FPS, and the readback waits grew: making the pool and command processor
+  threads cheaper does not raise FPS on this route.
+
 ## Tests and rollout
 
 The standalone recorder test does not need Vulkan or MSYS2:
