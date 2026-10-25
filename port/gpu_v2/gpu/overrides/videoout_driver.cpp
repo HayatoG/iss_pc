@@ -123,9 +123,9 @@ private:
 };
 
 // The "Vblank:" line (with TLG_FRAME_STATS, every 5 s, beside "Frame stats"): ticks/s, how many
-// ticks came over 500 us late on the ideal vblank grid (the same grid as the hr clock, kept for
-// legacy too), the worst lateness and tick gap, and the hr clock's resyncs. Shows the legacy
-// timer's quantisation.
+// ticks came over 500 us late on the ideal vblank grid (the hr clock's grid, kept for legacy too;
+// an early tick re-anchors it), the worst lateness and tick gap, and the hr clock's resyncs.
+// Shows the legacy timer's quantisation.
 class VblankStats {
 public:
     using Clock = std::chrono::steady_clock;
@@ -148,6 +148,9 @@ public:
         if (late > std::chrono::microseconds(500)) ++late_ticks;
         max_late = std::max(max_late, late);
         ++ticks;
+        // An early tick (legacy catching up its debt) re-anchors the grid on itself, so the next
+        // lateness is measured from the tick that really came.
+        if (late < Clock::duration::zero()) grid = now;
         grid += period;
         if (now - grid > period) grid = now + period;
         const double window = std::chrono::duration<double>(now - window_start).count();
