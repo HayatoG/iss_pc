@@ -38,6 +38,7 @@
 #include "native_gbuffer.h"
 #include "native_passes.h"
 #include "pause_guard.h"
+#include "submit_gate.h"
 #include "unified_memory.h"
 namespace Vulkan {
 u32 ExecuteNativeShadowSuffix(Rasterizer&, const iss::native_shadow::Batch&, u32 first);
@@ -1313,6 +1314,46 @@ void Liverpool::Process(std::stop_token stoken) {
 
         VideoCore::StartCapture();
 
+        // End of a guest frame: the command buffer is submitted and the per frame work of the
+        // rasterizer runs (caches, readbacks, garbage collection).
+        const auto frame_end = [&] {
+            if(rasterizer)rasterizer->DrainDrawPipe(2);
+            VideoCore::EndCapture();
+            if (rasterizer) {
+                rasterizer->OnSubmit();
+                rasterizer->Flush();
+            }
+            ++processed_packets;
+        };
+        // ISS_FRAME_END_MARK: the frame ends whose submissions (every queue, up to the guest's
+        // SubmitDone) are all processed. In the loop (`idle` false), only while nothing but
+        // graphics submissions is queued: no compute task is suspended in the middle of its
+        // commands, and the next graphics task has not started (FIFO, the previous one just
+        // completed). submit_done stays set while frame ends are pending.
+        const auto run_frame_ends = [&](bool idle) {
+            u32 count = 0;
+            while (true) {
+                {
+                    std::scoped_lock lk{submit_mutex};
+                    if (pending_frame_ends.empty()) {
+                        submit_done = false;
+                        break;
+                    }
+                    if (!g4_ledger.Ready(pending_frame_ends.front())) break;
+                    if (!idle && num_submits.load(std::memory_order_relaxed) !=
+                                     g4_ledger.Issued(GfxQueueId) -
+                                         g4_ledger.Completed(GfxQueueId)) {
+                        break;
+                    }
+                    pending_frame_ends.pop_front();
+                }
+                if (idle && count != 0) VideoCore::StartCapture();
+                frame_end();
+                if (!idle) VideoCore::StartCapture();
+                ++count;
+            }
+        };
+
         curr_qid = -1;
 
         while (num_submits || num_commands ||
@@ -1417,6 +1458,10 @@ void Liverpool::Process(std::stop_token stoken) {
                     submits_completed.fetch_add(1, std::memory_order_release);
                 }
                 submit_cv.notify_all();
+                if (curr_qid == GfxQueueId && submit_done && !CpSplitActive() &&
+                    iss::submit_gate::FrameEndMarks()) {
+                    run_frame_ends(false);
+                }
             }
         }
 
@@ -1425,14 +1470,12 @@ void Liverpool::Process(std::stop_token stoken) {
         if (iss::unified::enabled && rasterizer) rasterizer->FlushUnifiedFences(true);
 
         if (submit_done) {
-            if(rasterizer)rasterizer->DrainDrawPipe(2);
-            VideoCore::EndCapture();
-            if (rasterizer) {
-                rasterizer->OnSubmit();
-                rasterizer->Flush();
+            if (iss::submit_gate::FrameEndMarks()) {
+                run_frame_ends(true);
+            } else {
+                frame_end();
+                submit_done = false;
             }
-            submit_done = false;
-            ++processed_packets;
         }
         account_time(true);
         Common::Perf::GpuThreadCpu().store(Common::Perf::CurrentCpu(), std::memory_order_relaxed);
@@ -4365,6 +4408,9 @@ void Liverpool::SubmitDone() noexcept {
     const auto mark_slot = frame_index % NumFrameMarks;
     frame_marks[mark_slot] = submits_issued.load(std::memory_order_relaxed);
     g4_frame_marks[mark_slot] = g4_ledger.Capture(frame_index);
+    if (iss::submit_gate::FrameEndMarks()) {
+        pending_frame_ends.push_back(g4_frame_marks[mark_slot]);
+    }
     ++frame_index;
     const u64 completed = submits_completed.load(std::memory_order_acquire);
     u64 in_flight = 0;

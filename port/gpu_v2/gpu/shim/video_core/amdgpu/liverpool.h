@@ -19,6 +19,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <deque>
 #include <queue>
 
 #include "common/assert.h"
@@ -488,6 +489,9 @@ private:
     std::array<u64, NumFrameMarks> frame_marks{};
     std::array<G4Stage1Ledger<NumTotalQueues>::MarkSnapshot, NumFrameMarks> g4_frame_marks{};
     u64 g4_shadow_global_ready_gap{};
+    /// ISS_FRAME_END_MARK: marks of the guest frame ends whose end of frame work the command
+    /// processor has not run yet, oldest first (submit_mutex).
+    std::deque<G4Stage1Ledger<NumTotalQueues>::MarkSnapshot> pending_frame_ends{};
     u64 frame_index{};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
