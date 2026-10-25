@@ -25,6 +25,7 @@ namespace iss::native_gbuffer { int InstallCensus(std::uint64_t base); }
 namespace iss { extern std::atomic<unsigned> g_preload_entries, g_preload_total; extern std::atomic<int> g_preload_phase; }
 #include <atomic>
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <chrono>
 #include <condition_variable>
@@ -635,18 +636,42 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
     std::unique_lock guard{ready_mutex};ready_cv.wait(guard,[]{return ready!=0;});return ready==1?0:-1;
 }
 
-// ISS_CP_CPU=L: the command processor thread limits the frame rate while several guest threads
-// spin on rdtsc waiting for it. The physical core of logical processor L is taken out of the
-// process default CPU sets (no other thread of the process runs there, its SMT sibling stays
-// idle) and the command processor is given logical processor L alone.
 uint64_t IssImageBase() { return host.image_base; }
+
+// ISS_CP_CPU: the command processor thread limits the frame rate while several guest threads
+// spin on rdtsc waiting for it, so it gets a physical core of its own.
+//   auto           the last physical core of the fastest class (the last P-core of a hybrid
+//                  CPU such as the i7-13700H: LP 10/11; the last core of any other CPU, LP 14/15
+//                  of an 8-core/16-thread one), never core 0. With fewer than 4 physical cores
+//                  the command processor is pinned but the core is not taken from the others.
+//   <L>            the physical core of logical processor L (a number: the original behaviour).
+//   empty, off, none, -1   no pinning.
+// Pinned: the core is taken out of the process default CPU sets (no other thread of the process
+// runs there, its SMT sibling stays idle) and the command processor gets one logical processor
+// of it alone (L, or the core's first one for auto). Only processor group 0 is used.
+namespace {
+enum class CpMode { Off, Auto, Manual };
+CpMode cp_mode(const char* value) {
+    if (!value || !*value) return CpMode::Off;
+    std::string v = value;
+    for (auto& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (v == "off" || v == "none" || v == "-1") return CpMode::Off;
+    if (v == "auto") return CpMode::Auto;
+    return CpMode::Manual;
+}
+} // namespace
 
 #ifndef _WIN32
 // Linux: the command processor thread alone on logical processor L (the other threads keep
 // their affinity: CPU sets have no Linux equivalent that excludes a core from a process).
+// `auto` has no topology code here and pins nothing.
 void IssPinCommandProcessor() {
     const char* value = std::getenv("ISS_CP_CPU");
-    if (!value || !*value) return;
+    const CpMode mode = cp_mode(value);
+    if (mode != CpMode::Manual) {
+        if (mode == CpMode::Auto) std::fprintf(stderr, "PORT_TUNING cp_cpu=auto mode=off (auto: Windows only)\n");
+        return;
+    }
     long wanted = std::strtol(value, nullptr, 10);
     const long count = sysconf(_SC_NPROCESSORS_ONLN);
     if (count > 0 && wanted >= count) wanted = count - 1; // fewer logical processors than asked
@@ -654,14 +679,18 @@ void IssPinCommandProcessor() {
     CPU_ZERO(&set);
     CPU_SET(static_cast<int>(wanted), &set);
     const int ok = pthread_setaffinity_np(pthread_self(), sizeof(set), &set) == 0;
-    std::fprintf(stderr, "PORT_TUNING cp_cpu=%ld thread=%d\n", wanted, ok);
+    std::fprintf(stderr, "PORT_TUNING cp_cpu=%ld mode=manual thread=%d\n", wanted, ok);
 }
 #else
 
+
+static const char* cp_mode_name(CpMode mode) {
+    return mode == CpMode::Auto ? "auto" : mode == CpMode::Manual ? "manual" : "off";
+}
+
 void IssPinCommandProcessor() {
     const char* value = std::getenv("ISS_CP_CPU");
-    if (!value || !*value) return;
-    const long wanted = std::strtol(value, nullptr, 10);
+    const CpMode mode = cp_mode(value);
     ULONG length = 0;
     GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
     std::vector<char> buffer(length);
@@ -671,41 +700,115 @@ void IssPinCommandProcessor() {
         std::fprintf(stderr, "PORT_TUNING cp_cpu failed: no CPU set information\n");
         return;
     }
-    struct Set { ULONG id; unsigned core; unsigned logical; unsigned group; };
+    struct Set { ULONG id; unsigned core; unsigned logical; unsigned group; unsigned efficiency; };
     std::vector<Set> sets;
     for (size_t offset = 0; offset < length;) {
         const auto* info = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + offset);
         if (info->Type == CpuSetInformation) {
             sets.push_back({info->CpuSet.Id, info->CpuSet.CoreIndex,
-                            info->CpuSet.LogicalProcessorIndex, info->CpuSet.Group});
+                            info->CpuSet.LogicalProcessorIndex, info->CpuSet.Group,
+                            info->CpuSet.EfficiencyClass});
         }
         offset += info->Size;
     }
-    const Set* mine = nullptr;
+    // Physical cores: the logical processors with the same (Group, CoreIndex), SMT siblings.
+    struct Core { unsigned group, core, efficiency; std::vector<const Set*> lps; };
+    std::vector<Core> cores;
     for (const auto& set : sets) {
-        if (set.group == 0 && set.logical == wanted) mine = &set;
-    }
-    // A CPU with fewer logical processors than asked (ISS_CP_CPU=14 on a 6-core/12-thread CPU):
-    // the last one of group 0, so the command processor still gets a core of its own.
-    if (!mine) {
-        for (const auto& set : sets) {
-            if (set.group == 0 && (!mine || set.logical > mine->logical)) mine = &set;
+        auto it = std::find_if(cores.begin(), cores.end(),
+                               [&](const Core& c) { return c.group == set.group && c.core == set.core; });
+        if (it == cores.end()) {
+            cores.push_back({set.group, set.core, set.efficiency, {}});
+            it = cores.end() - 1;
         }
-        if (mine) std::fprintf(stderr, "PORT_TUNING cp_cpu %ld not found: using %u\n", wanted, unsigned(mine->logical));
+        it->lps.push_back(&set);
     }
-    if (!mine) {
-        std::fprintf(stderr, "PORT_TUNING cp_cpu failed: logical processor %ld not found\n", wanted);
+    for (auto& core : cores) {
+        std::sort(core.lps.begin(), core.lps.end(), [](const Set* a, const Set* b) { return a->logical < b->logical; });
+    }
+    std::map<unsigned, std::pair<unsigned, unsigned>> classes; // efficiency class -> cores, LPs
+    for (const auto& core : cores) {
+        auto& entry = classes[core.efficiency];
+        entry.first++;
+        entry.second += static_cast<unsigned>(core.lps.size());
+    }
+    const bool hybrid = classes.size() > 1;
+    const unsigned top_class = classes.empty() ? 0 : classes.rbegin()->first;
+    {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            std::string text;
+            for (auto it = classes.rbegin(); it != classes.rend(); ++it) {
+                char item[96];
+                const char* name = !hybrid ? "all" : it->first == top_class ? "P" : "E";
+                std::snprintf(item, sizeof(item), "%s%s %uc/%ut class %u", text.empty() ? "" : ", ", name,
+                              it->second.first, it->second.second, it->first);
+                text += item;
+            }
+            std::fprintf(stderr, "PLACEMENT topology: %zu LPs/%zu cores, hybrid=%d, %s\n", sets.size(),
+                         cores.size(), hybrid ? 1 : 0, text.c_str());
+        }
+    }
+    if (mode == CpMode::Off) {
+        std::fprintf(stderr, "PORT_TUNING cp_cpu=%s mode=off hybrid=%d\n", value && *value ? value : "(empty)",
+                     hybrid ? 1 : 0);
         return;
     }
+    const Set* mine = nullptr;
+    bool isolate = true;
+    long wanted = -1;
+    if (mode == CpMode::Auto) {
+        // The last core of group 0 in the fastest class (by its first logical processor), not core 0.
+        const Core* pick = nullptr;
+        size_t group0_cores = 0;
+        for (const auto& core : cores) {
+            if (core.group != 0) continue;
+            group0_cores++;
+            if (core.efficiency != top_class || core.lps.front()->logical == 0) continue;
+            if (!pick || core.lps.front()->logical > pick->lps.front()->logical) pick = &core;
+        }
+        if (!pick) {
+            std::fprintf(stderr, "PORT_TUNING cp_cpu=auto mode=auto failed: no core besides core 0; not pinned\n");
+            return;
+        }
+        mine = pick->lps.front();
+        wanted = mine->logical;
+        isolate = group0_cores >= 4; // a 2- or 3-core CPU keeps every core for the game's threads
+    } else {
+        wanted = std::strtol(value, nullptr, 10);
+        for (const auto& set : sets) {
+            if (set.group == 0 && set.logical == wanted) mine = &set;
+        }
+        // A CPU with fewer logical processors than asked (ISS_CP_CPU=14 on a 6-core/12-thread CPU):
+        // the last one of group 0, so the command processor still gets a core of its own.
+        if (!mine) {
+            for (const auto& set : sets) {
+                if (set.group == 0 && (!mine || set.logical > mine->logical)) mine = &set;
+            }
+            if (mine) std::fprintf(stderr, "PORT_TUNING cp_cpu %ld not found: using %u\n", wanted, unsigned(mine->logical));
+        }
+        if (!mine) {
+            std::fprintf(stderr, "PORT_TUNING cp_cpu failed: logical processor %ld not found\n", wanted);
+            return;
+        }
+    }
     std::vector<ULONG> others;
+    std::string siblings;
     for (const auto& set : sets) {
         if (set.group != mine->group || set.core != mine->core) others.push_back(set.id);
+        else siblings += (siblings.empty() ? "" : "/") + std::to_string(set.logical);
     }
-    const BOOL process_ok = !others.empty() &&
+    const BOOL process_ok = isolate && !others.empty() &&
         SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(), static_cast<ULONG>(others.size()));
     const ULONG id = mine->id;
     const BOOL thread_ok = SetThreadSelectedCpuSets(GetCurrentThread(), &id, 1);
-    std::fprintf(stderr, "PORT_TUNING cp_cpu=%ld core=%u process_default=%d(%zu sets) thread=%d\n",
-                 wanted, unsigned(mine->core), int(process_ok), others.size(), int(thread_ok));
+    std::fprintf(stderr,
+                 "PORT_TUNING cp_cpu=%s mode=%s lp=%u core=%u lps=%s class=%u hybrid=%d "
+                 "process_default=%d(%zu sets%s) thread=%d\n",
+                 mode == CpMode::Auto ? "auto" : std::to_string(wanted).c_str(), cp_mode_name(mode),
+                 unsigned(mine->logical), unsigned(mine->core), siblings.c_str(), unsigned(mine->efficiency),
+                 hybrid ? 1 : 0, int(process_ok), isolate ? others.size() : size_t(0),
+                 isolate ? "" : ", not isolated: fewer than 4 cores", int(thread_ok));
 }
 #endif
