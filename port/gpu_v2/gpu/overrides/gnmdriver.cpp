@@ -101,9 +101,9 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
     {
         std::unique_lock lock{m_wait_idle};
         submission_lock = 0;
+        gpu_idle_signal_ns.store(Common::Perf::NowNs(), std::memory_order_relaxed);
         cv_lock.notify_all();
     }
-    gpu_idle_signal_ns.store(Common::Perf::NowNs(), std::memory_order_relaxed);
 }
 
 // Who waits for the submission lock (Submit gate stats).
@@ -2423,9 +2423,17 @@ static inline s32 PerformSubmit(u32 count, const u32* dcb_gpu_addrs[], u32* dcb_
         if (iss::submit_gate::GfxWaits()) {
             WaitGpuIdle(GateSite::Gfx);
         } else {
-            // ISS_SUBMIT_GATE=off: no submission lock, wait until the command processor has
-            // processed every submission before reading its registers (once).
-            liverpool->WaitGpuIdle();
+            // ISS_SUBMIT_GATE=off: no submission lock. Wait (bounded, under m_submit_lock) for
+            // the command processor to process every submission before reading its registers
+            // (once): queued work may wait on a label only a later DingDong or a guest CPU
+            // write satisfies, so an unbounded wait could hang the guest.
+            if (!liverpool->WaitGpuIdleFor(std::chrono::milliseconds{50})) {
+                static std::atomic_flag logged{};
+                if (!logged.test_and_set(std::memory_order_relaxed)) {
+                    LOG_WARNING(Lib_GnmDriver, "native passes seed: command processor not idle "
+                                               "after 50 ms, seeding from its current registers");
+                }
+            }
         }
         iss::native_passes::Seed(liverpool->regs.reg_array.data(),
                                  reinterpret_cast<const u32*>(&liverpool->GfxCsState()),

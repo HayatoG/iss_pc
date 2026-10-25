@@ -1253,11 +1253,15 @@ void Liverpool::RefreshCpControlPendingLocked(CpLane lane) {
                                          std::memory_order_release);
 }
 
-bool Liverpool::OnlyGraphicsSubmitsPending() {
-    std::scoped_lock lk{submit_mutex};
+bool Liverpool::OnlyGraphicsSubmitsPendingLocked() const {
     const u64 gfx_pending = g4_ledger.Issued(GfxQueueId) -
                             g4_ledger.Completed(GfxQueueId);
     return num_submits.load(std::memory_order_relaxed) == gfx_pending;
+}
+
+bool Liverpool::OnlyGraphicsSubmitsPending() {
+    std::scoped_lock lk{submit_mutex};
+    return OnlyGraphicsSubmitsPendingLocked();
 }
 
 bool Liverpool::GraphicsSubmitsPending() {
@@ -1339,12 +1343,21 @@ void Liverpool::Process(std::stop_token stoken) {
                         submit_done = false;
                         break;
                     }
-                    if (!g4_ledger.Ready(pending_frame_ends.front())) break;
-                    if (!idle && num_submits.load(std::memory_order_relaxed) !=
-                                     g4_ledger.Issued(GfxQueueId) -
-                                         g4_ledger.Completed(GfxQueueId)) {
+                    if (!g4_ledger.Ready(pending_frame_ends.front())) {
+                        if (idle && num_submits.load(std::memory_order_relaxed) == 0) {
+                            // Nothing queued, yet the frame end is not reached: should not
+                            // happen. submit_done is cleared so the command processor does not
+                            // spin on it; the mark is retried at the next frame end.
+                            static std::atomic_flag logged{};
+                            if (!logged.test_and_set(std::memory_order_relaxed)) {
+                                LOG_ERROR(Render, "frame end mark {} not ready while idle",
+                                          pending_frame_ends.front().id);
+                            }
+                            submit_done = false;
+                        }
                         break;
                     }
+                    if (!idle && !OnlyGraphicsSubmitsPendingLocked()) break;
                     pending_frame_ends.pop_front();
                 }
                 if (idle && count != 0) VideoCore::StartCapture();
