@@ -782,6 +782,8 @@ struct SubmitState {
     std::deque<ScanItem> scans;
     // Statistics.
     std::atomic<u64> submits{}, scan_us{}, dcbs_recorded{}, jobs_done{}, cp_waits{}, cp_wait_us{};
+    // The pool: time recording (all threads), work_cv wait returns, and those that found no job.
+    std::atomic<u64> pool_busy_us{}, pool_wakes{}, pool_idle_wakes{};
 };
 SubmitState submit;
 
@@ -1048,22 +1050,113 @@ std::atomic<u64> job_sequence{};
 std::array<std::atomic<u64>, MaxPoolThreads> running_jobs{};
 std::atomic<u32> pool_slots{};
 
+u64 NowUs();
+
+// ISS_NATIVE_PASSES_CPU=off|ecore|pcore: the CPU sets each pool thread restricts itself to (once,
+// at its start). ecore: efficiency class 0; pcore: the highest class. Both leave out the sets the
+// process default excludes (ISS_CP_CPU's core, see IssPinCommandProcessor in bridge.cpp). off
+// (default), a non-hybrid CPU or Linux: unchanged.
+enum class PoolCpu { Off, ECore, PCore };
+PoolCpu PoolCpuMode() {
+    static const PoolCpu mode = [] {
+        const char* p = std::getenv("ISS_NATIVE_PASSES_CPU");
+        if (p && std::strcmp(p, "ecore") == 0) return PoolCpu::ECore;
+        if (p && std::strcmp(p, "pcore") == 0) return PoolCpu::PCore;
+        return PoolCpu::Off;
+    }();
+    return mode;
+}
+
+void RestrictPoolThread() {
+    const PoolCpu mode = PoolCpuMode();
+    if (mode == PoolCpu::Off) return;
+    static std::atomic<bool> logged{};
+    const bool log = !logged.exchange(true); // one line, from the first pool thread
+    const char* name = mode == PoolCpu::ECore ? "ecore" : "pcore";
+#ifdef _WIN32
+    ULONG length = 0;
+    GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
+    std::vector<char> buffer(length);
+    if (!length || !GetSystemCpuSetInformation(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()),
+                                               length, &length, GetCurrentProcess(), 0)) {
+        if (log) std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: no CPU set information\n", name);
+        return;
+    }
+    std::vector<std::pair<ULONG, unsigned>> sets; // id, efficiency class
+    unsigned low = ~0u, high = 0;
+    for (size_t offset = 0; offset < length;) {
+        const auto* info = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + offset);
+        if (!info->Size) break;
+        if (info->Type == CpuSetInformation) {
+            const unsigned efficiency = info->CpuSet.EfficiencyClass;
+            sets.emplace_back(info->CpuSet.Id, efficiency);
+            low = std::min(low, efficiency);
+            high = std::max(high, efficiency);
+        }
+        offset += info->Size;
+    }
+    if (sets.empty() || low == high) {
+        if (log) std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: not a hybrid CPU\n", name);
+        return;
+    }
+    // The process default: every set but the command processor's core once it is pinned; none
+    // (every set) otherwise. A thread's selected sets override it, so it is applied here.
+    ULONG count = 0;
+    GetProcessDefaultCpuSets(GetCurrentProcess(), nullptr, 0, &count);
+    std::vector<ULONG> defaults(count);
+    if (count && !GetProcessDefaultCpuSets(GetCurrentProcess(), defaults.data(), count, &count))
+        defaults.clear();
+    defaults.resize(std::min<size_t>(defaults.size(), count));
+    const unsigned wanted = mode == PoolCpu::ECore ? 0u : high;
+    std::vector<ULONG> ids;
+    size_t excluded = 0;
+    for (const auto& [id, efficiency] : sets) {
+        if (efficiency != wanted) continue;
+        if (!defaults.empty() && std::find(defaults.begin(), defaults.end(), id) == defaults.end()) {
+            ++excluded;
+            continue;
+        }
+        ids.push_back(id);
+    }
+    if (ids.empty()) {
+        if (log)
+            std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: no CPU set of class %u\n", name, wanted);
+        return;
+    }
+    const BOOL ok = SetThreadSelectedCpuSets(GetCurrentThread(), ids.data(), ULONG(ids.size()));
+    if (log)
+        std::fprintf(stderr,
+                     "NATIVE_PASSES_POOL cpu=%s class=%u sets=%zu excluded=%zu(process default) thread=%d\n",
+                     name, wanted, ids.size(), excluded, int(ok));
+#else
+    if (log) std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: CPU sets are Windows-only\n", name);
+#endif
+}
+
 void PoolThread() {
     SetThreadDescription(GetCurrentThread(), L"ISS:NativePassesPool");
+    RestrictPoolThread();
     auto lane = NewJobLane();
     const u32 slot = pool_slots.fetch_add(1) % MaxPoolThreads;
     for (;;) {
         Job job;
         {
             std::unique_lock lock{submit.pool_mutex};
-            submit.work_cv.wait(lock, [] { return !submit.jobs.empty(); });
+            // work_cv.wait(lock, [] { return !submit.jobs.empty(); }) spelled out, to count wakeups.
+            while (submit.jobs.empty()) {
+                submit.work_cv.wait(lock);
+                submit.pool_wakes.fetch_add(1, std::memory_order_relaxed);
+                if (submit.jobs.empty()) submit.pool_idle_wakes.fetch_add(1, std::memory_order_relaxed);
+            }
             job = std::move(submit.jobs.front());
             submit.jobs.pop_front();
         }
         // seq_cst: the job's image generation reads come after this store, and a free's ticket
         // read after its bump sees it (see WaitRecordingBefore).
         running_jobs[slot].store(job_sequence.fetch_add(1) + 1);
+        const u64 busy_t0 = NowUs();
         RecordCommandBuffer(*lane, job.begin, job.end, job.start);
+        submit.pool_busy_us.fetch_add(NowUs() - busy_t0, std::memory_order_relaxed);
         running_jobs[slot].store(0, std::memory_order_release);
         submit.jobs_done.fetch_add(1, std::memory_order_relaxed);
         if (job.work->job_done) job.work->job_done[job.index].store(1, std::memory_order_release);
@@ -1457,19 +1550,35 @@ void ScanCommandBuffer(const u32* begin, const u32* end, const std::shared_ptr<D
     work->jobs_left.store(n, std::memory_order_relaxed);
 }
 
-void StartPool() {
-    if (!submit.threads.empty()) return;
+u32 PoolSize() {
     static const u32 n = [] {
         const char* p = std::getenv("ISS_NATIVE_PASSES_THREADS");
         return p ? u32(std::max(1, std::atoi(p))) : 6u;
     }();
+    return n;
+}
+
+void StartPool() {
+    if (!submit.threads.empty()) return;
+    const u32 n = PoolSize();
     for (u32 i = 0; i < n; ++i) submit.threads.emplace_back(PoolThread);
+}
+
+// ISS_NATIVE_PASSES_WAKE=all|one: QueueJobs wakes every pool thread (all, default) or one per
+// job queued, at most the pool's size (one).
+bool WakeOne() {
+    static const bool one = [] {
+        const char* p = std::getenv("ISS_NATIVE_PASSES_WAKE");
+        return p && std::strcmp(p, "one") == 0;
+    }();
+    return one;
 }
 
 // Hands the jobs of scanned command buffers to the pool. first: ahead of the queued ones (a
 // compute queue's submission: its submitting thread waits for them).
 void QueueJobs(std::vector<Job>& jobs, const std::vector<std::shared_ptr<DcbWork>>& works,
                bool first = false) {
+    const size_t added = jobs.size();
     {
         std::scoped_lock pool_lock{submit.pool_mutex};
         if (first)
@@ -1479,7 +1588,15 @@ void QueueJobs(std::vector<Job>& jobs, const std::vector<std::shared_ptr<DcbWork
         for (const auto& work : works) work->scanned.store(true, std::memory_order_release);
     }
     jobs.clear();
-    submit.work_cv.notify_all();
+    if (WakeOne()) {
+        // No job is left with every thread asleep: a thread not waiting now checks the queue
+        // under pool_mutex before it waits, and each thread woken here pops jobs until the
+        // queue is empty.
+        const size_t wakes = std::min<size_t>(added, PoolSize());
+        for (size_t i = 0; i < wakes; ++i) submit.work_cv.notify_one();
+    } else {
+        submit.work_cv.notify_all();
+    }
     submit.done_cv.notify_all();
 }
 
@@ -1789,12 +1906,16 @@ void Report() {
     if (const u64 n = submit.submits.load(std::memory_order_relaxed))
         std::fprintf(stderr,
                      "NATIVE_PASSES_SUBMIT submits=%llu dcbs=%llu jobs=%llu scan_us/submit=%llu "
-                     "cp_waits=%llu cp_wait_us/submit=%llu\n",
+                     "cp_waits=%llu cp_wait_us/submit=%llu pool_busy_us/submit=%llu pool_wakes=%llu "
+                     "pool_idle_wakes=%llu wake=%s\n",
                      (unsigned long long)n, (unsigned long long)submit.dcbs_recorded.load(),
                      (unsigned long long)submit.jobs_done.load(),
                      (unsigned long long)(submit.scan_us.load() / n),
                      (unsigned long long)submit.cp_waits.load(),
-                     (unsigned long long)(submit.cp_wait_us.load() / n));
+                     (unsigned long long)(submit.cp_wait_us.load() / n),
+                     (unsigned long long)(submit.pool_busy_us.load() / n),
+                     (unsigned long long)submit.pool_wakes.load(),
+                     (unsigned long long)submit.pool_idle_wakes.load(), WakeOne() ? "one" : "all");
     if (const u64 n = asc_stats.submits.load(std::memory_order_relaxed))
         std::fprintf(stderr,
                      "NATIVE_ASC submits=%llu ibs=%llu dispatches=%llu jobs=%llu scan_us/submit=%.1f "
