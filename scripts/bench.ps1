@@ -11,12 +11,15 @@ Automated, repeatable A/B benchmark of inFAMOUS Second Son on Windows (renderer 
            first: every later run starts from that same copy, never from the player's saves (the
            game's Continue loads the newest save in it).
   run      Replays the route: up to -WarmupRuns (2) warm-up runs per variant (discarded; they stop
-           early once a run compiled no shaders; none with -NoWarmup), then
-           -Rounds rounds (default 3), each variant once per round, the order reversed every
-           other round (A B, B A, A B). Each run gets its own data folder (a copy of the save) and
-           its own launcher settings; the shader/pipeline caches are linked (junctions) to the
-           variant's own cache copy, so runs stay warm. Exit code 3 when a measured run did not
-           end cleanly.
+           early once a run compiled no shaders; none with -NoWarmup; skipped for a variant whose
+           cache slot's last run had the same build and settings and compiled nothing, unless
+           -AlwaysWarmup), then rounds, each variant once per round, the order reversed every
+           other round (A B, B A, A B): -Rounds N fixed, else adaptive, -MinRounds (3) to
+           -MaxRounds (5), stopping early once every variant's paired avg_fps diff vs the control
+           is clearly outside the noise or its 90% CI within +-EquivPct (1%). Each run gets its own
+           data folder (a copy of the save) and its own launcher settings; the shader/pipeline
+           caches are linked (junctions) to a cache copy of the bench (a persistent slot by
+           default), so runs stay warm. Exit code 3 when a measured run did not end cleanly.
   compare  Table of the session: per variant mean +- stdev of avg_fps, low1_fps, p99_ms,
            over33..., % diff vs the control variant and '~' when the diff is within 2x the
            control's stdev (noise; only when that stdev is above 0). Uses
@@ -26,9 +29,14 @@ Automated, repeatable A/B benchmark of inFAMOUS Second Son on Windows (renderer 
            -ExcludeDrift leaves such runs out.
 
 Caches: by default the benchmark never writes into the player's caches. Each variant (and the
-recording, as '_record') has its own copy under <BenchDir>\cache\<variant>\, seeded on first use
+recording, as '_record') has its own copy under <BenchDir>\cache\<key>\, seeded on first use
 by copying the player's caches (cache, gpu-0..gpu-19, user\cache; read only, nothing is moved)
-and reused by later runs. -ResetBenchCache deletes and seeds again the copies this command uses.
+and reused by later runs and sessions. The key is the variant's slot by position (-CacheMode
+slot, the default: _slot0 for the control, _slot1, ... ; a variant that sets a shader-profile
+ISS_TUNING key gets _slotN-p<hash>), its name (-CacheMode variant, or the variant key
+'bench:cache' = 'variant'), or a name of its own ('bench:cache' = '<name>'). A slot keeps the
+entries of every variant that used it: give a variant that generates other shaders or
+pipelines its own name. -ResetBenchCache deletes and seeds again the copies this command uses.
 -SharePlayerCache links the runs to the player's real caches instead (warm without a copy, but
 every run writes there); it refuses variants that change the shader profile (ISS_TUNING keys
 lds_barriers_multi_wave, wave_memory_barriers: the game would move the player's cache aside to
@@ -37,7 +45,8 @@ lds_barriers_multi_wave, wave_memory_barriers: the game would move the player's 
 Layout of -BenchDir (default %USERPROFILE%\iss-bench):
   route.txt                    the recorded route (TLG_PAD_REPLAY format)
   save\                        savedata, tlg.ini and launcher settings.json the route starts from
-  cache\<variant>\             the variant's own caches (seed.json: seeded from where, when)
+  cache\<key>\                 a cache copy: _slotN or a variant/bench:cache name (seed.json: seeded
+                               from where, when; slot.json: its last run, build/settings hash, compiles)
   cache\_record\               the recording's own caches
   cache\_shared\               -SharePlayerCache: the caches the player's folder does not have
   runs\<session>\variants.json the variants of the session, control first, and 'build': the git
@@ -69,7 +78,26 @@ param(
     # front of PATH for this process when SDL3.dll is not on PATH yet.
     [string]$MsysBin = 'C:\msys64\clang64\bin',
     [int]$Seconds = 90,
+    # Fixed number of rounds. Without it the rounds are adaptive: -MinRounds to -MaxRounds.
     [int]$Rounds = 3,
+    # Adaptive rounds: after each round from -MinRounds on, stop once every test variant's paired
+    # avg_fps diff vs the control is clearly outside the noise or clearly within +-EquivPct.
+    [int]$MinRounds = 3,
+    [int]$MaxRounds = 5,
+    # Adaptive: "no change" when the 90% CI of the paired diff lies within +-this %.
+    [double]$EquivPct = 1.0,
+    # Adaptive: the per-run noise (CV of avg_fps, %) assumed at least (A/A sessions: about 1.2%);
+    # a "clear difference" must exceed -NoiseK x max(this, the control's own CV).
+    [double]$NoiseCvPct = 1.2,
+    # Adaptive: the stdev of the per-round paired diff (%) assumed at least (a few lucky rounds that
+    # agree closely must not end the session).
+    [double]$PairSdFloorPct = 0.5,
+    # Caches: 'slot' (default) maps variants by position onto persistent slots reused by every
+    # session (<BenchDir>\cache\_slot0 = control, _slot1, ...); 'variant' = one copy per variant name.
+    # A variant can pick its own with the key 'bench:cache' = 'variant' or '<name>'.
+    [ValidateSet('slot', 'variant')][string]$CacheMode = 'slot',
+    # run: never skip the warm-up of a variant whose cache slot is known to be warm.
+    [switch]$AlwaysWarmup,
     # Variant name -> @{ VAR = 'value' }; '' or $null unsets VAR. Keys 'ini:<key>' set tlg.ini keys.
     [System.Collections.IDictionary]$Variants,
     # The same as JSON: { "A": {}, "B": { "ISS_TUNING": "x=1" } } (file order kept).
@@ -140,8 +168,11 @@ function Show-Usage {
     Info @'
 Usage: scripts\bench.ps1 <record|run|compare> [options]   (Get-Help scripts\bench.ps1 -Detailed)
   record  [-Exe <launcher>] [-UserDir <data folder>] [-Seconds 90] [-Force] [-KeepOpen]
-  run     [-Exe <launcher>] [-Variants @{...} | -VariantFile <json>] [-Rounds 3] [-NoWarmup]
-          [-WarmupRuns 2] [-TimeoutSec 600] [-Session <name>] [-FrameCsv] [-SkipMs <ms>]
+  run     [-Exe <launcher>] [-Variants @{...} | -VariantFile <json>] [-NoWarmup] [-WarmupRuns 2]
+          [-AlwaysWarmup] [-TimeoutSec 600] [-Session <name>] [-FrameCsv] [-SkipMs <ms>]
+          rounds: [-Rounds N] (fixed) | [-MinRounds 3] [-MaxRounds 5] [-EquivPct 1]
+          [-NoiseCvPct 1.2] [-PairSdFloorPct 0.5] (adaptive, the default)
+          [-CacheMode slot|variant] (variant key 'bench:cache' = 'variant' | '<name>')
   compare [-Session <name|folder>] [-Control <variant>] [-Detail] [-Python <exe>] [-NoiseK 2]
           [-DriftPct 5] [-ExcludeDrift]
   caches  (record/run) [-ResetBenchCache] (delete and seed again the bench's own copies)
@@ -1036,11 +1067,19 @@ function Get-VariantSet {
     foreach ($name in $raw.Keys) {
         if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$') { Fail "variant name '$name': use letters, digits, _ . - (it names folders and ISS_BENCH_LABEL)" }
         $vars = ConvertTo-Ordered $raw[$name] "variant '$name'"
-        $envs = [ordered]@{}; $ini = [ordered]@{}
+        $envs = [ordered]@{}; $ini = [ordered]@{}; $cache = $null
         foreach ($k in $vars.Keys) {
             $v = $vars[$k]
             if ($null -ne $v -and -not ($v -is [string] -or $v -is [ValueType])) { Fail "variant '$name': $k must be a string or number" }
             if ($k -like 'ini:*') { $ini[$k.Substring(4)] = $v; continue }
+            if ($k -like 'bench:*') {
+                if ($k -ne 'bench:cache') { Fail "variant '$name': unknown key '$k' (bench:cache is the only bench: key)" }
+                $cache = "$v".Trim()
+                if ($cache -and $cache -ne 'variant' -and $cache -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$') {
+                    Fail "variant '$name': bench:cache '$cache': 'variant' (a copy named after the variant) or a name of letters, digits, _ . -"
+                }
+                continue
+            }
             if ($k -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Fail "variant '$name': '$k' is not an environment variable name" }
             $twin = $k -replace '^TLG_', 'ISS_'
             if ($Reserved -contains $k.ToUpper() -or $Reserved -contains $twin.ToUpper() -or $k -match '^(ISS|TLG)_USER_DIR$') {
@@ -1048,7 +1087,7 @@ function Get-VariantSet {
             }
             $envs[$k] = $v
         }
-        $set[$name] = @{ Env = $envs; Ini = $ini }
+        $set[$name] = @{ Env = $envs; Ini = $ini; Cache = $cache }
     }
     if ($Control -and -not $set.Contains($Control)) { Fail "-Control '$Control' is not one of: $($set.Keys -join ', ')" }
     if ($Control) {
@@ -1165,9 +1204,201 @@ Your own saves and settings are not touched: the game runs on a copy in $recDir.
     Info "Route saved: $route ($samples samples). Next: scripts\bench.ps1 run -Variants ..."
 }
 
+# ------------------------------------------------------------------------- cache slots, warm state
+function Get-ShortHash([string]$text, [int]$len = 8) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash($Utf8.GetBytes($text)) } finally { $sha.Dispose() }
+    return (-join ($h | ForEach-Object { $_.ToString('x2') })).Substring(0, $len)
+}
+
+# The shader-profile items (ISS_TUNING keys of $ProfileTuningKeys) a run of this variant sees, sorted.
+function Get-ProfileItems($envs) {
+    $items = @()
+    foreach ($name in 'ISS_TUNING', 'TLG_TUNING') {
+        $v = Get-RunValue $envs $name
+        if (-not $v) { continue }
+        foreach ($item in $v.Split(',')) {
+            $k = $item.Split('=')[0].Trim()
+            if ($ProfileTuningKeys -contains $k) { $items += $item.Trim() }
+        }
+    }
+    return @($items | Sort-Object -Unique)
+}
+
+# Variant -> @{ Key = <folder under cache\>; How = <why> }. Slots go by position (control first):
+# the same position reuses the same warm copy in every session. A variant that sets shader-profile
+# keys gets a slot of that profile (_slotN-p<hash>): another profile would make the game move the
+# cache aside. 'bench:cache' = 'variant' / '<name>' and -CacheMode variant name the copy instead.
+function Get-CacheKeys($set) {
+    $out = [ordered]@{}; $i = 0; $owner = @{}
+    foreach ($v in $set.Keys) {
+        $c = $set[$v].Cache
+        if ($c -eq 'variant' -or (-not $c -and $CacheMode -eq 'variant')) { $key = $v; $how = 'named after the variant' }
+        elseif ($c) { $key = $c; $how = 'bench:cache' }
+        else {
+            $key = "_slot$i"; $how = "slot $i"
+            $prof = @(Get-ProfileItems $set[$v].Env)
+            if ($prof.Count) { $key += '-p' + (Get-ShortHash ($prof -join ',')); $how += " of shader profile $($prof -join ',')" }
+        }
+        if ($owner.ContainsKey($key)) {
+            Fail "variants '$($owner[$key])' and '$v' would share the cache copy cache\$key; give one its own with 'bench:cache' = '<name>'"
+        }
+        $owner[$key] = $v
+        $out[$v] = @{ Key = $key; How = $how }
+        $i++
+    }
+    return $out
+}
+
+# A hash of what decides which shaders/pipelines a run builds: the probe executables (SHA256), the
+# launcher, the ISS_/TLG_/SHADPS4_ variables the run sees (the shell's, mods, the variant's) and its
+# tlg.ini keys. $null without a probe hash (the build is unknown: never treated as warm).
+function Get-RunSignature($def, $runIni, $build, $launcher, $mods) {
+    $probes = @(@($build.probes) | Where-Object { $_ -and $_.sha256 } | ForEach-Object { $_.sha256 })
+    if (-not $probes.Count) { return $null }
+    $envs = @{}
+    $all = [Environment]::GetEnvironmentVariables('Process')
+    foreach ($k in $all.Keys) {
+        $n = "$k".ToUpper()
+        if ($n -notmatch '^(ISS|TLG|SHADPS4)_') { continue }
+        if ($Reserved -contains ($n -replace '^TLG_', 'ISS_') -or $n -match '^(ISS|TLG)_(USER_DIR|GPU_USER_DIR)$') { continue }
+        $envs[$n] = "$($all[$k])"
+    }
+    foreach ($k in $mods.Keys) { $envs[$k.ToUpper()] = "$($mods[$k])" }
+    foreach ($k in $def.Env.Keys) {
+        $u = $k.ToUpper()
+        if ($u -like 'ISS_*') { $envs.Remove('TLG_' + $u.Substring(4)) }
+        $v = $def.Env[$k]
+        if ($null -eq $v -or "$v" -eq '') { $envs.Remove($u) } else { $envs[$u] = "$v" }
+    }
+    $lines = @("exe=$($launcher.Exe)") + @($probes | ForEach-Object { "probe=$_" }) +
+        @($envs.Keys | Sort-Object | ForEach-Object { "env:$_=$($envs[$_])" }) +
+        @(@($runIni.Keys) | Sort-Object | ForEach-Object { "ini:$_=$($runIni[$_])" })
+    return Get-ShortHash ($lines -join "`n") 16
+}
+
+# <cache copy>\slot.json: the last run that used the copy (written after every run of a session).
+# $null without seed.json too: Initialize-BenchCache (after the warm-up plan) deletes and seeds
+# such a copy again, so its slot.json would describe caches that are gone.
+function Read-SlotState([string]$key) {
+    $root = Get-BenchCacheRoot $key
+    $p = Join-Path $root 'slot.json'
+    if (-not [IO.File]::Exists($p) -or -not [IO.File]::Exists((Join-Path $root 'seed.json'))) { return $null }
+    try { $s = Get-Content -LiteralPath $p -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    if (-not $s -or -not $s.PSObject.Properties['last']) { return $null }
+    return $s.last
+}
+
+function Write-SlotState([string]$key, $last) {
+    $root = Get-BenchCacheRoot $key
+    if (-not [IO.Directory]::Exists($root)) { return }
+    try { Write-Json (Join-Path $root 'slot.json') ([ordered]@{ last = $last }) }
+    catch { Note "  warning: could not write $root\slot.json: $($_.Exception.Message)" }
+}
+
+# ---------------------------------------------------------------------------------- adaptive rounds
+# Student t quantiles by degrees of freedom (index; 0 unused): two-sided 95% (0.975) and 90% (0.95).
+# Above 20 the df-20 value is used (slightly conservative).
+$T975 = @(0, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086)
+$T95 = @(0, 6.314, 2.920, 2.353, 2.132, 2.015, 1.943, 1.895, 1.860, 1.833, 1.812, 1.796, 1.782, 1.771, 1.761, 1.753, 1.746, 1.740, 1.734, 1.729, 1.725)
+function Get-TQuantile([int]$df, [double[]]$table) {
+    if ($df -lt 1) { return [double]::PositiveInfinity }
+    if ($df -lt $table.Count) { return $table[$df] }
+    return $table[$table.Count - 1]
+}
+
+function F([string]$format, [object[]]$values) { [string]::Format($Invariant, $format, $values) }
+
+# After a round: for each test variant, the per-round paired diff d = 100 (test - control) / control
+# of avg_fps (both runs of the round ok; the pairing cancels slow drift, which the alternating order
+# spreads over both sides), its mean and stdev (at least -PairSdFloorPct). Decided when
+#   clear difference: the 95% CI excludes 0 and |mean| > -NoiseK x max(-NoiseCvPct, control CV)
+#                     (the noise test of round_analyze.py bench, '~', with a floor), or
+#   no change:        the 90% CI lies within +-EquivPct (an equivalence test at 5% per side).
+# @{ Stop = all decided; Why; Lines; Verdicts }.
+function Test-AdaptiveStop($measured, $names, [int]$round) {
+    $ctrl = $names[0]
+    if ($names.Count -lt 2) { return @{ Stop = $true; Why = 'only the control: nothing to compare'; Lines = @(); Verdicts = @() } }
+    $cs = Get-Stats @($measured | Where-Object { $_.Variant -eq $ctrl -and $_.Ok } | ForEach-Object { $_.Fps })
+    $cv = $null; if ($null -ne $cs.Sd -and $cs.Mean) { $cv = 100.0 * $cs.Sd / $cs.Mean }
+    $noise = $NoiseCvPct; if ($null -ne $cv -and $cv -gt $noise) { $noise = $cv }
+    $lines = @(); $open = @(); $done = @(); $verdicts = @()
+    foreach ($g in @($names | Select-Object -Skip 1)) {
+        $d = @()
+        for ($rr = 1; $rr -le $round; $rr++) {
+            $c = @($measured | Where-Object { $_.Variant -eq $ctrl -and $_.Round -eq $rr -and $_.Ok }) | Select-Object -First 1
+            $t = @($measured | Where-Object { $_.Variant -eq $g -and $_.Round -eq $rr -and $_.Ok }) | Select-Object -First 1
+            if ($c -and $t -and $c.Fps -gt 0) { $d += 100.0 * ($t.Fps - $c.Fps) / $c.Fps }
+        }
+        $n = $d.Count
+        if ($n -lt 2) {
+            $lines += "$g vs ${ctrl}: $n complete round(s), undecided"; $open += "$g (too few complete rounds)"
+            $verdicts += [ordered]@{ variant = $g; rounds = $n; verdict = 'undecided' }
+            continue
+        }
+        $s = Get-Stats $d
+        $sd = [Math]::Max([double]$s.Sd, $PairSdFloorPct)
+        $h95 = (Get-TQuantile ($n - 1) $T975) * $sd / [Math]::Sqrt($n)
+        $h90 = (Get-TQuantile ($n - 1) $T95) * $sd / [Math]::Sqrt($n)
+        $m = $s.Mean
+        $verdict = 'undecided'
+        if (($m - $h95 -gt 0 -or $m + $h95 -lt 0) -and [Math]::Abs($m) -gt $NoiseK * $noise) { $verdict = 'clear difference' }
+        elseif ([Math]::Abs($m) + $h90 -le $EquivPct) { $verdict = (F 'no change (within +-{0:0.0#}%)' @($EquivPct)) }
+        $lines += F ('{0} vs {1}: {2:+0.00;-0.00;+0.00}% over {3} rounds (paired sd {4:0.00}%, used {5:0.00}%), ' +
+            '95% CI [{6:+0.00;-0.00;+0.00}, {7:+0.00;-0.00;+0.00}], 90% CI [{8:+0.00;-0.00;+0.00}, {9:+0.00;-0.00;+0.00}], ' +
+            'noise bar {10:0.00}%: {11}') @($g, $ctrl, $m, $n, [double]$s.Sd, $sd, ($m - $h95), ($m + $h95), ($m - $h90), ($m + $h90), ($NoiseK * $noise), $verdict)
+        $tag = F '{0} {1:+0.0;-0.0;+0.0}%' @($g, $m)
+        if ($verdict -eq 'undecided') { $open += $tag } else { $done += "$tag $verdict" }
+        $verdicts += [ordered]@{ variant = $g; rounds = $n; diff_pct = [Math]::Round($m, 3); pair_sd_pct = [Math]::Round([double]$s.Sd, 3);
+            ci95 = @([Math]::Round($m - $h95, 3), [Math]::Round($m + $h95, 3)); ci90 = @([Math]::Round($m - $h90, 3), [Math]::Round($m + $h90, 3));
+            noise_bar_pct = [Math]::Round($NoiseK * $noise, 3); verdict = $verdict }
+    }
+    if ($open.Count) { return @{ Stop = $false; Why = "undecided: $($open -join ', ')"; Lines = $lines; Verdicts = $verdicts } }
+    return @{ Stop = $true; Why = "decided: $($done -join '; ')"; Lines = $lines; Verdicts = $verdicts }
+}
+
+# Before an early stop: round_analyze.py bench's scene-drift check over the measured runs so far
+# (a drift run measured another scene, so the diffs are not trusted). The reason not to stop, or
+# $null (no drift, or no Python / no usable result: then the check is skipped with a note).
+function Get-DriftBlock([string]$sessionDir, $measured, [string]$ctrl) {
+    $analyzer = Join-Path $PSScriptRoot 'round_analyze.py'
+    if (-not (Test-Path -LiteralPath $analyzer)) { return $null }
+    if ($null -eq $script:AdaptivePy) { $script:AdaptivePy = Find-Python; if (-not $script:AdaptivePy) { $script:AdaptivePy = $false } }
+    if (-not $script:AdaptivePy) { Note '  adaptive: Python 3 not found: no scene-drift check before stopping'; return $null }
+    $py = $script:AdaptivePy
+    $files = @($measured | Where-Object { $_.Ok -and $_.File } | ForEach-Object { $_.File })
+    $out = Join-Path $sessionDir 'adaptive-check.json'
+    $pyArgs = @('-I', $analyzer, 'bench') + $files + @('--control', $ctrl, '--noise-k', (Fmt '{0}' $NoiseK), '--drift-pct', (Fmt '{0}' $DriftPct), '--json', $out)
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $null = & $py.Exe @($py.Pre) @pyArgs 2>&1; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+    if ($code -ne 0 -or -not (Test-Path -LiteralPath $out)) { Note "  adaptive: round_analyze.py bench failed (exit $code): no scene-drift check"; return $null }
+    try { $j = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $j = $null }
+    if (-not $j -or -not $j.PSObject.Properties['drift'] -or -not $j.drift) { Note '  adaptive: no drift block in round_analyze.py output: no scene-drift check'; return $null }
+    if ($j.drift.PSObject.Properties['state'] -and "$($j.drift.state)" -eq 'inconclusive') { return 'scene-drift check inconclusive' }
+    $flagged = @()
+    if ($j.drift.PSObject.Properties['runs']) { $flagged = @(@($j.drift.runs) | Where-Object { $_.PSObject.Properties['drift'] -and $_.drift -eq $true } | ForEach-Object { "$($_.run)" }) }
+    if ($flagged.Count) { return "scene drift in $($flagged -join ', ')" }
+    return $null
+}
+$script:AdaptivePy = $null
+
 # ---------------------------------------------------------------------------------------- run
 function Invoke-Run {
-    if ($Rounds -lt 1) { Fail '-Rounds must be at least 1' }
+    # -Rounds N: fixed. Otherwise adaptive, -MinRounds to -MaxRounds (Test-AdaptiveStop).
+    $fixed = $script:Bound.ContainsKey('Rounds')
+    if ($fixed -and ($script:Bound.ContainsKey('MinRounds') -or $script:Bound.ContainsKey('MaxRounds'))) {
+        Fail 'pass -Rounds N (fixed rounds) or -MinRounds/-MaxRounds (adaptive), not both'
+    }
+    if ($fixed) {
+        if ($Rounds -lt 1) { Fail '-Rounds must be at least 1' }
+        $minR = $Rounds; $maxR = $Rounds
+    } else {
+        if ($MinRounds -lt 2) { Fail '-MinRounds must be at least 2 (the noise of the paired diff needs two rounds)' }
+        if ($MaxRounds -lt $MinRounds) { Fail '-MaxRounds must be at least -MinRounds' }
+        if ($EquivPct -le 0 -or $NoiseCvPct -lt 0 -or $PairSdFloorPct -lt 0) { Fail '-EquivPct must be above 0, -NoiseCvPct and -PairSdFloorPct at least 0' }
+        $minR = $MinRounds; $maxR = $MaxRounds
+    }
+    $adaptive = $maxR -gt $minR
     if (-not $NoWarmup -and $WarmupRuns -lt 1) { Fail '-WarmupRuns must be at least 1 (or pass -NoWarmup)' }
     $route = Join-Path $BenchDir 'route.txt'
     $snap = Join-Path $BenchDir 'save'
@@ -1189,18 +1420,49 @@ function Invoke-Run {
     $sessionDir = Join-Path $BenchDir "runs\$name"
     if ((Test-Path -LiteralPath $sessionDir) -and -not $DryRun) { Fail "session $sessionDir already exists; pick another -Session" }
 
-    # The plan: warm-ups, then rounds alternating the order (A B / B A / A B ...).
+    # Cache copies (slots by default), each variant's tlg.ini and build/settings signature.
+    $caches = [ordered]@{}
+    if (-not $SharePlayerCache) { $caches = Get-CacheKeys $set }
+    $runInis = @{}; $sigs = @{}; $relocated = @{}
+    foreach ($v in $names) {
+        # (-Ini, then the variant's ini: keys; '' drops a key.)
+        $runInis[$v] = Merge-Ini $Ini $set[$v].Ini "variant '$v' ini"
+        $sigs[$v] = Get-RunSignature $set[$v] $runInis[$v] $build $launcher $mods
+        $relocated[$v] = (@($CacheRootVars | Where-Object { Get-RunValue $set[$v].Env $_ }).Count -gt 0)
+    }
+    # Warm slots: a variant whose copy's last run (slot.json) had the same signature, ended ok and
+    # compiled nothing needs no warm-up. If that holds for every variant, the control keeps one
+    # warm-up anyway (the session's first run also warms the disk cache and the GPU clocks). A
+    # measured run of a skipped variant that still compiles becomes a warm-up and is repeated.
+    $warmSkip = @{}
+    if (-not $NoWarmup -and -not $AlwaysWarmup -and -not $SharePlayerCache -and -not $ResetBenchCache) {
+        foreach ($v in $names) {
+            if (-not $sigs[$v] -or $relocated[$v]) { continue }
+            $st = Read-SlotState $caches[$v].Key
+            if (-not $st -or -not $st.PSObject.Properties['signature'] -or "$($st.signature)" -ne $sigs[$v]) { continue }
+            if ("$($st.status)" -ne 'ok' -or $null -eq $st.compiles -or [double]$st.compiles -ne 0) { continue }
+            $warmSkip[$v] = "cache\$($caches[$v].Key) is warm: its last run ($($st.session)\$($st.run), $($st.time)) had the same build and settings and compiled nothing"
+        }
+        if ($warmSkip.Count -eq $names.Count) {
+            $warmSkip.Remove($names[0])
+            Info "  warm-up  : every cache slot is warm; the control '$($names[0])' keeps one warm-up run (disk cache, GPU clocks)"
+        }
+    }
+
+    # The plan: warm-ups, then rounds alternating the order (A B / B A / A B ...); adaptive
+    # sessions plan -MaxRounds and skip the rest once decided.
     $plan = New-Object Collections.Generic.List[object]
     if (-not $NoWarmup) {
-        foreach ($v in $names) { for ($i = 1; $i -le $WarmupRuns; $i++) { $plan.Add(@{ Variant = $v; Warmup = $i; Round = 0; Dir = "warmup-$v-$i"; Skip = $false }) } }
+        foreach ($v in $names) { for ($i = 1; $i -le $WarmupRuns; $i++) { $plan.Add(@{ Variant = $v; Warmup = $i; Round = 0; Dir = "warmup-$v-$i"; Skip = $warmSkip.ContainsKey($v) }) } }
     }
     $n = 0
-    for ($round = 1; $round -le $Rounds; $round++) {
+    for ($round = 1; $round -le $maxR; $round++) {
         $order = $names
         if ($round % 2 -eq 0) { $order = @($names[($names.Count - 1)..0]) }
         foreach ($v in $order) { $n++; $plan.Add(@{ Variant = $v; Warmup = 0; Round = $round; Dir = ('{0:D2}-{1}' -f $n, $v); Skip = $false }) }
     }
     $measured = @($plan | Where-Object { -not $_.Warmup }).Count
+    $warmups = @($plan | Where-Object { $_.Warmup -and -not $_.Skip }).Count
     Info "Benchmark session $sessionDir"
     Info "  launcher : $($launcher.Exe)"
     Info "  game     : $script:GameDirUsed"
@@ -1208,40 +1470,58 @@ function Invoke-Run {
     if ($build.dirty) { Note '  note: uncommitted changes: this session is not tied to the commit alone (dirty_files in variants.json)' }
     Info "  route    : $route"
     if ($SharePlayerCache) { Info "  caches   : SHARED with $source (-SharePlayerCache: the runs write into the player's caches)" }
-    else { Info "  caches   : own copy per variant in $BenchDir\cache\<variant> (seeded from $source)" }
+    else {
+        Info "  caches   : bench copies in $BenchDir\cache (seeded from $source on first use)"
+        foreach ($v in $names) { Info ("    {0,-10} cache\{1} ({2})" -f $v, $caches[$v].Key, $caches[$v].How) }
+    }
+    foreach ($v in $names) { if ($warmSkip.ContainsKey($v)) { Info "  warm-up  : none for ${v}: $($warmSkip[$v])" } }
     Info "  variants : $($names -join ', ') (control: $($names[0]))"
-    Info "  runs     : $measured measured + $($plan.Count - $measured) warm-up, timeout $TimeoutSec s each"
+    if ($adaptive) {
+        Info ("  rounds   : adaptive, $minR to $maxR (" + (F 'stop when every variant is a clear difference: 95% CI excludes 0 and |diff| > {0:0.##}x max({1:0.##}%, control CV); or no change: 90% CI within +-{2:0.##}%' @($NoiseK, $NoiseCvPct, $EquivPct)) + ')')
+        Info "  runs     : $($minR * $names.Count) to $measured measured + up to $warmups warm-up, timeout $TimeoutSec s each"
+    } else {
+        Info "  rounds   : $maxR (fixed)"
+        Info "  runs     : $measured measured + up to $warmups warm-up, timeout $TimeoutSec s each"
+    }
     foreach ($v in $names) {
         $desc = @(); foreach ($k in $set[$v].Env.Keys) { $desc += "$k=$($set[$v].Env[$k])" }
         foreach ($k in $set[$v].Ini.Keys) { $desc += "ini:$k=$($set[$v].Ini[$k])" }
         if (-not $desc) { $desc = @('(no changes)') }
         Info ("    {0,-10} {1}" -f $v, ($desc -join ' '))
     }
-    $info = [ordered]@{ variants = $names; control = $names[0]; rounds = $Rounds; route = $route; launcher = $launcher.Exe;
+    $info = [ordered]@{ variants = $names; control = $names[0]; rounds = $maxR; route = $route; launcher = $launcher.Exe;
         source_user_dir = $source; ini = $Ini; started = (Get-Date).ToString('s'); env = [ordered]@{}; ini_variants = [ordered]@{}
-        cache_mode = $(if ($SharePlayerCache) { 'shared' } else { 'bench' }); caches = [ordered]@{};
+        cache_mode = $(if ($SharePlayerCache) { 'shared' } else { 'bench' }); cache_keys = [ordered]@{}; caches = [ordered]@{};
+        round_mode = $(if ($adaptive) { 'adaptive' } else { 'fixed' }); min_rounds = $minR; max_rounds = $maxR;
+        warmup_skipped = @($names | Where-Object { $warmSkip.ContainsKey($_) });
         game_dir = $env:ISS_GAME_DIR; build = $build }
+    if ($adaptive) { $info['adaptive'] = [ordered]@{ equiv_pct = $EquivPct; noise_cv_pct = $NoiseCvPct; noise_k = $NoiseK; pair_sd_floor_pct = $PairSdFloorPct } }
     foreach ($v in $names) {
         $info.env[$v] = $set[$v].Env; $info.ini_variants[$v] = $set[$v].Ini
-        $info.caches[$v] = if ($SharePlayerCache) { $source } else { Get-BenchCacheRoot $v }
+        if ($SharePlayerCache) { $info.caches[$v] = $source }
+        else { $info.cache_keys[$v] = $caches[$v].Key; $info.caches[$v] = Get-BenchCacheRoot $caches[$v].Key }
     }
 
     if ($DryRun) {
         Clear-StaleJunctions
-        if (-not $SharePlayerCache) { foreach ($v in $names) { Initialize-BenchCache $v $source } }
+        if (-not $SharePlayerCache) { foreach ($v in $names) { Initialize-BenchCache $caches[$v].Key $source } }
     } else {
         Lock-BenchDir
         if (@(Get-Probes $launcher -AnyPath).Count) { Fail 'the game is already running; close it first' }
         Clear-StaleJunctions
-        if (-not $SharePlayerCache) { foreach ($v in $names) { Initialize-BenchCache $v $source } }
+        if (-not $SharePlayerCache) { foreach ($v in $names) { Initialize-BenchCache $caches[$v].Key $source } }
         New-Dir $sessionDir
         Write-Json (Join-Path $sessionDir 'variants.json') $info
     }
     $results = New-Object Collections.Generic.List[object]
+    $runsDone = New-Object Collections.Generic.List[object]   # measured: Variant, Round, Fps, Ok, File
+    $checks = New-Object Collections.Generic.List[object]
+    $stopReason = if ($adaptive) { $null } else { "fixed: $maxR round(s)" }
+    $lastRound = 0
     $shown = @{}
     for ($k = 1; $k -le $plan.Count; $k++) {
         $step = $plan[$k - 1]
-        if ($step.Skip) { continue }   # warm-ups after one that compiled nothing
+        if ($step.Skip) { continue }   # warm-ups after one that compiled nothing; rounds after an adaptive stop
         $v = $step.Variant
         $runDir = Join-Path $sessionDir $step.Dir
         $vars = [ordered]@{
@@ -1258,14 +1538,14 @@ function Invoke-Run {
         if ($launcher.Kind -eq 'py') { $vars['PYTHONUSERBASE'] = (Join-Path $env:APPDATA 'Python') }
         foreach ($e in $mods.Keys) { $vars[$e] = $mods[$e] }
         foreach ($e in $set[$v].Env.Keys) { $vars[$e] = $set[$v].Env[$e] }
-        # -Ini, then the variant's ini: keys ('' drops a key). ($ini would be $Ini: names ignore case.)
-        $runIni = Merge-Ini $Ini $set[$v].Ini "variant '$v' ini"
+        $runIni = $runInis[$v]
+        $cacheKey = if ($SharePlayerCache) { $v } else { $caches[$v].Key }
         $what = if ($step.Warmup) { "warm-up $($step.Warmup) of $v" } else { "round $($step.Round), $v" }
         if ($DryRun) {
             Dry "[$k/$($plan.Count)] $what -> $runDir"
             if (-not $shown.ContainsKey($v)) {
                 $shown[$v] = 1
-                Dry "  data folder: $runDir\user = copy of $snap\savedata + tlg.ini; junctions: $(Format-Links $source $v)"
+                Dry "  data folder: $runDir\user = copy of $snap\savedata + tlg.ini; junctions: $(Format-Links $source $cacheKey)"
             }
             if ($k -eq 1) {
                 Dry "  unset for every run (unless a variant sets them): $(Format-Unset $vars)"
@@ -1274,13 +1554,16 @@ function Invoke-Run {
             }
             Dry "  tlg.ini: $((Format-Env $runIni) -replace "`n", ', ')"
             Dry "  env: $((Format-Env $vars) -replace "`n", '; ')"
+            if ($adaptive -and -not $step.Warmup -and $step.Round -ge $minR -and $step.Round -lt $maxR -and $step.Variant -eq @($plan | Where-Object { $_.Round -eq $step.Round })[-1].Variant) {
+                Dry "  adaptive: after round $($step.Round): stop here when every variant is decided (else round $($step.Round + 1))"
+            }
             continue
         }
         Info "[$k/$($plan.Count)] $what"
         New-Dir $runDir
         $r = $null
         try {
-            $null = New-RunData $runDir $snap $source $runIni (Plan-Links $source $v)
+            $null = New-RunData $runDir $snap $source $runIni (Plan-Links $source $cacheKey)
             Set-RunEnv $vars
             Write-Text (Join-Path $runDir 'env.txt') ((Format-Env $vars) + "`n")
             $r = Invoke-Game $launcher $runDir $vars.ISS_STOP_FILE $TimeoutSec 'run'
@@ -1292,7 +1575,7 @@ function Invoke-Run {
             if ($parsed) { Write-Json $benchJson $parsed; Note '  bench.json missing: written from the Bench: log line' }
             else { $r.status = "$($r.status), no bench result" }
         }
-        $r['variant'] = $v; $r['round'] = $step.Round; $r['warmup'] = $step.Warmup
+        $r['variant'] = $v; $r['round'] = $step.Round; $r['warmup'] = $step.Warmup; $r['cache'] = $cacheKey
         Write-Json (Join-Path $runDir 'run.json') $r
         if ($r.status -eq 'empty-route') {
             # Every run replays the same file: the other runs would end the same way.
@@ -1304,21 +1587,75 @@ function Invoke-Run {
         if (Test-Path -LiteralPath $benchJson) {
             try { $b = Read-Json $benchJson } catch { Note "  warning: $($_.Exception.Message)"; $r.status = "$($r.status), unreadable bench.json"; Write-Json (Join-Path $runDir 'run.json') $r }
         }
+        $compiles = $null; $fps = $null
+        if ($b -and $b.PSObject.Properties['compiles']) { $compiles = [double]$b.compiles }
+        if ($b -and $b.PSObject.Properties['avg_fps']) { $fps = [double]$b.avg_fps }
+        if (-not $SharePlayerCache -and -not $relocated[$v]) {
+            Write-SlotState $cacheKey ([ordered]@{ session = $name; variant = $v; run = $step.Dir; time = (Get-Date).ToString('s');
+                    signature = $sigs[$v]; commit = $build.commit; status = "$($r.status)"; compiles = $compiles; warmup = [bool]$step.Warmup })
+        }
         if ($b) {
-            if ($step.Warmup -and $b.PSObject.Properties['compiles'] -and [double]$b.compiles -eq 0 -and $step.Warmup -lt $WarmupRuns) {
+            if ($step.Warmup -and $null -ne $compiles -and $compiles -eq 0 -and $step.Warmup -lt $WarmupRuns) {
                 Info "  warm: no compiles, skipping the remaining warm-ups of $v"
                 foreach ($s in $plan) { if ($s.Variant -eq $v -and $s.Warmup -gt $step.Warmup) { $s.Skip = $true } }
             }
-            if ((-not $step.Warmup) -and $b.PSObject.Properties['compiles'] -and [double]$b.compiles -gt 0) {
+            if ((-not $step.Warmup) -and $warmSkip.ContainsKey($v)) {
+                $warmSkip.Remove($v)   # only the variant's first measured run is checked
+                if ($null -ne $compiles -and $compiles -gt 0) {
+                    # The slot was not as warm as slot.json said: this run counts as its warm-up.
+                    $dest = Join-Path $sessionDir "warmup-$v-auto"
+                    $r['warmup'] = 'auto'
+                    Write-Json (Join-Path $runDir 'run.json') $r
+                    [IO.Directory]::Move($runDir, $dest)
+                    Note "  warning: $compiles compiles although cache\$cacheKey was warm: this run is now the warm-up ($dest); repeating it"
+                    $results.Add($r)
+                    $plan.Insert($k, @{ Variant = $v; Warmup = 0; Round = $step.Round; Dir = $step.Dir; Skip = $false })
+                    continue
+                }
+            }
+            if ((-not $step.Warmup) -and $null -ne $compiles -and $compiles -gt 0) {
                 Note "  warning: $($b.compiles) shader/pipeline compiles during the measurement (more warm-up: -WarmupRuns $($WarmupRuns + 1))"
             }
         }
         $results.Add($r)
+        if ($step.Warmup) { continue }
+        $runsDone.Add(@{ Variant = $v; Round = $step.Round; Fps = $fps; Ok = ($r.status -eq 'ok' -and $null -ne $fps); File = $(if ($b) { $benchJson } else { $null }) })
+        $lastRound = $step.Round
+        # Adaptive: after the last run of a round from -MinRounds on.
+        if (-not $adaptive -or $step.Round -lt $minR) { continue }
+        $more = $false
+        for ($j = $k; $j -lt $plan.Count; $j++) { if (-not $plan[$j].Skip -and -not $plan[$j].Warmup -and $plan[$j].Round -eq $step.Round) { $more = $true; break } }
+        if ($more) { continue }
+        $t = Test-AdaptiveStop $runsDone $names $step.Round
+        foreach ($l in $t.Lines) { Info "  adaptive: $l" }
+        $stop = $t.Stop; $why = $t.Why
+        if ($stop -and $names.Count -gt 1 -and $step.Round -lt $maxR) {
+            $block = Get-DriftBlock $sessionDir $runsDone $names[0]
+            if ($block) { $stop = $false; $why = "$why, but $block" }
+        }
+        $checks.Add([ordered]@{ round = $step.Round; stop = $stop; why = $why; verdicts = $t.Verdicts })
+        if ($step.Round -ge $maxR) {
+            $stopReason = "reached -MaxRounds $maxR ($why)"
+            Info "  adaptive: $stopReason"
+        } elseif ($stop) {
+            $stopReason = "stopped after round $($step.Round) of at most ${maxR}: $why"
+            Info "  adaptive: $stopReason"
+            for ($j = $k; $j -lt $plan.Count; $j++) { $plan[$j].Skip = $true }
+        } else {
+            Info "  adaptive: round $($step.Round + 1) next ($why)"
+        }
     }
     if ($DryRun) { Dry "then: scripts\bench.ps1 compare -Session $name"; return }
     $bad = @($results | Where-Object { $_.status -ne 'ok' -and -not $_.warmup })
     $script:FailedRuns = $bad.Count
     if ($bad.Count) { Note "$($bad.Count) measured run(s) did not end cleanly (exit code 3); see run.json in $sessionDir" }
+    $info['rounds_run'] = $lastRound
+    $info['round_stop'] = $stopReason
+    $info['adaptive_checks'] = [object[]]$checks.ToArray()
+    Write-Json (Join-Path $sessionDir 'variants.json') $info
+    $warmRan = @($results | Where-Object { $_.warmup }).Count
+    Info ''
+    Info "Rounds: $lastRound ($stopReason); runs: $(@($results | Where-Object { -not $_.warmup }).Count) measured, $warmRan warm-up"
     Info ''
     Invoke-Compare $sessionDir
 }
