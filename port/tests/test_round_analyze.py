@@ -137,6 +137,7 @@ class Bench(unittest.TestCase):
                            csv=str(self.root / "t.csv"), json=str(self.root / "t.json"))
         head = out.splitlines()[0]
         self.assertTrue(head.split()[-1] == "cpu_ms/f" and head.index("drift") < head.index("cpu_ms/f"))
+        self.assertNotIn("cpu_game_ms/f", head)   # no split in these runs: no column
         b = next(line for line in out.splitlines() if line.startswith("B "))
         c = next(line for line in out.splitlines() if line.startswith("C "))
         self.assertRegex(b, r"30\.20 \+-0\.14 \(\+0\.3% ~\)$")   # within the control's noise
@@ -147,14 +148,63 @@ class Bench(unittest.TestCase):
         self.assertTrue(row["groups"]["C"]["better"])
         self.assertTrue(row["groups"]["B"]["noise"])
         head, *rows = (self.root / "t.csv").read_text().splitlines()
-        self.assertTrue(head.endswith(",draws/frame,drift,unreliable,failed_runs,cpu_ms/f"))
-        self.assertTrue(rows[2].endswith(",27.05 +-0.07 (-10.1%)"))
+        self.assertTrue(head.endswith(",draws/frame,drift,unreliable,failed_runs,cpu_ms/f,cpu_game_ms/f"))
+        self.assertTrue(rows[2].endswith(",27.05 +-0.07 (-10.1%),-"))
         # runs of an older build have no CPU time: no column on the table, '-' in compare.csv
         old = [self.write(f"o{i}/bench.json", bench("A", 55.0)) for i in (1, 2)]
         out = self.run_cmd(ra.cmd_bench, runs=old, control=None, noise_k=2.0, skip_ms=1000.0,
                            csv=str(self.root / "o.csv"), json=None)
         self.assertNotIn("cpu_ms/f", out.splitlines()[0])
-        self.assertTrue((self.root / "o.csv").read_text().splitlines()[1].endswith(",-"))
+        self.assertTrue((self.root / "o.csv").read_text().splitlines()[1].endswith(",-,-"))
+
+    def test_cpu_split(self):
+        # the game's per-category CPU time (cycle time): cpu_game = guest + cp + gpu_helpers, the last
+        # column, noise marked; the background compiles swing the total, not cpu_game
+        line = ("Bench: frames=3400 seconds=59.50 avg_fps=57.1 low1_fps=33.0 p99_ms=30.0 worst_ms=50.0 "
+                "over33=1 over50=0 compiles=2 cpu_ms_per_frame=9.05 cpu_s=30.77 cpu_util=0.52 "
+                "cpu_guest_ms_per_frame=10.00 cpu_cp_ms_per_frame=15.00 cpu_gpu_helpers_ms_per_frame=5.00 "
+                "cpu_compile_ms_per_frame=7.00 cpu_other_ms_per_frame=1.00 cpu_cycles_ms_per_frame=38.00 "
+                "label=A\n")
+        d = ra.load_bench(self.write("01-A/game.log", line))
+        self.assertEqual((d["cpu_cp_ms_per_frame"], d["cpu_compile_ms_per_frame"], d["cpu_game_ms_per_frame"]),
+                         (15.0, 7.0, 30.0))
+        self.assertNotIn("cpu_game_ms_per_frame", ra.add_cpu_game(dict(cpu_guest_ms_per_frame=1.0)))
+
+        def split(n, guest, cp, helpers, compile_, total):
+            return dict(bench(n, 57.0), cpu_ms_per_frame=total, cpu_guest_ms_per_frame=guest,
+                        cpu_cp_ms_per_frame=cp, cpu_gpu_helpers_ms_per_frame=helpers,
+                        cpu_compile_ms_per_frame=compile_, cpu_other_ms_per_frame=1.0,
+                        cpu_cycles_ms_per_frame=guest + cp + helpers + compile_ + 1.0)
+        runs = {"A": [(10.0, 15.0, 5.0, 2.0, 4.0), (10.1, 15.0, 5.0, 12.0, 13.0)],
+                "B": [(10.0, 15.1, 5.0, 0.0, 16.0), (10.1, 15.0, 5.0, 9.0, 9.0)],
+                "C": [(9.0, 13.0, 5.0, 3.0, 12.0), (9.1, 13.0, 5.0, 8.0, 5.0)]}
+        files = [self.write(f"{i:02d}-{n}/bench.json", split(n, *v))
+                 for i, (n, v) in enumerate([(n, v) for n in "ABC" for v in runs[n]], 1)]
+        out = self.run_cmd(ra.cmd_bench, runs=files, control=None, noise_k=2.0, skip_ms=1000.0,
+                           csv=str(self.root / "s.csv"), json=str(self.root / "s.json"))
+        self.assertEqual(out.splitlines()[0].split()[-2:], ["cpu_ms/f", "cpu_game_ms/f"])
+        b = next(line for line in out.splitlines() if line.startswith("B "))
+        c = next(line for line in out.splitlines() if line.startswith("C "))
+        self.assertRegex(b, r"30\.10 \+-0\.00 \(\+0\.2% ~\)$")   # 30.1, 30.1 vs 30.0, 30.1: noise
+        self.assertRegex(c, r"27\.05 \+-0\.07 \(-10\.0%\)$")       # 27.0, 27.1: better
+        t = json.loads((self.root / "s.json").read_text())
+        rows = {r["metric"]: r for r in t["rows"]}
+        self.assertTrue(rows["cpu_ms_per_frame"]["groups"]["C"]["noise"])   # the total: lost in its noise
+        self.assertTrue(rows["cpu_game_ms_per_frame"]["groups"]["C"]["better"])
+        self.assertTrue(rows["cpu_cp_ms_per_frame"]["groups"]["C"]["better"])
+        self.assertTrue(rows["cpu_compile_ms_per_frame"]["split"])
+        self.assertEqual(rows["cpu_compile_ms_per_frame"]["groups"]["A"]["mean"], 7.0)
+        self.assertEqual(t["drift"]["runs"][0]["cpu"]["cpu_game_ms_per_frame"], 30.0)
+        # the categories stay out of the table and compare.csv
+        self.assertNotIn("cpu_cp", out)
+        chead, *crows = (self.root / "s.csv").read_text().splitlines()
+        self.assertTrue(chead.endswith(",failed_runs,cpu_ms/f,cpu_game_ms/f"))
+        self.assertTrue(crows[2].endswith(",27.05 +-0.07 (-10.0%)"))
+        runs_csv = (self.root / "s_runs.csv").read_text().splitlines()
+        self.assertTrue(runs_csv[0].endswith(
+            ",failed,cpu_ms_per_frame,cpu_game_ms_per_frame,cpu_guest_ms_per_frame,cpu_cp_ms_per_frame,"
+            "cpu_gpu_helpers_ms_per_frame,cpu_compile_ms_per_frame,cpu_other_ms_per_frame,cpu_cycles_ms_per_frame"))
+        self.assertTrue(runs_csv[1].endswith(",4.0,30.0,10.0,15.0,5.0,2.0,1.0,33.0"))
 
     def test_cmd_bench_prints_table(self):
         files = [self.write(f"{i:02d}-{n}/bench.json", bench(n, v, compiles=3 if i == 1 else 0))
@@ -282,7 +332,7 @@ class Bench(unittest.TestCase):
         # compare.csv keeps its columns, the new ones at the end; the per-run block is its own file
         self.assertTrue((self.root / "t.csv").read_text().startswith(
             "variant,runs,avg_fps,low1_fps,p99_ms,worst_ms,over33,over50,compiles,draws/frame,drift,unreliable,failed_runs,"
-            "cpu_ms/f\n"))
+            "cpu_ms/f,cpu_game_ms/f\n"))
         self.assertIn("draws_dev_pct", (self.root / "t_runs.csv").read_text())
         self.assertEqual(len(d["run_files"]), 6)
         self.assertEqual(d["kept_run_files"], d["run_files"])
@@ -486,13 +536,13 @@ class Bench(unittest.TestCase):
         self.assertEqual(len(d["kept_run_files"]), 4)
         self.assertEqual(d["runs"]["B"], 2)
         runs_csv = (self.root / "c_runs.csv").read_text().splitlines()
-        self.assertTrue(runs_csv[0].endswith(",excluded,failed"))
+        self.assertIn(",excluded,failed,cpu_ms_per_frame,", runs_csv[0])
         row = next(line for line in runs_csv if line.startswith("03-B"))
         self.assertIn("failed,true,", row)
         self.assertIn("status 'exit 3", row)
         head, *rows = (self.root / "c.csv").read_text().splitlines()
-        self.assertTrue(head.endswith(",unreliable,failed_runs,cpu_ms/f"))
-        self.assertEqual([r.rsplit(",", 2)[1:] for r in rows], [["0", "-"], ["1", "-"]])
+        self.assertTrue(head.endswith(",unreliable,failed_runs,cpu_ms/f,cpu_game_ms/f"))
+        self.assertEqual([r.rsplit(",", 3)[1:] for r in rows], [["0", "-", "-"], ["1", "-", "-"]])
 
     def test_failed_status_with_bench_json_and_ok_log_stats(self):
         # status not ok excludes a run even with a bench.json; a log with run.json status ok but
