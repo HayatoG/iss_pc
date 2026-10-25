@@ -178,6 +178,8 @@ Usage: scripts\bench.ps1 <record|run|compare> [options]   (Get-Help scripts\benc
           rounds: [-Rounds N] (fixed) | [-MinRounds 3] [-MaxRounds 5] [-EquivPct 1]
           [-NoiseCvPct 1.2] [-PairSdFloorPct 0.5] (adaptive, the default)
           [-CacheMode slot|variant] (variant key 'bench:cache' = 'variant' | '<name>')
+          variant key 'bench:exe' = '<other tree>\port\launcher\infamous_run.py' (or a game .exe):
+          that variant runs another build, interleaved with the others in the same session
   compare [-Session <name|folder>] [-Control <variant>] [-Detail] [-Python <exe>] [-NoiseK 2]
           [-DriftPct 5] [-ExcludeDrift] [-CpuSplit]
   caches  (record/run) [-ResetBenchCache] (delete and seed again the bench's own copies)
@@ -274,9 +276,10 @@ function Find-Python {
     return $null
 }
 
-function Resolve-Launcher {
+# $From: -Exe by default, or a variant's 'bench:exe'.
+function Resolve-Launcher([string]$From = $Exe, [string]$What = '-Exe') {
     $root = Split-Path $PSScriptRoot -Parent
-    $path = $Exe
+    $path = $From
     if (-not $path) {
         $tries = @((Join-Path $PSScriptRoot $ExeName), (Join-Path $root $ExeName))
         $stage = Join-Path $root 'port\out\stage'
@@ -296,7 +299,7 @@ function Resolve-Launcher {
             Fail $msg
         }
     }
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Fail "-Exe '$path' does not exist" }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Fail "$What '$path' does not exist" }
     $full = (Resolve-Path -LiteralPath $path).Path
     if ($full -like '*.py') {
         # Source tree: port\launcher\infamous_run.py, PORT_DIR = port\.
@@ -379,6 +382,8 @@ $script:GameDirUsed = "(not set)"
 # than the submodules under port/gpu/third_party) and the probe executables (time, SHA256).
 function Get-BuildInfo($launcher) {
     $root = Split-Path $PSScriptRoot -Parent
+    # A source-tree launcher (port\launcher\infamous_run.py): the commit of its own tree.
+    if ($launcher.Kind -eq 'py' -and -not $launcher.Missing) { $root = Split-Path $launcher.PortDir -Parent }
     $b = [ordered]@{ commit = $null; branch = $null; dirty = $null; dirty_files = @(); probes = @() }
     $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($git) {
@@ -1072,13 +1077,18 @@ function Get-VariantSet {
     foreach ($name in $raw.Keys) {
         if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$') { Fail "variant name '$name': use letters, digits, _ . - (it names folders and ISS_BENCH_LABEL)" }
         $vars = ConvertTo-Ordered $raw[$name] "variant '$name'"
-        $envs = [ordered]@{}; $ini = [ordered]@{}; $cache = $null
+        $envs = [ordered]@{}; $ini = [ordered]@{}; $cache = $null; $vexe = $null
         foreach ($k in $vars.Keys) {
             $v = $vars[$k]
             if ($null -ne $v -and -not ($v -is [string] -or $v -is [ValueType])) { Fail "variant '$name': $k must be a string or number" }
             if ($k -like 'ini:*') { $ini[$k.Substring(4)] = $v; continue }
+            if ($k -eq 'bench:exe') {
+                $vexe = "$v".Trim()
+                if (-not $vexe) { Fail "variant '$name': bench:exe is empty" }
+                continue
+            }
             if ($k -like 'bench:*') {
-                if ($k -ne 'bench:cache') { Fail "variant '$name': unknown key '$k' (bench:cache is the only bench: key)" }
+                if ($k -ne 'bench:cache') { Fail "variant '$name': unknown key '$k' (the bench: keys are bench:cache and bench:exe)" }
                 $cache = "$v".Trim()
                 if ($cache -and $cache -ne 'variant' -and $cache -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$') {
                     Fail "variant '$name': bench:cache '$cache': 'variant' (a copy named after the variant) or a name of letters, digits, _ . -"
@@ -1092,7 +1102,7 @@ function Get-VariantSet {
             }
             $envs[$k] = $v
         }
-        $set[$name] = @{ Env = $envs; Ini = $ini; Cache = $cache }
+        $set[$name] = @{ Env = $envs; Ini = $ini; Cache = $cache; Exe = $vexe }
     }
     if ($Control -and -not $set.Contains($Control)) { Fail "-Control '$Control' is not one of: $($set.Keys -join ', ')" }
     if ($Control) {
@@ -1419,6 +1429,19 @@ function Invoke-Run {
     $build = Get-BuildInfo $launcher
     $set = Get-VariantSet
     $names = @($set.Keys)
+    # 'bench:exe': a variant's own launcher (another tree's port\launcher\infamous_run.py, or a
+    # game .exe) and build; the others use -Exe. Same kind as -Exe (the launch environment is set
+    # up once, for -Exe).
+    $launchers = @{}; $builds = @{}
+    foreach ($v in $names) {
+        if ($set[$v].Exe) {
+            $launchers[$v] = Resolve-Launcher $set[$v].Exe "variant '$v' bench:exe"
+            if ($launchers[$v].Kind -ne $launcher.Kind) {
+                Fail "variant '$v' bench:exe '$($launchers[$v].Exe)' is a $($launchers[$v].Kind) launcher, -Exe a $($launcher.Kind) one: use the same kind"
+            }
+            $builds[$v] = Get-BuildInfo $launchers[$v]
+        } else { $launchers[$v] = $launcher; $builds[$v] = $build }
+    }
     Assert-CacheMode $set $source
     $name = $Session; if (-not $name) { $name = Get-Date -Format 'yyyyMMdd-HHmmss' }
     if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$') { Fail "-Session '$name': use letters, digits, _ . -" }
@@ -1432,7 +1455,7 @@ function Invoke-Run {
     foreach ($v in $names) {
         # (-Ini, then the variant's ini: keys; '' drops a key.)
         $runInis[$v] = Merge-Ini $Ini $set[$v].Ini "variant '$v' ini"
-        $sigs[$v] = Get-RunSignature $set[$v] $runInis[$v] $build $launcher $mods
+        $sigs[$v] = Get-RunSignature $set[$v] $runInis[$v] $builds[$v] $launchers[$v] $mods
         $relocated[$v] = (@($CacheRootVars | Where-Object { Get-RunValue $set[$v].Env $_ }).Count -gt 0)
     }
     # Warm slots: a variant whose copy's last run (slot.json) had the same signature, ended ok and
@@ -1484,6 +1507,9 @@ function Invoke-Run {
         Info "  caches   : bench copies in $BenchDir\cache (seeded from $source on first use)"
         foreach ($v in $names) { Info ("    {0,-10} cache\{1} ({2})" -f $v, $caches[$v].Key, $caches[$v].How) }
     }
+    foreach ($v in $names) {
+        if ($launchers[$v] -ne $launcher) { Info "  launcher : $v -> $($launchers[$v].Exe) (bench:exe)"; Info (Format-BuildInfo $builds[$v]) }
+    }
     foreach ($v in $names) { if ($warmSkip.ContainsKey($v)) { Info "  warm-up  : none for ${v}: $($warmSkip[$v])" } }
     Info "  variants : $($names -join ', ') (control: $($names[0]))"
     if ($adaptive) {
@@ -1508,6 +1534,10 @@ function Invoke-Run {
     if ($adaptive) { $info['adaptive'] = [ordered]@{ equiv_pct = $EquivPct; noise_cv_pct = $NoiseCvPct; noise_k = $NoiseK; pair_sd_floor_pct = $PairSdFloorPct } }
     foreach ($v in $names) {
         $info.env[$v] = $set[$v].Env; $info.ini_variants[$v] = $set[$v].Ini
+        if ($launchers[$v] -ne $launcher) {
+            if (-not $info.Contains('variant_launchers')) { $info['variant_launchers'] = [ordered]@{}; $info['variant_builds'] = [ordered]@{} }
+            $info.variant_launchers[$v] = $launchers[$v].Exe; $info.variant_builds[$v] = $builds[$v]
+        }
         if ($SharePlayerCache) { $info.caches[$v] = $source }
         else { $info.cache_keys[$v] = $caches[$v].Key; $info.caches[$v] = Get-BenchCacheRoot $caches[$v].Key }
     }
@@ -1517,7 +1547,7 @@ function Invoke-Run {
         if (-not $SharePlayerCache) { foreach ($v in $names) { Initialize-BenchCache $caches[$v].Key $source } }
     } else {
         Lock-BenchDir
-        if (@(Get-Probes $launcher -AnyPath).Count) { Fail 'the game is already running; close it first' }
+        foreach ($v in $names) { if (@(Get-Probes $launchers[$v] -AnyPath).Count) { Fail 'the game is already running; close it first' } }
         Clear-StaleJunctions
         if (-not $SharePlayerCache) { foreach ($v in $names) { Initialize-BenchCache $caches[$v].Key $source } }
         New-Dir $sessionDir
@@ -1562,6 +1592,7 @@ function Invoke-Run {
                 Dry "  launcher settings: $runDir\appdata (copy of $snap\settings.json, no extra backup folder)"
                 Dry "  start: `"$($launcher.Exe)`" $(if ($launcher.Kind -eq 'exe') { '--play' } else { '(run with Python 3)' }); wait <= $TimeoutSec s, then the stop file, then kill"
             }
+            if ($launchers[$v] -ne $launcher) { Dry "  start (bench:exe): `"$($launchers[$v].Exe)`"" }
             Dry "  tlg.ini: $((Format-Env $runIni) -replace "`n", ', ')"
             Dry "  env: $((Format-Env $vars) -replace "`n", '; ')"
             if ($adaptive -and -not $step.Warmup -and $step.Round -ge $minR -and $step.Round -lt $maxR -and $step.Variant -eq @($plan | Where-Object { $_.Round -eq $step.Round })[-1].Variant) {
@@ -1576,7 +1607,7 @@ function Invoke-Run {
             $null = New-RunData $runDir $snap $source $runIni (Plan-Links $source $cacheKey)
             Set-RunEnv $vars
             Write-Text (Join-Path $runDir 'env.txt') ((Format-Env $vars) + "`n")
-            $r = Invoke-Game $launcher $runDir $vars.ISS_STOP_FILE $TimeoutSec 'run'
+            $r = Invoke-Game $launchers[$v] $runDir $vars.ISS_STOP_FILE $TimeoutSec 'run'
         } finally { Invoke-RunCleanup }
         if ($r.log) { Copy-Item -LiteralPath $r.log -Destination (Join-Path $runDir 'game.log') -Force -ErrorAction SilentlyContinue }
         $benchJson = Join-Path $runDir 'bench.json'
@@ -1602,7 +1633,7 @@ function Invoke-Run {
         if ($b -and $b.PSObject.Properties['avg_fps']) { $fps = [double]$b.avg_fps }
         if (-not $SharePlayerCache -and -not $relocated[$v]) {
             Write-SlotState $cacheKey ([ordered]@{ session = $name; variant = $v; run = $step.Dir; time = (Get-Date).ToString('s');
-                    signature = $sigs[$v]; commit = $build.commit; status = "$($r.status)"; compiles = $compiles; warmup = [bool]$step.Warmup })
+                    signature = $sigs[$v]; commit = $builds[$v].commit; status = "$($r.status)"; compiles = $compiles; warmup = [bool]$step.Warmup })
         }
         if ($b) {
             if ($step.Warmup -and $null -ne $compiles -and $compiles -eq 0 -and $step.Warmup -lt $warmLimit[$v]) {

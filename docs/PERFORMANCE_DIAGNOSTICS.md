@@ -395,6 +395,23 @@ builds compile different shaders. Runs of different sessions are not interleaved
 between them (temperature, background load) is not cancelled out: repeat the first session last
 (A B A) to see it.
 
+To interleave two builds in one session instead (paired rounds, drift cancelled), give a variant
+its own launcher with the key `'bench:exe'`: another source tree's
+`port\launcher\infamous_run.py` (or another game folder's `.exe`, the same kind as `-Exe`). Renderer
+v2 always runs `port\out\tlg-probe-v2.exe` next to the launcher (`TLG_PROBE` is not used for it),
+so the other build needs a tree of its own: a `git worktree` of the other commit, built with
+`build.sh`; no copy of the launcher is needed. `variants.json` records that variant's launcher and
+build (`variant_launchers`, `variant_builds`), and its probe hash is part of its run signature
+(warm-up). Give it its own cache copy (`'bench:cache' = 'variant'`) when the builds compile
+different shaders:
+
+```text
+git worktree add ..\iss-B <commit B>
+# MSYS2 CLANG64 shell, in ..\iss-B\port: TLG_RENDERER_V2=1 bash build.sh
+.\scripts\bench.ps1 run -Session ab -Variants ([ordered]@{ A = @{};
+    B = @{ 'bench:exe' = '..\iss-B\port\launcher\infamous_run.py'; 'bench:cache' = 'variant' } })
+```
+
 `round_analyze.py bench` reads bench JSON, `summary.json` from `summarize`, a game log (its last
 `Bench:` line, else its `Frame stats`/`Frame pacing` lines) or a `SHADPS4_FRAME_CSV` file, and groups
 runs by label, else by folder name without the `NN-` prefix. `compare --control ... --variant ...`
