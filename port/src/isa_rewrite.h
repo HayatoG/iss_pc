@@ -30,11 +30,17 @@ typedef struct {
     /* Set before isa_rewrite_apply: the stubs do not count hits (no shared hits[] writes from
      * every thread); the report says "off". 0, the zero-initialized default, counts. */
     int no_hits;
+    /* Set before isa_rewrite_apply (TLG_EXTRQ_INLINE=1): SSE4A sites whose result an SSE2 sequence
+     * can compute (EXTRQ with a register control and distinct registers, EXTRQ and INSERTQ with
+     * immediates) get an inline stub instead of the isa_emulate_sse4a call. Same results (upper
+     * qword zeroed, as AMD hardware does); GPRs, flags and every other XMM/YMM bit kept. */
+    int inline_sse4a;
 } IsaTable;
 enum { ISA_MEM_RELOCATED_FAULTABLE = 2 };
 typedef struct { uint32_t groups, protected_instructions, short_relays, skipped; } IsaRedZoneReport;
-/* rewritten = jmp + relocated + int3; skipped and unsupported_needed are outside it. */
-typedef struct { uint32_t rewritten, jmp, relocated, int3, skipped, unsupported_needed; } IsaReport;
+/* rewritten = jmp + relocated + int3; skipped and unsupported_needed are outside it. inlined: the
+ * jmp/relocated SSE4A sites with an inline stub (IsaTable.inline_sse4a). */
+typedef struct { uint32_t rewritten, jmp, relocated, int3, skipped, unsupported_needed, inlined; } IsaReport;
 enum { ISA_STUB_BYTES = 256 };
 
 /* Parses a G3ISA1 file (spec 4.4). NULL and one stderr line ("ISA: <reason>") when invalid. */
