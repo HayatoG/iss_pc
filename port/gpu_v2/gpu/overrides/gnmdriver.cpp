@@ -33,6 +33,7 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "native_passes.h"
+#include "submit_gate.h"
 
 uint64_t IssImageBase(); // bridge.cpp
 namespace iss::native_shadow {
@@ -228,6 +229,9 @@ s32 PS4_SYSV_ABI sceGnmAddEqEvent(OrbisKernelEqueue eq, u64 id, void* udata) {
 
 int PS4_SYSV_ABI sceGnmAreSubmitsAllowed() {
     LOG_TRACE(Lib_GnmDriver, "called");
+    if (!iss::submit_gate::GfxWaits()) {
+        return 1; // ISS_SUBMIT_GATE=off: submissions never wait for the lock.
+    }
     return submission_lock == 0;
 }
 
@@ -365,7 +369,9 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
     }
 
     SubmitLockGuard lk{};
-    WaitGpuIdle(GateSite::Asc);
+    if (iss::submit_gate::AscWaits()) {
+        WaitGpuIdle(GateSite::Asc);
+    }
 
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
@@ -2414,7 +2420,13 @@ static inline s32 PerformSubmit(u32 count, const u32* dcb_gpu_addrs[], u32* dcb_
     // exact registers (submit mode) before the command processor can reach these command
     // buffers. Submit mode starts once from the command processor's registers, idle.
     if (iss::native_passes::NeedsSeed()) {
-        WaitGpuIdle(GateSite::Gfx);
+        if (iss::submit_gate::GfxWaits()) {
+            WaitGpuIdle(GateSite::Gfx);
+        } else {
+            // ISS_SUBMIT_GATE=off: no submission lock, wait until the command processor has
+            // processed every submission before reading its registers (once).
+            liverpool->WaitGpuIdle();
+        }
         iss::native_passes::Seed(liverpool->regs.reg_array.data(),
                                  reinterpret_cast<const u32*>(&liverpool->GfxCsState()),
                                  u32(sizeof(AmdGpu::ComputeProgram) / 4));
@@ -2545,7 +2557,9 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
 
     SubmitLockGuard lk{};
-    WaitGpuIdle(GateSite::Gfx);
+    if (iss::submit_gate::GfxWaits()) {
+        WaitGpuIdle(GateSite::Gfx);
+    }
 
     const s32 patch_result =
         PatchFlipRequest(cmdbuf, size_dw, vo_handle, buf_idx, flip_mode, flip_arg, nullptr /*unk*/);
@@ -2588,7 +2602,9 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
     }
 
     SubmitLockGuard lk{};
-    WaitGpuIdle(GateSite::Gfx);
+    if (iss::submit_gate::GfxWaits()) {
+        WaitGpuIdle(GateSite::Gfx);
+    }
 
     return PerformSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
                          const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes);
@@ -2605,8 +2621,8 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
     SubmitLockGuard lk{};
-    WaitGpuIdle(GateSite::Done);
-    {
+    if (iss::submit_gate::GfxWaits()) {
+        WaitGpuIdle(GateSite::Done);
         // Checked and set under m_wait_idle: a GpuIdle signal (ResetSubmissionLock) between the
         // check and the store would otherwise be lost and leave the lock set.
         std::unique_lock lock{m_wait_idle};
@@ -3201,6 +3217,7 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
 
     Platform::IrqC::Instance()->Register(Platform::InterruptId::GpuIdle, ResetSubmissionLock,
                                          nullptr);
+    iss::submit_gate::Log();
 
     LIB_FUNCTION("b0xyllnVY-I", "libSceGnmDriver", 1, "libSceGnmDriver", sceGnmAddEqEvent);
     LIB_FUNCTION("b08AgtPlHPg", "libSceGnmDriver", 1, "libSceGnmDriver", sceGnmAreSubmitsAllowed);
