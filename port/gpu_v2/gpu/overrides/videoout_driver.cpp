@@ -50,8 +50,10 @@ std::atomic<u64> next_trace_id{1};
 //     turns that into one long sleep and then catch-up ticks without one: the vblanks (and the
 //     flips the CP waits on, sceGnmInsertWaitFlipDone) cluster on the OS tick.
 //   hr: absolute deadlines (next += period) slept on a high resolution waitable timer; more than
-//     a period behind, the clock resyncs (next = now + period) instead of bursting.
-//   hrspin: hr, sleeping to ~200 us before the deadline and spinning (_mm_pause) to it.
+//     a period behind, the clock resyncs (next = now + period) instead of bursting, and the
+//     vblank count still advances by the deadlines it skipped (one event for the tick).
+//   hrspin: hr, sleeping to kVblankSpinMargin before the deadline and spinning (_mm_pause) to it.
+// Without a high resolution timer (IssVblankSleepNs(0) == 0) hr/hrspin fall back to legacy.
 enum class VblankTimer { Legacy, Hr, HrSpin };
 
 VblankTimer VblankTimerMode() {
@@ -75,6 +77,10 @@ const char* VblankTimerName(VblankTimer mode) {
     }
 }
 
+// hrspin: how long before the deadline the sleep ends and the spin starts. The high resolution
+// waitable timer is about 0.5 ms granular, so a smaller margin often overshoots the deadline.
+constexpr auto kVblankSpinMargin = std::chrono::milliseconds(1);
+
 // The hr/hrspin present clock: ticks on an absolute grid of the vblank period.
 class PresentClock {
 public:
@@ -85,9 +91,8 @@ public:
 
     // Waits for the current deadline.
     void Wait() const {
-        constexpr auto spin_margin = std::chrono::microseconds(200);
         auto now = Clock::now();
-        const auto sleep_until = spin ? next - spin_margin : next;
+        const auto sleep_until = spin ? next - kVblankSpinMargin : next;
         if (now < sleep_until) {
             IssVblankSleepNs(std::chrono::duration_cast<std::chrono::nanoseconds>(sleep_until - now)
                                  .count());
@@ -105,15 +110,17 @@ public:
         }
     }
 
-    // After a tick: the next deadline. Returns true when it resynced.
-    bool Advance() {
+    // After a tick: the next deadline. Returns 0, or on a resync the number of deadlines it
+    // skipped (every one at or before now; the next tick stands for the one after now).
+    u64 Advance() {
         next += period;
         const auto now = Clock::now();
         if (now - next > period) {
+            const u64 skipped = static_cast<u64>((now - next) / period) + 1;
             next = now + period;
-            return true;
+            return skipped;
         }
-        return false;
+        return 0;
     }
 
 private:
@@ -578,21 +585,26 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     Common::SetCurrentThreadRealtime(vblank_period);
 
     Common::AccurateTimer timer{vblank_period};
-    const VblankTimer timer_mode = VblankTimerMode();
+    VblankTimer timer_mode = VblankTimerMode();
+    // hr/hrspin need the high resolution timer (the probe creates this thread's timer): on a
+    // plain one they would sleep ~15.6 ms per tick with nothing to catch up, so take legacy.
+    const int highres = timer_mode == VblankTimer::Legacy ? 0 : IssVblankSleepNs(0);
+    if (timer_mode != VblankTimer::Legacy && !highres) {
+        std::fprintf(stderr, "PORT_TUNING vblank_timer=%s -> legacy (no high-resolution timer)\n",
+                     VblankTimerName(timer_mode));
+        timer_mode = VblankTimer::Legacy;
+    }
     const bool legacy_timer = timer_mode == VblankTimer::Legacy;
     PresentClock clock{timer_mode, vblank_period};
     VblankStats vblank_stats{VblankTimerName(timer_mode), vblank_period};
     std::fprintf(stderr, "PORT_TUNING vblank_timer=%s hz=%u highres=%d\n",
-                 VblankTimerName(timer_mode), EmulatorSettings.GetVblankFrequency(),
-                 legacy_timer ? 0 : IssVblankSleepNs(0));
-    // The end of a tick: the legacy timer's debt, or the next deadline of the hr clock.
+                 VblankTimerName(timer_mode), EmulatorSettings.GetVblankFrequency(), highres);
+    // The hr clock's next deadline. Returns the deadlines a resync skipped (0 without one).
     bool resynced = false;
-    const auto end_tick = [&] {
-        if (legacy_timer) {
-            timer.End();
-        } else {
-            resynced = clock.Advance();
-        }
+    const auto advance_clock = [&]() -> u64 {
+        const u64 skipped = clock.Advance();
+        resynced = skipped != 0;
+        return skipped;
     };
 
     const auto receive_request = [this](u64 vblank_count, s32 flip_rate,
@@ -659,7 +671,12 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         was_paused = paused;
         if (paused) {
             DrawLastFrame();
-            end_tick();
+            // Paused ticks do not count, so neither do the ones a paused resync skipped.
+            if (legacy_timer) {
+                timer.End();
+            } else {
+                advance_clock();
+            }
             continue;
         }
 
@@ -691,6 +708,10 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
         }
 
+        // The hr clock's next deadline, before the count: a resync after a stall in this tick
+        // (a blocked FIFO present, say) is counted with it.
+        const u64 skipped_vblanks = legacy_timer ? 0 : advance_clock();
+
         u64 new_vblank_count{};
         u64 vblank_event_count{};
         {
@@ -710,8 +731,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 }
             }
 
-            // Update vblank status
-            vblank_status.count++;
+            // Update vblank status. The deadlines an hr resync skipped still count (games time
+            // with the count), without an event or a notify of their own.
+            vblank_status.count += 1 + skipped_vblanks;
             IssFrames::vblanks.fetch_add(1, std::memory_order_relaxed);
             vblank_status.process_time = Libraries::Kernel::sceKernelGetProcessTime();
             vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
@@ -726,7 +748,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                                 vblank_event_count);
         }
 
-        end_tick();
+        if (legacy_timer) timer.End();
     }
 }
 
