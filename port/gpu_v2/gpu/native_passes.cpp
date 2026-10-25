@@ -609,7 +609,7 @@ thread_local Lane* thread_lane = nullptr;
 
 u64 ISS_SYSV DrawIndexHook(CommandBuffer* dcb, u32 count, u64 index_address, u32 flags) {
     if ((stats.draws.fetch_add(1, std::memory_order_relaxed) & 0x3FFFF) == 0x3FFFF &&
-        callbacks_set.load(std::memory_order_acquire) && cb.report)
+        callbacks_set.load(std::memory_order_acquire) && cb.report && ReportTimeDue(Reporter::Passes))
         cb.report();
     if (!callbacks_set.load(std::memory_order_acquire) ||
         !(dcb->begin <= dcb->cursor && dcb->cursor <= dcb->end)) {
@@ -1916,6 +1916,36 @@ bool AscRecorded(const u32* ring) {
         return true;
     }
     return false;
+}
+
+namespace {
+u64 StatsIntervalUs() {
+    static const u64 us = [] {
+        const char* p = std::getenv("ISS_NATIVE_STATS_INTERVAL_MS");
+        const u64 ms = p ? std::strtoull(p, nullptr, 10) : 0;
+        if (ms) std::fprintf(stderr, "PORT_TUNING native_stats_interval_ms=%llu\n", (unsigned long long)ms);
+        return ms * 1000;
+    }();
+    return us;
+}
+std::array<std::atomic<u64>, size_t(Reporter::Count)> report_us{};
+} // namespace
+
+bool ReportTimeDue(Reporter reporter) {
+    const u64 interval = StatsIntervalUs();
+    if (!interval) return true;
+    const u64 now = NowUs();
+    auto& last = report_us[size_t(reporter)];
+    u64 previous = last.load(std::memory_order_relaxed);
+    // The first call reports at once, as the count's first one does.
+    if (previous && now - previous < interval) return false;
+    return last.compare_exchange_strong(previous, now, std::memory_order_relaxed);
+}
+
+bool ReportDue(Reporter reporter, u64& count) {
+    if (!StatsIntervalUs()) return (++count & 1023) == 1;
+    ++count;
+    return ReportTimeDue(reporter);
 }
 
 void Report() {

@@ -1,5 +1,6 @@
 #include <atomic>
 #include "deep_profile.h"
+#include "minimal_logs.h"
 #include "repeat_census.h"
 #include "compute_phase.h"
 #include "runtime_timeline.h"
@@ -3565,7 +3566,12 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.memory = device_memory;
         backing.offset = memory_offset >> block_shift;
 
-        LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
+        // ISS_MINIMAL_LOGS: counted (RESIDENT_RANGES every 5 s) after the first 16 lines.
+        static iss::minimal_logs::Summary resident_ranges_log{"RESIDENT_RANGES", "kb", 16};
+        if (Common::Log::ShouldLog(Common::Log::Class::Render, Common::Log::Level::Info) &&
+            (!iss::minimal_logs::Enabled() ||
+             resident_ranges_log.Note(((backing.end - backing.start) << block_shift) >> 10)))
+            LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
 
         const vk::SparseMemoryBind bind{
             .resourceOffset = (range.start << block_shift) - arena->cpu_addr,

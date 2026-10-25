@@ -2,6 +2,7 @@
 #include "../../../src/iss_native_resolution.h"
 #include <algorithm>
 #include "parallel.h"
+#include "minimal_logs.h"
 #include "native_item_identity.h"
 #include "repeat_census.h"
 #include "unified_memory.h"
@@ -4255,7 +4256,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                         warning = {stage.pgm_hash, vsharp.GetSize(), size, 0};
                     }
                     const u64 count = ++warning.count;
-                    if (log_all || (count & (count - 1)) == 0) {
+                    // ISS_MINIMAL_LOGS: counted (BUFFER_CLAMP_LINES every 5 s) after 32 lines;
+                    // the requested size of a recurring descriptor varies, so each is "repeat 1".
+                    static iss::minimal_logs::Summary clamp_log{"BUFFER_CLAMP_LINES", nullptr, 32};
+                    if ((log_all || (count & (count - 1)) == 0) &&
+                        Common::Log::ShouldLog(Common::Log::Class::Render, Common::Log::Level::Error) &&
+                        (!iss::minimal_logs::Enabled() || clamp_log.Note(0))) {
                         LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x} (repeat {})",
                                   vsharp.GetSize(), size, stage.pgm_hash, count);
                     }

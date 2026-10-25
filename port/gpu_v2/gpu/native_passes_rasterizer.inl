@@ -1539,7 +1539,7 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::RecorderExecute};
     using namespace NativePasses;
     auto& c = cp_stats;
-    if ((++c.report & 1023) == 1) Report();
+    if (np::ReportDue(np::Reporter::Passes, c.report)) Report();
     const bool indirect_first = ((s.first_draw[0] >> 8) & 0xFF) == 0x25;
     const auto reject = [&](Reject why) {
         ++c.reject[why];
