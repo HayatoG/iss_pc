@@ -569,6 +569,8 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
             else if(name=="asc_yield_packets")set(tuning.asc_yield_packets,value);
             else if(name=="recorder_spin_us")set(tuning.recorder_spin_us,value);
             else if(name=="tiered_compute_pipelines")set(tuning.tiered_compute_pipelines,value);
+            else if(name=="max_gpu_lag_frames")set(tuning.max_gpu_lag_frames,value);
+            else if(name=="gpu_sync_frame_end")set(tuning.gpu_sync_frame_end,value);
             // relaxed_site=<eboot offset> (repeatable, up to 8): reads of GPU written memory from
             // that 256 byte block of the game's code do not wait for the GPU (readback_relaxed_sites).
             else if(name=="relaxed_site"){const u32 n=tuning.num_relaxed_sites.load();if(n<Common::Perf::Tuning::MaxRelaxedSites){tuning.relaxed_sites[n]=std::strtoull(value.c_str(),nullptr,0)&~0xFFull;tuning.num_relaxed_sites.store(n+1);}}

@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <intrin.h>
 #include <algorithm>
+#include <atomic>
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -15,6 +16,7 @@
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
+#include "common/perf_stats.h"
 #include "common/slot_vector.h"
 #include "core/address_space.h"
 #include "core/debug_state.h"
@@ -91,16 +93,67 @@ static u32 asc_next_offs_dw[Liverpool::NumComputeRings];
 static VAddr tessellation_factors_ring_addr = -1;
 static constexpr u32 tessellation_offchip_buffer_size = 0x800000u;
 
+// When the command processor last signaled GpuIdle (ns, 0: consumed by a submission).
+static std::atomic<u64> gpu_idle_signal_ns{};
+
 static void ResetSubmissionLock(Platform::InterruptId irq) {
-    std::unique_lock lock{m_wait_idle};
-    submission_lock = 0;
-    cv_lock.notify_all();
+    {
+        std::unique_lock lock{m_wait_idle};
+        submission_lock = 0;
+        cv_lock.notify_all();
+    }
+    gpu_idle_signal_ns.store(Common::Perf::NowNs(), std::memory_order_relaxed);
 }
 
-static void WaitGpuIdle() {
+// Who waits for the submission lock (Submit gate stats).
+enum class GateSite : u32 { Gfx, Asc, Done };
+
+static void WaitGpuIdle(GateSite site) {
     HLE_TRACE;
     std::unique_lock lock{m_wait_idle};
+    if (submission_lock == 0) {
+        return;
+    }
+    const u64 start = Common::Perf::NowNs();
     cv_lock.wait(lock, [] { return submission_lock == 0; });
+    const u64 ns = Common::Perf::NowNs() - start;
+    using namespace Common::Perf;
+    static constexpr Counter waits[]{SubmitGateWaitsGfx, SubmitGateWaitsAsc, SubmitGateWaitsDone};
+    static constexpr Counter times[]{SubmitGateWaitNsGfx, SubmitGateWaitNsAsc,
+                                     SubmitGateWaitNsDone};
+    Add(waits[static_cast<u32>(site)]);
+    Add(times[static_cast<u32>(site)], ns);
+}
+
+// m_submit_lock, timed only when another guest thread holds it.
+class SubmitLockGuard {
+public:
+    SubmitLockGuard() {
+        if (!m_submit_lock.try_lock()) {
+            const u64 start = Common::Perf::NowNs();
+            m_submit_lock.lock();
+            Common::Perf::Add(Common::Perf::SubmitLockContentions);
+            Common::Perf::Add(Common::Perf::SubmitLockWaitNs, Common::Perf::NowNs() - start);
+        }
+    }
+    ~SubmitLockGuard() {
+        m_submit_lock.unlock();
+    }
+    SubmitLockGuard(const SubmitLockGuard&) = delete;
+    SubmitLockGuard& operator=(const SubmitLockGuard&) = delete;
+};
+
+// A submission while the command processor is idle: the time since its GpuIdle signal is how
+// long it waited for the guest (Submit gate stats). Called under m_submit_lock.
+static void NoteAdmit() {
+    if (gpu_idle_signal_ns.load(std::memory_order_relaxed) == 0) {
+        return;
+    }
+    const u64 idle_at = gpu_idle_signal_ns.exchange(0, std::memory_order_relaxed);
+    if (idle_at != 0 && liverpool->IsGpuIdle()) {
+        Common::Perf::Add(Common::Perf::IdleAdmitGaps);
+        Common::Perf::Add(Common::Perf::IdleAdmitGapNs, Common::Perf::NowNs() - idle_at);
+    }
 }
 
 // Write a special ending NOP packet with N DWs data block
@@ -311,8 +364,8 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
         return;
     }
 
-    std::scoped_lock lk{m_submit_lock};
-    WaitGpuIdle();
+    SubmitLockGuard lk{};
+    WaitGpuIdle(GateSite::Asc);
 
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
@@ -330,6 +383,7 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
     if (next_offs_dw == offs_dw) {
         return;
     }
+    NoteAdmit();
 
     if (next_offs_dw < offs_dw && next_offs_dw != 0) {
         // For cases if a submission is split at the end of the ring buffer, we need to submit it in
@@ -1404,7 +1458,7 @@ int PS4_SYSV_ABI sceGnmMapComputeQueue(u32 pipe_id, u32 queue_id, VAddr ring_bas
         return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_READ_PTR_ADDR;
     }
 
-    std::scoped_lock lk{m_submit_lock};
+    SubmitLockGuard lk{};
     const auto gnm_vqid = liverpool->MapAsc(ring_base_addr, read_ptr_addr, ring_size_dw, pipe_id);
     if (!gnm_vqid) return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_QUEUE_ID;
     LOG_INFO(Lib_GnmDriver, "ASC pipe {} queue {} mapped to vqueue {}", pipe_id, queue_id,
@@ -2360,11 +2414,12 @@ static inline s32 PerformSubmit(u32 count, const u32* dcb_gpu_addrs[], u32* dcb_
     // exact registers (submit mode) before the command processor can reach these command
     // buffers. Submit mode starts once from the command processor's registers, idle.
     if (iss::native_passes::NeedsSeed()) {
-        WaitGpuIdle();
+        WaitGpuIdle(GateSite::Gfx);
         iss::native_passes::Seed(liverpool->regs.reg_array.data(),
                                  reinterpret_cast<const u32*>(&liverpool->GfxCsState()),
                                  u32(sizeof(AmdGpu::ComputeProgram) / 4));
     }
+    NoteAdmit();
     iss::native_passes::BeforeSubmit(count, dcb_gpu_addrs, dcb_sizes_in_bytes);
     NoteGnmSubmit(count, dcb_gpu_addrs, dcb_sizes_in_bytes);
     if (DebugState.ShouldPauseInSubmit()) {
@@ -2489,8 +2544,8 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     auto* cmdbuf = dcb_gpu_addrs[count - 1];
     const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
 
-    std::scoped_lock lk{m_submit_lock};
-    WaitGpuIdle();
+    SubmitLockGuard lk{};
+    WaitGpuIdle(GateSite::Gfx);
 
     const s32 patch_result =
         PatchFlipRequest(cmdbuf, size_dw, vo_handle, buf_idx, flip_mode, flip_arg, nullptr /*unk*/);
@@ -2532,8 +2587,8 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
         }
     }
 
-    std::scoped_lock lk{m_submit_lock};
-    WaitGpuIdle();
+    SubmitLockGuard lk{};
+    WaitGpuIdle(GateSite::Gfx);
 
     return PerformSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
                          const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes);
@@ -2549,8 +2604,8 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[
 s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
-    std::scoped_lock lk{m_submit_lock};
-    WaitGpuIdle();
+    SubmitLockGuard lk{};
+    WaitGpuIdle(GateSite::Done);
     if (!liverpool->IsGpuIdle()) {
         submission_lock = true;
     }
@@ -2566,13 +2621,13 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
 int PS4_SYSV_ABI sceGnmUnmapComputeQueue(u32 vqid) {
     std::optional<u64> generation;
     {
-        std::scoped_lock lk{m_submit_lock};
+        SubmitLockGuard lk{};
         generation = liverpool->BeginUnmapAsc(vqid);
     }
     if (!generation || !liverpool->WaitAscDrained(vqid, *generation))
         return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_QUEUE_ID;
     {
-        std::scoped_lock lk{m_submit_lock};
+        SubmitLockGuard lk{};
         if (!liverpool->FinishUnmapAsc(vqid, *generation))
             return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_QUEUE_ID;
         asc_next_offs_dw[vqid - 1] = 0;
