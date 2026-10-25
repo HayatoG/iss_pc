@@ -4,6 +4,7 @@
 #include "compute_phase.h"
 #include "runtime_timeline.h"
 #include "unified_memory.h"
+#include "readback_stats.h"
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -1303,10 +1304,40 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
     // Guest write faults invalidate at most 8 bytes, unmaps and other invalidations whole
     // ranges. Faults of the command processor thread come with assume_locks.
     const bool is_fault = size <= 8;
+    bool read_back = false;
     const bool discarded = memory_tracker->InvalidateRegion(
-        device_addr, size, is_fault, assume_locks, [this, device_addr, size, assume_locks] {
+        device_addr, size, is_fault, assume_locks,
+        [this, device_addr, size, assume_locks, is_fault, &read_back] {
+            namespace rs = iss::readback_stats;
+            read_back = true;
+            if (!is_fault) {
+                rs::Add(rs::WriteRange);
+                ReadMemory(device_addr, size, true, assume_locks);
+                return;
+            }
+            const u64 start = Common::Perf::NowNs();
             ReadMemory(device_addr, size, true, assume_locks);
+            rs::Add(rs::WriteFault);
+            rs::Add(rs::WriteFaultNs, Common::Perf::NowNs() - start);
         });
+    if (is_fault) {
+        // Readback stats: write fault readbacks inside a forward stream of the same thread's
+        // write faults (a memcpy or a file read over the page), most likely overwritten whole.
+        namespace rs = iss::readback_stats;
+        constexpr u64 StreamPages = 65;
+        thread_local u64 last_fault_page = 0, entry_page = 0;
+        const u64 page = device_addr / BYTES_PER_PAGE;
+        if (entry_page != 0) {
+            if (page > entry_page && page - entry_page <= StreamPages) rs::Add(rs::StreamInterior);
+            entry_page = 0;
+        }
+        if (read_back && device_addr % BYTES_PER_PAGE < 64 && last_fault_page != 0 &&
+            page > last_fault_page && page - last_fault_page <= StreamPages) {
+            rs::Add(rs::StreamEntry);
+            entry_page = page;
+        }
+        last_fault_page = page;
+    }
     if (is_fault && !assume_locks) {
         // Write fault window (ISS_FAULT_WINDOW_KB, power of two, 0 off): the guest fills its
         // per-frame buffers (the particle arena) sequentially, one fault per 4 KB page. The clean
@@ -1364,6 +1395,28 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                      assume_locks ? "gpu-thread" : "guest");
         }
     }
+}
+
+void BufferCache::DiscardOverwrite(VAddr device_addr, u64 size) {
+    namespace rs = iss::readback_stats;
+    if (G4FeedbackProbeEnabled()) feedback_writer_probe.Invalidate(device_addr, size);
+    InvalidatePreparedPacketAccess(device_addr, size);
+    rs::Add(rs::DiscardCalls);
+    // As a write fault on each page would, except that GPU modified pages are discarded (the
+    // guest overwrites every byte of them next), not read back. A readback pending on them
+    // would land over the guest's bytes: then they are read back first, as before.
+    bool blocked = false;
+    const bool discarded = memory_tracker->InvalidateRegion(
+        device_addr, size, false, false, true, [this, device_addr, size, &blocked] {
+            blocked = true;
+            ReadMemory(device_addr, size, true, false);
+        });
+    if (discarded) {
+        Common::Perf::Add(Common::Perf::ReadbackDiscards);
+        rs::Add(rs::DiscardHits);
+        rs::Add(rs::DiscardBytes, size);
+    }
+    if (blocked) rs::Add(rs::DiscardBlocked);
 }
 
 std::pair<VAddr, VAddr> BufferCache::GetReadbackWindow(const Buffer* arena, VAddr device_addr,
@@ -1495,6 +1548,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     if (cp_split_enabled && liverpool && liverpool->CpSplitActive())
         ASSERT_MSG(liverpool->AscOwnerPausedForGraphics(),
                    "G4 readback entered without an acknowledged C owner pause");
+    if (!is_write) iss::readback_stats::Add(iss::readback_stats::Read);
     const u64 request_ns = Common::Perf::NowNs();
     static std::atomic<u64> trace_sequence{};
     const auto trace_id=iss::timeline::enabled?trace_sequence.fetch_add(1,std::memory_order_relaxed)+1:0;
@@ -1657,6 +1711,8 @@ void BufferCache::WaitReadback(VAddr device_addr, Vulkan::Semaphore* semaphore, 
         semaphore->Wait(tick);
     }
     Common::Perf::Add(Common::Perf::ReadbackAsyncWaitNs, Common::Perf::NowNs() - wait_start);
+    iss::readback_stats::Add(iss::readback_stats::SemWaits);
+    iss::readback_stats::Add(iss::readback_stats::SemNs, Common::Perf::NowNs() - wait_start);
     iss::timeline::Emit("readback_wait_end",reinterpret_cast<u64>(semaphore),tick,device_addr,
         semaphore->KnownGpuTick(),0,0,Common::Perf::NowNs()-wait_start);
     LogReadbackDiag({.event = "wait_end", .address = device_addr,
@@ -1810,6 +1866,7 @@ bool BufferCache::CollectReadback(const Buffer* arena, PendingReadback& readback
         copy.dstOffset += readback.download.offset;
     }
     Common::Perf::Add(Common::Perf::ReadbackBytes, total_size_bytes);
+    iss::readback_stats::Add(iss::readback_stats::Bytes, total_size_bytes);
     return true;
 }
 
@@ -2611,6 +2668,10 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         FinishAllQueues();
         Common::Perf::Add(Common::Perf::ReadbackSyncNs, Common::Perf::NowNs() - sync_start);
         Common::Perf::Add(Common::Perf::ReadbackBytes, total_size_bytes);
+        namespace rs = iss::readback_stats;
+        rs::Add(rs::Bytes, total_size_bytes);
+        rs::Add(rs::IdleWaits);
+        rs::Add(rs::IdleNs, Common::Perf::NowNs() - sync_start);
     }
 
     download.buffer->Invalidate(download.offset, download.size);
