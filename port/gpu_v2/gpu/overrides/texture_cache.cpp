@@ -414,7 +414,7 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
             MarkAsMaybeDirty(image_id, image);
         }
     });
-    // ISS_TEX_FAULT_STREAK_KB (default 256, 0 off): a guest thread writing on through image
+    // ISS_TEX_FAULT_STREAK_KB (default 0, opt-in): a guest thread writing on through image
     // pages it faults on one after the other gets the images of the next window marked maybe
     // dirty now (hashed, untracked: re-uploaded at their next use only if their bytes changed),
     // as their faults would do one by one. Every ~2 s the game copies ~11 MB over a pool of
@@ -422,7 +422,12 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     // (the "mini frame skips", 2026-10-17).
     static const u64 streak_bytes = [] {
         const char* setting = std::getenv("ISS_TEX_FAULT_STREAK_KB");
-        const u64 kb = setting ? std::strtoull(setting, nullptr, 10) : 256;
+        // Native ultrawide streaming freeze, 2026-10-22: the speculative
+        // MarkAsMaybeDirty below can hash a GPU-protected page while holding
+        // mutex. Its nested read fault queues a readback and waits for the CP,
+        // which can itself be waiting for this mutex in FindImage. Keep normal
+        // per-page invalidation; do not hash ahead from the guest fault handler.
+        const u64 kb = setting ? std::strtoull(setting, nullptr, 10) : 0;
         return std::min<u64>(kb, 4096) * 1024;
     }();
     if (size <= 8 && streak_bytes != 0) {

@@ -102,6 +102,7 @@ void tlggpu_mouse_take(TlgGpuMouse *mouse);
  * tlg.ini key_map value, the TLG_KEY_MAP syntax (runtime_pad.c), read once at start. */
 typedef struct {
     int32_t mouse_enabled, invert_y;
+    int32_t rumble;             /* controller vibration on (tlg.ini rumble, TLG_RUMBLE) */
     float sensitivity, smoothing, accel, deadzone;
     char key_map[512];
     float vertical; /* mouse_sensitivity_y: y's sensitivity over x's; 0 (zeroed struct) = 1 */

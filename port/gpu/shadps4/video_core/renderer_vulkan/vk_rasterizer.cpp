@@ -997,6 +997,16 @@ void Rasterizer::PrintPipeStats() {
             }
         }
     }
+    std::printf("\n  compute queue steps over 0.5%%:");
+    for (u32 r = 0; r < DrawPipe::NumReasons; ++r) {
+        const u64 step_cycles = draw_pipe->compute_cycles[r];
+        if (step_cycles * 200 > cycles) {
+            std::printf(" %s=%.0f (%.1f%%)",
+                        r < 256 ? magic_enum::enum_name(AmdGpu::PM4ItOpcode(r)).data()
+                                : "ProcessCommands",
+                        draw_pipe->compute_packets[r] / seconds, 100.0 * step_cycles / cycles);
+        }
+    }
     std::printf("\n  stage A waits over 0.5%%:");
     for (const auto& [function, lines] : drain_sites) {
         for (const auto& [line, waited] : lines) {
@@ -1008,6 +1018,8 @@ void Rasterizer::PrintPipeStats() {
     std::printf("\n");
     drain_sites.clear();
     draw_pipe->drains_by_reason = {};
+    draw_pipe->compute_cycles = {};
+    draw_pipe->compute_packets = {};
     window = now;
     last_tsc = tsc;
     last_packets = draw_pipe->packets;

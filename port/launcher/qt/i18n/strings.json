@@ -108,6 +108,8 @@
   "ctl_what_mouse_smoothing": {"en": "Evens out the camera motion; higher values feel softer and a little slower.", "pt": "Deixa o movimento da câmera mais uniforme; valores altos ficam mais suaves e um pouco mais lentos."},
   "ctl_mouse_accel": {"en": "Acceleration", "pt": "Aceleração"},
   "ctl_what_mouse_accel": {"en": "Fast movements turn more than slow ones. 0 is linear.", "pt": "Movimentos rápidos giram mais que os lentos. 0 é linear."},
+  "ctl_rumble": {"en": "Vibration", "pt": "Vibração"},
+  "ctl_what_rumble": {"en": "The controller vibrates with the game. Turn it off if you do not want vibration or if it makes the controller misbehave.", "pt": "O controle vibra com o jogo. Desligue se não quiser vibração ou se ela fizer o controle se comportar mal."},
   "ctl_mouse_deadzone": {"en": "Anti-dead zone", "pt": "Anti-zona morta"},
   "ctl_what_mouse_deadzone": {"en": "Small mouse movements skip the game's stick dead zone. Raise it if slow movements do nothing.", "pt": "Movimentos pequenos do mouse pulam a zona morta do analógico do jogo. Aumente se movimentos lentos não fizerem nada."},
   "ctl_sec_touch": {"en": "Mouse as the touchpad", "pt": "Mouse como touchpad"},

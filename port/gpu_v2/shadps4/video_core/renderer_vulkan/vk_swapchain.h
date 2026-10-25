@@ -30,6 +30,9 @@ public:
 
     /// Acquires the next image in the swapchain.
     bool AcquireNextImage();
+    // Presenter thread only: release on focus loss and recreate on mode changes.
+    bool SyncExclusiveState();
+    bool NeedsRecreation() const { return needs_recreation; }
 
     /// Presents the current image and move to the next one
     bool Present();
@@ -115,6 +118,7 @@ private:
     const Instance& instance;
     const Frontend::WindowSDL& window;
     vk::SwapchainKHR swapchain{};
+    vk::Fence acquire_fence{};
     vk::SurfaceKHR surface{};
     vk::SurfaceFormatKHR surface_format;
     vk::Format view_format;
@@ -134,6 +138,10 @@ private:
     bool needs_recreation = true;
     bool needs_hdr = false;    // The game requested HDR swapchain
     bool supports_hdr = false; // SC supports HDR output
+    bool exclusive_requested = false, exclusive_configured = false, exclusive_active = false;
+    u64 exclusive_retry_ns = 0;
+    unsigned exclusive_attempts = 0;
+    void ReleaseExclusive();
 };
 
 } // namespace Vulkan

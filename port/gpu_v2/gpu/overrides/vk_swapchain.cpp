@@ -13,8 +13,106 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "tlg_settings.h"
+#include "tlg_graphics.h"
+#include "swapchain_policy.h"
+#include "swapchain_drain.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <vulkan/vulkan_win32.h>
+#endif
 
 namespace Vulkan {
+extern bool g_iss_full_screen_exclusive;
+
+// Adapted from axylpup/shadPS4 second-son-v1.1, 5e96c249 + f6f32614:
+// mark the drain point under queue-submit serialization, wait OUTSIDE that
+// lock so a later submission can satisfy earlier semaphore dependencies.
+static vk::Result WaitForSwapchainIdle(const Instance& instance){
+    const auto device=instance.GetDevice();
+    const std::array queues={instance.GetPresentQueue(),instance.GetGraphicsQueue()};
+    const unsigned count=queues[0]==queues[1]?1:2;
+    std::array<vk::Fence,2> fences{};
+    vk::Result result=vk::Result::eSuccess;
+    unsigned submitted=0;
+    for(unsigned i=0;i<count;i++){
+        const auto created=device.createFence({});result=created.result;fences[i]=created.value;
+        if(result!=vk::Result::eSuccess)break;
+    }
+    SubmitPresentationDrain(Scheduler::submit_mutex,[&]{
+      if(result==vk::Result::eSuccess){
+        for(unsigned i=0;i<count;i++){
+            result=queues[i].submit(nullptr,fences[i]);
+            if(result!=vk::Result::eSuccess)break;
+            ++submitted;
+        }
+      }
+    },[&]{if(submitted){
+        const auto waited=device.waitForFences({submitted,fences.data()},true,std::numeric_limits<u64>::max());
+        if(waited!=vk::Result::eSuccess)result=waited;
+    }});
+    for(auto fence:fences)if(fence)device.destroyFence(fence);
+    return result;
+}
+
+void Swapchain::ReleaseExclusive(){
+#ifdef _WIN32
+    if(exclusive_active && swapchain){
+        auto release=reinterpret_cast<PFN_vkReleaseFullScreenExclusiveModeEXT>(instance.GetDevice().getProcAddr("vkReleaseFullScreenExclusiveModeEXT"));
+        if(release){const auto result=release(instance.GetDevice(),swapchain);
+            std::fprintf(stderr,"EXCLUSIVE release result=%d\n",int(result));}
+    }
+#endif
+    exclusive_active=false;
+    exclusive_attempts=0;exclusive_retry_ns=0;
+    if(exclusive_configured)TlgSettings::Get().exclusive_status=1;
+}
+
+bool Swapchain::SyncExclusiveState(){
+    const bool wanted=window.WantsExclusive();
+    if(wanted!=exclusive_requested)needs_recreation=true;
+    if(!window.CanPresent()){
+        ReleaseExclusive();return false;
+    }
+    if(!wanted && exclusive_active)ReleaseExclusive();
+#ifdef _WIN32
+    if(exclusive_configured && wanted && !exclusive_active && !needs_recreation){
+        if(TlgSettings::Get().display_mode!=TlgGraphics::ExclusiveFullscreen)return false;
+        const u64 now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if(now>=exclusive_retry_ns){
+            exclusive_retry_ns=now+1000000000ull;
+            if(exclusive_attempts==0){
+                const HWND hwnd=static_cast<HWND>(window.GetWindowInfo().render_surface);
+                RECT client{};POINT origin{};MONITORINFO monitor{sizeof(MONITORINFO)};
+                GetClientRect(hwnd,&client);ClientToScreen(hwnd,&origin);
+                GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor);
+                std::fprintf(stderr,"EXCLUSIVE geometry client=%ld,%ld %ldx%ld monitor=%ld,%ld %ldx%ld foreground=%d topmost=%d\n",
+                    origin.x,origin.y,client.right,client.bottom,monitor.rcMonitor.left,monitor.rcMonitor.top,
+                    monitor.rcMonitor.right-monitor.rcMonitor.left,monitor.rcMonitor.bottom-monitor.rcMonitor.top,
+                    int(GetForegroundWindow()==hwnd),int(bool(GetWindowLongPtrW(hwnd,GWL_EXSTYLE)&WS_EX_TOPMOST)));
+            }
+            auto acquire=reinterpret_cast<PFN_vkAcquireFullScreenExclusiveModeEXT>(instance.GetDevice().getProcAddr("vkAcquireFullScreenExclusiveModeEXT"));
+            const auto result=acquire?acquire(instance.GetDevice(),swapchain):VK_ERROR_EXTENSION_NOT_PRESENT;
+            ++exclusive_attempts;
+            exclusive_active=result==VK_SUCCESS;
+            TlgSettings::Get().exclusive_status=exclusive_active?2:1;
+            TlgSettings::Get().exclusive_problem=exclusive_active?nullptr:"Waiting for exclusive ownership; presentation paused until acquired";
+            std::fprintf(stderr,"EXCLUSIVE acquire result=%d active=%d\n",int(result),int(exclusive_active));
+            const auto action=WsiPolicy::ExclusiveAcquire(result,exclusive_attempts);
+            ASSERT_MSG(action!=WsiPolicy::Action::Fatal,"Device lost during exclusive acquisition");
+            if(action==WsiPolicy::Action::Fallback){
+                TlgSettings::Get().exclusive_status=-1;
+                TlgSettings::Get().exclusive_problem="Driver refused exclusive ownership; returned to Borderless";
+                TlgSettings::Get().display_mode=TlgGraphics::Borderless;
+                std::fprintf(stderr,"EXCLUSIVE acquisition refused after %u attempts; returning to Borderless\n",exclusive_attempts);
+                return false;
+            }
+        }
+    }
+#endif
+    return WsiPolicy::CanPresentExclusive(exclusive_configured,wanted,exclusive_active);
+}
 
 static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
     .format = vk::Format::eA2B10G10R10UnormPack32,
@@ -43,6 +141,11 @@ void Swapchain::Create(u32 width_, u32 height_) {
     Destroy();
 
     SetSurfaceProperties();
+    // The standalone Win32 probe reproduces exclusive acquisition refusal
+    // with Mailbox on this driver, while FIFO acquires successfully. Keep the
+    // user's normal presentation policy outside explicit exclusive mode.
+    FindPresentMode();
+    if(window.WantsExclusive())present_mode=vk::PresentModeKHR::eFifo;
 
     const std::array queue_family_indices = {
         instance.GetGraphicsQueueFamilyIndex(),
@@ -54,7 +157,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
     const vk::SharingMode sharing_mode =
         exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
     const auto format = needs_hdr ? SURFACE_FORMAT_HDR : surface_format;
-    const vk::SwapchainCreateInfoKHR swapchain_info = {
+    vk::SwapchainCreateInfoKHR swapchain_info = {
         .surface = surface,
         .minImageCount = image_count,
         .imageFormat = format.format,
@@ -73,7 +176,43 @@ void Swapchain::Create(u32 width_, u32 height_) {
         .oldSwapchain = nullptr,
     };
 
+    exclusive_requested=window.WantsExclusive();exclusive_configured=false;exclusive_retry_ns=0;exclusive_attempts=0;
+#ifdef _WIN32
+    VkSurfaceFullScreenExclusiveWin32InfoEXT monitor_info{VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT};
+    VkSurfaceFullScreenExclusiveInfoEXT mode_info{VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT};
+    mode_info.fullScreenExclusive=VK_FULL_SCREEN_EXCLUSIVE_APPLICATION_CONTROLLED_EXT;
+    mode_info.pNext=&monitor_info;
+    if(exclusive_requested && g_iss_full_screen_exclusive){
+        const HWND hwnd=static_cast<HWND>(window.GetWindowInfo().render_surface);
+        monitor_info.hmonitor=MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST);
+        VkPhysicalDeviceSurfaceInfo2KHR surface_info{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR};
+        surface_info.surface=surface;surface_info.pNext=&mode_info;
+        VkSurfaceCapabilitiesFullScreenExclusiveEXT exclusive_caps{VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_FULL_SCREEN_EXCLUSIVE_EXT};
+        VkSurfaceCapabilities2KHR caps{VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR};caps.pNext=&exclusive_caps;
+        auto query=reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR>(instance.GetInstance().getProcAddr("vkGetPhysicalDeviceSurfaceCapabilities2KHR"));
+        if(query && query(instance.GetPhysicalDevice(),&surface_info,&caps)==VK_SUCCESS && exclusive_caps.fullScreenExclusiveSupported){
+            swapchain_info.pNext=&mode_info;exclusive_configured=true;
+        }
+    }
+#endif
+    if(exclusive_requested && !exclusive_configured){
+        TlgSettings::Get().exclusive_status=-1;
+        TlgSettings::Get().exclusive_problem="Exclusive presentation is unsupported on this surface; returned to Borderless";
+        TlgSettings::Get().display_mode=TlgGraphics::Borderless;
+        std::fprintf(stderr,"EXCLUSIVE refused: driver/surface unavailable; requesting Borderless\n");
+    }else if(exclusive_configured){TlgSettings::Get().exclusive_status=1;}
+    else if(TlgSettings::Get().exclusive_status!=-1)TlgSettings::Get().exclusive_status=0;
+
     auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
+    if(swapchain_result!=vk::Result::eSuccess && exclusive_configured){
+        std::fprintf(stderr,"EXCLUSIVE swapchain refused: %s; retrying standard presentation\n",vk::to_string(swapchain_result).c_str());
+        exclusive_configured=false;swapchain_info.pNext=nullptr;
+        TlgSettings::Get().exclusive_status=-1;
+        TlgSettings::Get().exclusive_problem="Driver refused exclusive swapchain; returned to Borderless";
+        TlgSettings::Get().display_mode=TlgGraphics::Borderless;
+        const auto retry=instance.GetDevice().createSwapchainKHR(swapchain_info);
+        swapchain_result=retry.result;chain=retry.value;
+    }
     ASSERT_MSG(swapchain_result == vk::Result::eSuccess, "Failed to create swapchain: {}",
                vk::to_string(swapchain_result));
     swapchain = chain;
@@ -93,7 +232,7 @@ void Swapchain::SetHDR(bool hdr) {
         return;
     }
 
-    auto result = instance.GetDevice().waitIdle();
+    auto result = WaitForSwapchainIdle(instance);
     if (result != vk::Result::eSuccess) {
         LOG_WARNING(ImGui, "Failed to wait for Vulkan device idle on mode change: {}",
                     vk::to_string(result));
@@ -119,7 +258,6 @@ struct AcquireStats {
     u64 over1 = 0, over5 = 0, over10 = 0;
 };
 AcquireStats acquire_stats;
-vk::Fence acquire_fence;
 u64 NowNs() {
     return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
                    std::chrono::steady_clock::now().time_since_epoch())
@@ -140,7 +278,7 @@ bool Swapchain::AcquireNextImage() {
     }
     const u64 start = NowNs();
     vk::Result result = device.acquireNextImageKHR(
-        swapchain, std::numeric_limits<u64>::max(), image_acquired[frame_index],
+        swapchain, 100000000ull, image_acquired[frame_index],
         use_fence ? acquire_fence : VK_NULL_HANDLE, &image_index);
     const u64 called = NowNs();
     u64 fenced = called;
@@ -182,13 +320,14 @@ bool Swapchain::AcquireNextImage() {
         }
     }
 
-    switch (result) {
-    case vk::Result::eSuccess:
+    switch (WsiPolicy::Acquire(static_cast<int32_t>(result))) {
+    case WsiPolicy::Action::Continue:
         break;
-    case vk::Result::eSuboptimalKHR:
-    case vk::Result::eErrorSurfaceLostKHR:
-    case vk::Result::eErrorOutOfDateKHR:
-    case vk::Result::eErrorUnknown:
+    case WsiPolicy::Action::Skip:return false;
+    case WsiPolicy::Action::ExclusiveLost:
+        exclusive_active=false;exclusive_attempts=0;TlgSettings::Get().exclusive_status=1;
+        std::fprintf(stderr,"EXCLUSIVE ownership lost during acquire; retry after focus returns\n");return false;
+    case WsiPolicy::Action::Recreate:
         needs_recreation = true;
         break;
     default:
@@ -211,8 +350,11 @@ bool Swapchain::Present() {
     };
 
     auto result = instance.GetPresentQueue().presentKHR(present_info);
-    if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
+    if (WsiPolicy::Present(static_cast<int32_t>(result))==WsiPolicy::Action::Recreate) {
         needs_recreation = true;
+    } else if(WsiPolicy::Present(static_cast<int32_t>(result))==WsiPolicy::Action::ExclusiveLost){
+        exclusive_active=false;exclusive_attempts=0;TlgSettings::Get().exclusive_status=1;
+        std::fprintf(stderr,"EXCLUSIVE ownership lost during present; retry after focus returns\n");
     } else {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                    vk::to_string(result));
@@ -329,11 +471,14 @@ void Swapchain::SetSurfaceProperties() {
 
 void Swapchain::Destroy() {
     vk::Device device = instance.GetDevice();
-    const auto wait_result = device.waitIdle();
+    ReleaseExclusive();
+    const auto wait_result = WaitForSwapchainIdle(instance);
     if (wait_result != vk::Result::eSuccess) {
         LOG_WARNING(Render_Vulkan, "Failed to wait for device to become idle: {}",
                     vk::to_string(wait_result));
     }
+
+    if(acquire_fence){device.destroyFence(acquire_fence);acquire_fence=nullptr;}
 
     for (auto& image_view : images_view) {
         device.destroyImageView(image_view);
@@ -342,6 +487,7 @@ void Swapchain::Destroy() {
 
     if (swapchain) {
         device.destroySwapchainKHR(swapchain);
+        swapchain=nullptr;
     }
 
     for (const auto& sem : image_acquired) {

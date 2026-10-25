@@ -21,7 +21,10 @@
 #include <time.h>
 #include <SDL3/SDL.h>
 #include "mouse_stick.h"
+#include "iss_mouse_aim.h"
 #include "mouse_touch.h"
+#include "rumble_gate.h"
+#include "mouse_shake.h"
 #include <sys/stat.h>
 
 #define ERR_INVALID_ARG ((int32_t)0x80920001)
@@ -322,7 +325,8 @@ static void load_button_maps(void) {
  * leans on gravity. Without sensors the tilt is simulated, so motion prompts can be passed with
  * any controller or the keyboard:
  *   keyboard: T / G hold the controller turned sideways (to one side / the other) and, while held,
- *   the arrow keys point it (the graffiti cursor), Y shakes it, F sprays (R2);
+ *   the arrow keys or the mouse point it (the graffiti cursor), Y or a quick wiggle of the mouse
+ *   (or spinning the wheel, see mouse_shake.h) shakes it, F or the left button sprays (R2);
  *   gamepad: "sensor mode", toggled by a tap on TLG_MOTION_BUTTON (default "misc1": Share/Capture;
  *   any SDL button name) or on L3+R3 together. Sensor mode is the spray can of the graffiti (the
  *   only scene that asks for motion; the others use the touchpad): the controller is held on its
@@ -333,6 +337,7 @@ static void load_button_maps(void) {
  *   A notice on screen tells the mode; leaving it puts the controller upright again.
  * TLG_MOTION=off disables real sensors (simulation still works). */
 static int injected_motion; /* TLG_PAD_FILE tokens: 1 tilt_right (T), 2 tilt_left (G), 4 shake (Y) */
+static int mouse_shaking;   /* sample_mouse: the mouse is wiggled while the can is held (mouse_shake.h) */
 typedef struct { float w, x, y, z; } Quat;
 static struct { Quat q; float roll, pitch, yaw, aim_pitch; uint64_t last_us; int sensors, warned, mode, toggle_held; } motion={{1,0,0,0},0,0,0,0,0,-1,0,0,0};
 static Quat quat_mul(Quat a, Quat b) {
@@ -387,7 +392,7 @@ static void sample_motion(PadData *d, SDL_Gamepad *g, const bool *k) {
     int shake=0, simulated=0;
     if ((k && k[SDL_SCANCODE_T]) || (injected_motion & 1)) { roll=1.5708f; simulated=1; }
     if ((k && k[SDL_SCANCODE_G]) || (injected_motion & 2)) { roll=-1.5708f; simulated=1; }
-    if ((k && k[SDL_SCANCODE_Y]) || (injected_motion & 4)) { shake=1; simulated=1; }
+    if ((k && k[SDL_SCANCODE_Y]) || (injected_motion & 4) || mouse_shaking) { shake=1; simulated=1; }
     /* Keyboard: while T or G holds the can on its side, the arrow keys point it (they leave the
      * camera alone meanwhile, see read_pad). */
     const int key_can=k && (k[SDL_SCANCODE_T] || k[SDL_SCANCODE_G]);
@@ -558,6 +563,26 @@ static struct { bool active, two_fingers; MouseTouch finger; MouseTouchOut out; 
  * logs what the game gets. Called under lock. */
 enum { WHEEL_PULSE_US=80000, WHEEL_GAP_US=40000 };
 static MouseStick mouse_stick;
+static MouseShake mouse_shake;
+/* TLG_MOUSE_SHAKE=0 turns the wiggle shake off; TLG_MOUSE_SHAKE_COUNTS (default 40) is how far
+ * one swing must travel, in mouse counts (raise it if aiming shakes the can by itself). */
+static float mouse_shake_counts(void) {
+    static float value=-1.0f;
+    if (value<0.0f) {
+        const char *off=getenv("TLG_MOUSE_SHAKE"), *counts=getenv("TLG_MOUSE_SHAKE_COUNTS");
+        value=counts && *counts ? strtof(counts,NULL) : MOUSE_SHAKE_MIN_STROKE;
+        if (!(value>0.0f)) value=MOUSE_SHAKE_MIN_STROKE;
+        if (off && *off=='0') value=0.0f;
+        printf("Runtime: mouse shake %s (%.0f counts per swing)\n",value>0.0f ? "on" : "off",value);
+    }
+    return value;
+}
+/* Whether the keyboard map binds a wheel direction (then the wheel does not shake). */
+static bool wheel_bound(void) {
+    for (size_t i=0;i<key_map.count;++i)
+        if (key_map.entries[i].source>=WHEEL_UP && key_map.entries[i].source<=WHEEL_RIGHT) return true;
+    return false;
+}
 static uint64_t mouse_last_us;
 static struct { int pending; uint64_t until, next; } wheel[4];
 static size_t mouse_samples;
@@ -571,8 +596,11 @@ static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
     mouse_last_us=now;
     static bool was_captured;
     if (!in.mouse_enabled || !m.captured) {
+        runtime_mouse_aim_motion(0,0,in.sensitivity,in.invert_y,0);
         memset(&mouse_stick,0,sizeof(mouse_stick));
         memset(wheel,0,sizeof(wheel));
+        mouse_shake_reset(&mouse_shake);
+        mouse_shaking=0;
         was_captured=false;
         mouse_pad.active=mouse_pad.two_fingers=false;
         mouse_touch_lift(&mouse_pad.finger);
@@ -632,13 +660,24 @@ static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
     } else if (aiming_can) {
         /* Sensor mode / T / G (the graffiti spray can): the mouse points the can, like the arrow
          * keys and the sticks do there (sample_motion), and leaves the camera alone. */
-        const float k=0.0006f*in.sensitivity*tlggpu_sensor_aim_scale();
+        /* A quick back-and-forth of the mouse (or the wheel) shakes the can (mouse_shake.h); the
+         * can holds still meanwhile, so the wiggle does not move the cursor. */
+        const float counts=mouse_shake_counts();
+        const int notches=m.wheel_up+m.wheel_down+m.wheel_left+m.wheel_right;
+        const int shaking=counts>0.0f && mouse_shake_update(&mouse_shake,m.dx,m.dy,wheel_bound() ? 0 : notches,now,counts);
+        if (shaking!=mouse_shaking) printf("Runtime: mouse shake %s\n",shaking ? "started" : "stopped");
+        mouse_shaking=shaking;
+        const float k=shaking ? 0.0f : 0.0006f*in.sensitivity*tlggpu_sensor_aim_scale();
         motion.yaw-=m.dx*k;
         motion.aim_pitch+=(in.invert_y ? m.dy : -m.dy)*k;
         motion.yaw=fminf(fmaxf(motion.yaw,-1.4f),1.4f);
         motion.aim_pitch=fminf(fmaxf(motion.aim_pitch,-1.2f),1.2f);
         memset(&mouse_stick,0,sizeof(mouse_stick));
+    } else if(runtime_mouse_aim_motion(m.dx,m.dy,in.sensitivity,in.invert_y,1)){
+        memset(&mouse_stick,0,sizeof(mouse_stick));
     } else mouse_stick_update(&mouse_stick,&p,m.dx,m.dy,dt);
+    if(aiming_can || pad_mode)runtime_mouse_aim_motion(0,0,in.sensitivity,in.invert_y,0);
+    if (!aiming_can || pad_mode) { mouse_shake_reset(&mouse_shake); mouse_shaking=0; }
     const uint8_t base_x=d->right_x, base_y=d->right_y;
     d->right_x=mouse_stick_add(d->right_x,mouse_stick_axis(&mouse_stick,&p,0));
     d->right_y=mouse_stick_add(d->right_y,mouse_stick_axis(&mouse_stick,&p,1));
@@ -988,9 +1027,19 @@ static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {
 static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
+    static RumbleGate gate;  /* under the lock */
+    /* The menu's Vibration switch (tlg.ini rumble, TLG_RUMBLE=0): off stops running motors once. */
+    TlgGpuInputSettings in;
+    tlggpu_input_settings(&in);
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=current_gamepad();
-    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
+    if (!in.rumble) {
+        if (g && (gate.low || gate.high) && rumble_gate(&gate,0,0,now_us())) SDL_RumbleGamepad(g,0,0,0);
+        pthread_mutex_unlock(&lock);
+        return 0;
+    }
+    if (g && rumble_gate(&gate,param[0],param[1],now_us()))
+        SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
     pthread_mutex_unlock(&lock);
     return 0;
 }

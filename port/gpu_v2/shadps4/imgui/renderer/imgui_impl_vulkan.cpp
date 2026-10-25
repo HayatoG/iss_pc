@@ -262,7 +262,9 @@ void UploadTextureData::Destroy() {
     VkData* bd = GetBackendData();
     const InitInfo& v = bd->init_info;
 
-    CheckVkErr(v.device.waitIdle());
+    // second-son-v1.1 f6f32614: caller TextureManager::Submit holds the
+    // scheduler's graphics-queue submit lock, not every other device queue.
+    CheckVkErr(v.queue.waitIdle());
     RemoveTexture(im_texture);
     im_texture = nullptr;
 

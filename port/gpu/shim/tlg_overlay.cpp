@@ -38,6 +38,11 @@ extern "C" void runtime_restart(void); // src/probe.c: starts run.py again, ends
 #include "shader_recompiler/recompiler_toggles.h"
 #endif
 #include "imgui.h"
+#include "tlg_overlay_scale.h"
+#ifdef TLG_RENDERER_V2
+#include "../../src/iss_native_resolution.h"
+extern void TlgKarmaMenu();
+#endif
 #include "imgui_internal.h" // RegisterUserTexture (save pictures)
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -140,6 +145,7 @@ std::vector<TlgPng::Image> choice_pictures;
 std::vector<ImTextureData*> choice_textures, choice_retired;
 std::atomic<bool> choice_retiring{false};
 float base_scale = 1.0f;
+ImGuiStyle base_overlay_style;
 
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
@@ -149,7 +155,7 @@ void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
         return;
     }
-    ImGui::GetIO().MouseDrawCursor = value;
+    overlay_context->IO.MouseDrawCursor = value;
     if (value) {
         requested_tab = TlgSettings::Get().menu_tab;
     }
@@ -384,6 +390,19 @@ std::string OverlayText() {
 constexpr const char* Unsupported = "Unavailable: game version or code signature mismatch.";
 
 
+// Display mode row, shared with the Native rendering tab.
+void DisplayModeRow() {
+    namespace G = TlgGraphics;
+    auto& s = TlgSettings::Get();
+#ifdef TLG_RENDERER_V2
+    static const char* const modes[] = {"Windowed", "Borderless window", "Fullscreen (borderless)"};
+#else
+    static const char* const modes[] = {TL("Windowed", "Janela"), TL("Borderless window", "Janela sem borda"), TL("Fullscreen", "Tela cheia")};
+#endif
+    ChoiceRow(TL("Display mode", "Modo de exibição"), s.display_mode, G::DisplayModeCount == 3 ? modes : G::DisplayModeNames.data(),
+              nullptr, G::DisplayModeCount, TL("Windowed, borderless or experimental exclusive fullscreen.", "Janela, tela cheia sem borda ou exclusiva experimental."));
+}
+
 void ImageTab() {
     namespace G = TlgGraphics;
     auto& s = TlgSettings::Get();
@@ -496,7 +515,9 @@ void PerformanceTab() {
     // offered: they do not apply to TLG, and the readback ones crash it (it needs precise readbacks).
     ImGui::SeparatorText(TL("Live", "Em tempo real"));
     if (BeginRows("##live")) {
-        static const char* const fps_labels[] = {"30", "120", "240", TL("Unlimited", "Sem limite")};
+        static const char* const fps_labels[] = {"30", "60", "120", "240", TL("Unlimited", "Sem limite")};
+        static_assert(sizeof(fps_labels) / sizeof(fps_labels[0]) == G::FpsLimits.size(),
+                      "Every FPS limit must have a matching dropdown label");
         ChoiceRow(TL("Frame rate limit", "Limite de FPS"), s.fps_limit, fps_labels, G::FpsLimits.data(), int(G::FpsLimits.size()),
                   TL("Caps the presented frames. The game runs at 30 FPS (as on PS4).", "Limita os quadros apresentados. O jogo roda a 30 FPS (como no PS4)."));
         static const char* const queued_labels[] = {TL("1 (lowest latency)", "1 (menor atraso)"), "2", TL("Unlimited", "Sem limite")};
@@ -609,6 +630,7 @@ void FixesSection() {
 
 void OpenGuide(); // the graffiti guide (below, with the save dialogs)
 
+extern "C" int runtime_mouse_aim_installed(void);
 void ControlsTab() {
     auto& s = TlgSettings::Get();
     // Mouse (src/runtime_pad.c): the camera settings apply at once. The buttons and the touchpad
@@ -626,6 +648,9 @@ void ControlsTab() {
                     "Velocidade para cima/baixo em relação à dos lados. Aumente se olhar para cima e para baixo parecer mais lento."));
         CheckRow(TL("Invert Y axis", "Inverter eixo Y"), s.mouse_invert_y,
                  TL("Moving the mouse forward looks down.", "Empurrar o mouse para frente olha para baixo."));
+        const bool direct_mouse=runtime_mouse_aim_installed()!=0;
+        if(direct_mouse)InfoRow(TL("Camera input", "Entrada da câmera"),TL("Direct mouse (experimental)","Mouse direto (experimental)"));
+        ImGui::BeginDisabled(direct_mouse);
         FloatRow(TL("Smoothing", "Suavização"), s.mouse_smoothing, 0.0f, 0.9f, "%.2f",
                  TL("Evens out the camera motion; higher values feel softer and a little slower.",
                     "Deixa o movimento da câmera mais uniforme; valores altos ficam mais suaves e um pouco mais lentos."));
@@ -634,6 +659,7 @@ void ControlsTab() {
         FloatRow(TL("Anti-dead zone", "Anti-zona morta"), s.mouse_deadzone, 0.0f, 0.5f, "%.2f",
                  TL("Small mouse movements skip the game's stick dead zone. Raise it if slow movements do nothing.",
                     "Movimentos pequenos do mouse pulam a zona morta do analógico do jogo. Aumente se movimentos lentos não fizerem nada."));
+        ImGui::EndDisabled();
         ImGui::EndDisabled();
         InfoRow(TL("Left / right / middle", "Esquerdo / direito / do meio"), "R2 / L2 / R3");
         InfoRow(TL("Touchpad mode", "Modo touchpad"), TL("hold Left Ctrl or Mouse X1", "segure Ctrl esquerdo ou botão X1 do mouse"));
@@ -645,6 +671,13 @@ void ControlsTab() {
         if (!remap.empty()) {
             InfoRow(TL("Remapped", "Remapeado"), remap.c_str());
         }
+        ImGui::EndTable();
+    }
+    ImGui::SeparatorText(TL("Controller", "Controle"));
+    if (BeginRows("##controller")) {
+        CheckRow(TL("Vibration", "Vibração"), s.rumble,
+                 TL("The controller vibrates with the game. Turn it off if you do not want vibration or if it makes the controller misbehave.",
+                    "O controle vibra com o jogo. Desligue se não quiser vibração ou se ela fizer o controle se comportar mal."));
         ImGui::EndTable();
     }
     ImGui::SeparatorText(TL("Sensor mode (graffiti)", "Modo sensor (grafite)"));
@@ -729,15 +762,50 @@ int RestartChanges() {
            (s.deferred_readback != s.startup_deferred_readback) + (s.stale_readback != s.startup_stale_readback);
 }
 
+#ifdef TLG_RENDERER_V2
+void NativeRenderingTab() {
+    auto& s=TlgSettings::Get();
+    ImGui::TextWrapped("Experimental native 3D rendering for CUSA00223 update 1.07. Changes apply after closing and relaunching the game.");
+    const char* outputs[]={"Off (original game)","1920 x 1080","2560 x 1440","3440 x 1440 (ultrawide)","3840 x 2160 (4K)","5120 x 1440 (super ultrawide)"};
+    int output=s.iss_native_output, percent=s.iss_native_percent;
+    bool edges=s.iss_native_hud_edges;
+    if(ImGui::Combo("Output resolution",&output,outputs,ISS_NATIVE_PRESETS)){s.iss_native_output=output;dirty=true;}
+    if(ImGui::SliderInt("Native render scale",&percent,25,200,"%d%%")){s.iss_native_percent=percent;dirty=true;}
+    if(ImGui::Checkbox("Place HUD at screen edges",&edges)){s.iss_native_hud_edges=edges;dirty=true;}
+    ImGui::TextWrapped("100%% renders the scene at the exact selected resolution. Lower scales reduce scene resolution. The vertical field of view stays the same; wider displays show more world horizontally. Uncheck edge HUD to keep it centered within 16:9.");
+    IssNativePlan requested;
+    if(output && iss_native_plan({output,percent,int(edges)},&requested))
+        ImGui::Text("Next launch: %u x %u scene, %u lighting entries",requested.width,requested.height,requested.light_entries);
+    else if(output)ImGui::TextWrapped("This scale exceeds the supported 4K pixel budget. Choose a smaller scale; this request will be refused at startup.");
+    ImGui::Separator();
+    ImGui::TextWrapped("%s",runtime_native_reason());
+    const int exclusive=s.exclusive_status;
+    ImGui::Text("Exclusive presentation: %s",exclusive==2?"acquired":exclusive==1?"waiting for driver / focus":exclusive<0?"unavailable":"off");
+    if(const char* problem=s.exclusive_problem.load())ImGui::TextWrapped("%s",problem);
+    if(runtime_native_status()==1){
+        const auto* p=runtime_native_plan();
+        ImGui::Text("Active scene: %u x %u (%d%%)",p->width,p->height,p->percent);
+    }
+    ImGui::Text("Presented game image: %d x %d; window: %d x %d",s.image_width.load(),s.image_height.load(),s.window_width.load(),s.window_height.load());
+    ImGui::TextWrapped("Use a matching display resolution and Borderless for native output. Disable external resolution patches. Startup movies and some post-processing still need visual validation.");
+    if(ImGui::BeginTable("native_display",2)){DisplayModeRow();ImGui::EndTable();}
+}
+#endif
 void Menu() {
     auto& s = TlgSettings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    static ImVec2 previous_menu_size{};
+    static float previous_menu_scale=0.0f;
+    const bool resized=previous_menu_size.x!=viewport->WorkSize.x ||
+                       previous_menu_size.y!=viewport->WorkSize.y || previous_menu_scale!=base_scale;
+    const ImGuiCond layout_condition=resized ? ImGuiCond_Always : ImGuiCond_Appearing;
+    previous_menu_size=viewport->WorkSize; previous_menu_scale=base_scale;
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
                                    viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
-                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                            layout_condition, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(std::min(760.0f * base_scale, viewport->WorkSize.x * 0.95f),
                                     std::min(680.0f * base_scale, viewport->WorkSize.y * 0.9f)),
-                             ImGuiCond_Appearing);
+                             layout_condition);
     bool keep_open = true;
     // tlg: the game's own title (param.sfo), not a fixed one.
     static const std::string heading = [] {
@@ -751,7 +819,11 @@ void Menu() {
         return;
     }
     footer_help = nullptr;
+#ifdef TLG_RENDERER_V2
+    constexpr int TabCount = 6;
+#else
     constexpr int TabCount = 4;
+#endif
     const ImGuiIO& io = ImGui::GetIO();
     if (!io.WantTextInput) {
         const int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
@@ -765,7 +837,11 @@ void Menu() {
     const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f + ImGui::GetTextLineHeightWithSpacing() * 2.0f;
     if (ImGui::BeginTabBar("##tabs")) {
         static const char* const tabs[TabCount] = {"Overlay", TL("Image", "Imagem"), TL("Performance", "Desempenho"),
-                                                   TL("Controls", "Controle")};
+                                                   TL("Controls", "Controle")
+#ifdef TLG_RENDERER_V2
+                                                   ,"Karma", "Native rendering"
+#endif
+                                                   };
         for (int tab = 0; tab < TabCount; ++tab) {
             const ImGuiTabItemFlags flags = requested_tab == tab ? ImGuiTabItemFlags_SetSelected : 0;
             if (!ImGui::BeginTabItem(tabs[tab], nullptr, flags)) {
@@ -780,6 +856,10 @@ void Menu() {
                 case 1: ImageTab(); break;
                 case 2: PerformanceTab(); break;
                 case 3: ControlsTab(); break;
+#ifdef TLG_RENDERER_V2
+                case 4: TlgKarmaMenu(); break;
+                case 5: NativeRenderingTab(); break;
+#endif
                 default: OverlayTab(); break;
                 }
             }
@@ -1039,8 +1119,8 @@ std::string SaveWhen(s64 mtime) {
         std::snprintf(out, sizeof(out), "%02d/%02d/%04d · %02d:%02d", tm.tm_mday, tm.tm_mon + 1,
                       tm.tm_year + 1900, tm.tm_hour, tm.tm_min);
     } else {
-        static const char* months[] = {"Jan", "Mar", "Apr", "May", "Jun",
-                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        static const char* const months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
         const int hour = tm.tm_hour % 12 ? tm.tm_hour % 12 : 12;
         std::snprintf(out, sizeof(out), "%s %d, %d · %d:%02d %s", months[tm.tm_mon % 12], tm.tm_mday,
                       tm.tm_year + 1900, hour, tm.tm_min, tm.tm_hour < 12 ? "AM" : "PM");
@@ -1435,12 +1515,12 @@ void GuideBox() {
 void OpenGuide() {
     guide_button_rect = ImRect();
     guide_active = true;
-    ImGui::GetIO().MouseDrawCursor = true;
+    overlay_context->IO.MouseDrawCursor = true;
 }
 
 void CloseGuide() {
     guide_active = false;
-    ImGui::GetIO().MouseDrawCursor = menu_open;
+    overlay_context->IO.MouseDrawCursor = menu_open;
     auto& s = TlgSettings::Get();
     if (!s.graffiti_guide_seen.exchange(true)) {
         TlgSettings::Save();
@@ -1625,6 +1705,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     style.FrameRounding = 4.0f;
     style.GrabRounding = 4.0f;
     style.Colors[ImGuiCol_WindowBg].w = 0.92f;
+    base_overlay_style=style;
 
     ImFontConfig font_config;
     font_config.FontDataOwnedByAtlas = false;
@@ -1766,7 +1847,7 @@ bool HandleGuideEvent(const SDL_Event& event) {
 
 void FinishSaveDialog() {
     RetireChoiceTextures();
-    ImGui::GetIO().MouseDrawCursor = menu_open;
+    overlay_context->IO.MouseDrawCursor = menu_open;
 }
 
 // The save list and messages take the keys, buttons and mouse that answer them; the rest stays
@@ -2165,13 +2246,15 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     std::scoped_lock lock{imgui_mutex};
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(float(extent.width), float(extent.height));
+#ifdef TLG_RENDERER_V2
+    io.MouseDrawCursor = false; // SDL owns the overlay pointer across focus/mode changes
+#endif
     io.DeltaTime = ms > 0.0f && ms < 1000.0f ? ms / 1000.0f : 1.0f / 60.0f;
     // UI scale follows the display height (1080p = 1).
     const float scale = std::max(float(extent.height) / 1080.0f, 0.75f);
     if (std::abs(scale - base_scale) > 0.01f) {
         ImGuiStyle& style = ImGui::GetStyle();
-        style.ScaleAllSizes(scale / base_scale);
-        style.FontScaleMain = scale;
+        TlgOverlayScale::Apply(style,base_overlay_style,scale);
         base_scale = scale;
     }
 

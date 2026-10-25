@@ -1,4 +1,5 @@
 #include <shared_mutex>
+#include "../../../src/iss_native_resolution.h"
 #include <algorithm>
 #include "parallel.h"
 #include "native_item_identity.h"
@@ -15,6 +16,7 @@
 #include "infamous_renderer/secondary_batch_probe.h"
 #include <unordered_set>
 #include <cstdio>
+#include <filesystem>
 #include <intrin.h>
 #include <span>
 #include <unordered_map>
@@ -3256,6 +3258,20 @@ void Rasterizer::OnSubmit() {
             FinishProbes();
         }
     }
+    // Opt-in local diagnostic trigger: consume a file and request two frames.
+    // Check at most once per second; no effect without the environment variable.
+    if(const char* trigger=std::getenv("ISS_FRAME_TRACE_TRIGGER");trigger&&*trigger){
+        static auto last=std::chrono::steady_clock::now();
+        const auto now=std::chrono::steady_clock::now();
+        if(now-last>=std::chrono::seconds(1)){
+            last=now;std::error_code error;
+            if(std::filesystem::remove(trigger,error)){
+                auto& request=Common::Perf::GetTuning().dump_frames;
+                request.store(request.load()==2?3:2);
+                std::fprintf(stderr,"FRAME_TRACE trigger consumed: bounded 2-3 frame capture\n");
+            }
+        }
+    }
     const u32 dump_request =
         Common::Perf::GetTuning().dump_frames.load(std::memory_order_relaxed);
     if (!g_dump.started) {
@@ -4224,8 +4240,25 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 const u64 size = VideoCore::ClampHugeRead(
                     memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()), desc.is_written);
                 if (size != vsharp.GetSize()) {
-                    LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
-                              vsharp.GetSize(), size, stage.pgm_hash);
+                    // A recurring descriptor can otherwise emit a warning per draw.
+                    // Preserve the clamp and report the first occurrence plus
+                    // exponentially spaced repeats, with bounded per-thread storage.
+                    struct ClampWarning { u64 hash{}, requested{}, clamped{}, count{}; };
+                    static thread_local std::array<ClampWarning, 64> warnings{};
+                    static const bool log_all = [] {
+                        const char* value = std::getenv("ISS_BUFFER_CLAMP_LOG_ALL");
+                        return value && value[0] == '1';
+                    }();
+                    auto& warning = warnings[(stage.pgm_hash ^ vsharp.GetSize() ^ size) % warnings.size()];
+                    if (warning.hash != stage.pgm_hash || warning.requested != vsharp.GetSize() ||
+                        warning.clamped != size) {
+                        warning = {stage.pgm_hash, vsharp.GetSize(), size, 0};
+                    }
+                    const u64 count = ++warning.count;
+                    if (log_all || (count & (count - 1)) == 0) {
+                        LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x} (repeat {})",
+                                  vsharp.GetSize(), size, stage.pgm_hash, count);
+                    }
                 }
                 // Correlate the game's 48-byte feedback descriptor with the
                 // EBOOT call-site observation. This is passive: recycled guest
@@ -4874,6 +4907,17 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         state.depth_stencil_attachment = {};
     }
 
+    // Report scene color+depth dimensions independently of host output scaling.
+    static bool native_scene_reported=false;
+    if(!native_scene_reported && runtime_native_status()==1 && state.num_color_attachments &&
+       state.depth_stencil_attachment.has_depth){
+        const auto* p=runtime_native_plan();
+        if(state.width==p->width && state.height==p->height){
+            std::fprintf(stderr,"NATIVE_SCENE_TARGETS color+depth=%ux%u viewport=%.0fx%.0f (before host presentation)\n",
+                state.width,state.height,std::abs(regs.viewports[0].xscale*2.0f),std::abs(regs.viewports[0].yscale*2.0f));
+            native_scene_reported=true;
+        }
+    }
     if (state.num_layers == std::numeric_limits<u16>::max()) {
         state.num_layers = 1;
     }

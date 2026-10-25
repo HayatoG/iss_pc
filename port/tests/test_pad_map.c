@@ -2,6 +2,9 @@
 #define _GNU_SOURCE
 #include <assert.h>
 #include "../src/runtime_pad.c"
+// runtime_mouse_aim.c (the native aim hook) needs the guest; pad tests run without it.
+int runtime_mouse_aim_installed(void) { return 0; }
+int runtime_mouse_aim_motion(float dx, float dy, float sensitivity, int invert_y, int active) { (void)dx; (void)dy; (void)sensitivity; (void)invert_y; (void)active; return 0; }
 
 /* The GPU library (not linked here): the mouse and the input settings. */
 void tlggpu_mouse_take(TlgGpuMouse *mouse) { memset(mouse,0,sizeof(*mouse)); }

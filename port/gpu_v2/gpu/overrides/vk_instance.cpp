@@ -30,6 +30,8 @@ thread_local u32 pool_family = ~0u;
 }
 
 namespace Vulkan {
+extern bool g_iss_surface_capabilities2;
+bool g_iss_full_screen_exclusive=false;
 
 /// GPU black box (gpu_blackbox.h, ISS_GPU_BLACKBOX unless =0): VK_AMD_buffer_marker enabled.
 bool g_iss_amd_buffer_marker = false;
@@ -250,7 +252,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 32> enabled_extensions;
+    boost::container::static_vector<const char*, 48> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -269,6 +271,9 @@ bool Instance::CreateDevice() {
     // Required
     ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+#ifdef _WIN32
+    g_iss_full_screen_exclusive=g_iss_surface_capabilities2 && add_extension("VK_EXT_full_screen_exclusive");
+#endif
     ASSERT_MSG(add_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     ASSERT_MSG(add_extension(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME),

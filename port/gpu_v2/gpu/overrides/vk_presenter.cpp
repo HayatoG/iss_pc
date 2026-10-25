@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/debug.h"
+#include "../../../src/iss_native_resolution.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -733,6 +734,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     auto image_view = *image.FindView(view_info).image_view;
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
+    static vk::Extent2D native_last_size{};
+    if(runtime_native_status()==1 && native_last_size!=image_size){
+        std::fprintf(stderr,"NATIVE_GUEST_OUTPUT %ux%u (before host FSR/post-processing)\n",image_size.width,image_size.height);
+        native_last_size=image_size;
+    }
 
     // Explicit guest-output ordinals, independent of wall-clock preload duration.
     // Opt-in test capture only; unchanged dimensions and full original render output.
@@ -926,12 +932,16 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     };
 
-    // Recreate the swapchain if the window was resized.
-    if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight()) {
+    // Do not acquire/reset a presentation fence while exclusive focus is lost,
+    // the window is minimized, or SDL is changing display modes.
+    if(!swapchain.SyncExclusiveState()) {free_frame();return;}
+    if (swapchain.NeedsRecreation() || window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
+    if(!swapchain.SyncExclusiveState()) {free_frame();return;}
 
     if (!swapchain.AcquireNextImage()) {
+        if(!swapchain.NeedsRecreation() || !window.CanPresent()){free_frame();return;}
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
@@ -1171,12 +1181,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         frame->ready_tick,reinterpret_cast<u64>(&scheduler),0,0,0,trace_flushed-trace_flush);
 
     // Present to swapchain.
+    bool recreate_after_present=false;
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        if (!swapchain.Present()) {
-            swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        }
+        recreate_after_present=!swapchain.Present();
     }
+    // Queue drain submits take submit_mutex themselves and wait outside it.
+    if(recreate_after_present && window.CanPresent())swapchain.Recreate(window.GetWidth(),window.GetHeight());
 
     if(trace_start)iss::timeline::Emit("present_end",reinterpret_cast<u64>(frame),frame->ready_tick,
         is_reusing_frame,is_game_frame,trace_acquired-trace_start,

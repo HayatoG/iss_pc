@@ -56,6 +56,52 @@ def mods_config():
     return Path(os.environ.get('ISS_MODS_CONFIG') or user_dir() / 'mods.json')
 
 
+# Native runtime feature, stored with the existing Mods selections. This key is not
+# an XML patch: the runtime allocates a guarded trampoline before guest execution.
+CAMERA_MOD_KEY = 'native/camera-speed-1.5x'
+CAMERA_PITCH_MOD_KEY = 'native/camera-prevent-pitch-slowdown'
+
+
+def camera_mod_enabled():
+    try:
+        config = json.loads(mods_config().read_text())
+        return (isinstance(config, dict) and
+                CAMERA_MOD_KEY in config.get('enabled', []) and
+                CAMERA_MOD_KEY not in config.get('disabled', []))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def camera_mod_environment():
+    scale = '1.5' if camera_mod_enabled() else '1'
+    return {'ISS_CAMERA_PAN_SCALE': scale, 'ISS_CAMERA_TILT_SCALE': scale}
+
+
+def camera_pitch_mod_enabled():
+    # Both runtime features follow the single saved camera selection.
+    return camera_mod_enabled()
+
+
+def camera_build_supported(game, app_version):
+    if app_version == '01.07':
+        return True  # Existing catalogue behavior; runtime still verifies title and code.
+    if app_version != '01.00':
+        return False
+    try:
+        from prepare import sfo
+        from infamous_patches import read_eboot_elf
+        import hashlib
+        metadata = sfo((Path(game) / 'sce_sys/param.sfo').read_bytes())
+        if metadata.get('TITLE_ID') != 'CUSA00004':
+            return False
+        elf = read_eboot_elf(game)
+        # The verified 1.07 executable, identical across the tested US/EU dumps.
+        return elf is not None and hashlib.sha256(elf).hexdigest() == \
+            'b3afd173a379f83e1e408e71fdef22b78f93092d332b79decd48a18a08bfc605'
+    except (OSError, ValueError):
+        return False
+
+
 def list_mods(settings):
     """[(key, name, note, enabled)] for the Mods tab: every shadPS4/GoldHEN cheat XML found in
     the mods folder for this game's version, with its current enabled state."""
@@ -64,7 +110,15 @@ def list_mods(settings):
     found = mod_patches.external_patches(
         mods_dir(), app_version, TITLE_IDS, builtin_files=BUILTIN_MODS)
     selected = {key for key, _, _ in mod_patches.external_selection(found, mods_config())}
-    return [(key, meta.get('Name'), meta.get('Note', ''), key in selected) for key, _, meta in found]
+    rows = [(key, meta.get('Name'), meta.get('Note', ''), key in selected) for key, _, meta in found]
+    if camera_build_supported(settings['game_dir'], app_version):
+        rows.append((CAMERA_MOD_KEY, 'Camera improvements (1.5x + slowdown fix)',
+                     'Raises horizontal and vertical camera speed limits by 50% and prevents '
+                     'diagonal slowdown at vertical viewing limits with zoom off. '
+                     'Zoomed aiming and vertical limits remain unchanged. '
+                     'Requires a verified CUSA00223/CUSA00004 1.07 build. Applies on the next game launch.',
+                     camera_mod_enabled()))
+    return rows
 
 
 def set_mod_enabled(key, enabled):
@@ -75,6 +129,9 @@ def set_mod_enabled(key, enabled):
     except (OSError, ValueError):
         data = {}
     on, off = set(data.get('enabled', [])), set(data.get('disabled', []))
+    if key == CAMERA_MOD_KEY:
+        on.discard(CAMERA_PITCH_MOD_KEY)
+        off.discard(CAMERA_PITCH_MOD_KEY)
     (on if enabled else off).add(key)
     (off if enabled else on).discard(key)
     path.write_text(json.dumps({'enabled': sorted(on), 'disabled': sorted(off)}, indent=2))
@@ -323,24 +380,24 @@ APP_VER_107 = '01.07'
 _COPY_UPDATE = ('Copy every file of update 1.07 (CUSA00223-patch: eboot.bin, sce_module/, sce_sys/ and the rest) '
                 'over the base game folder, replacing the files; see "Required game files" in the README.',
                 'Copie todos os arquivos do update 1.07 (CUSA00223-patch: eboot.bin, sce_module/, sce_sys/ e o resto) '
-                'por cima da pasta do jogo base, substituindo os arquivos; veja "Arquivos do jogo necessários" no README.')
+                'por cima da pasta do jogo base, substituindo os arquivos; veja "Arquivos do jogo necessÃ¡rios" no README.')
 TEXT = {
     'old_module': ('{detail} is not the one from update 1.07 (it comes from the base game 1.00 or another '
                    'version) and the game cannot start with it. ' + _COPY_UPDATE[0],
-                   'O {detail} não é o do update 1.07 (é do jogo base 1.00 ou de outra versão) e o jogo não '
+                   'O {detail} nÃ£o Ã© o do update 1.07 (Ã© do jogo base 1.00 ou de outra versÃ£o) e o jogo nÃ£o '
                    'abre com ele. ' + _COPY_UPDATE[1]),
     'other_eboot': ('eboot.bin is not the one from update 1.07 ({detail}); the port is only tested with '
                     'CUSA00223 (US) 1.07. ' + _COPY_UPDATE[0],
-                    'O eboot.bin não é o do update 1.07 ({detail}); o port só é testado com o CUSA00223 (EUA) '
+                    'O eboot.bin nÃ£o Ã© o do update 1.07 ({detail}); o port sÃ³ Ã© testado com o CUSA00223 (EUA) '
                     '1.07. ' + _COPY_UPDATE[1]),
     'old_param': ('{detail} is not the one from update 1.07: the game starts, but cheats (mods) made for 1.07 '
                   'are not listed. Copy the 1.07 param.sfo (on the PS4: /system_data/priv/appmeta/CUSA00223/param.sfo) '
                   'into the game folder\'s sce_sys/; see "Required game files" in the README.',
-                  'O {detail} não é o do update 1.07: o jogo abre, mas os cheats (mods) feitos para o 1.07 não '
+                  'O {detail} nÃ£o Ã© o do update 1.07: o jogo abre, mas os cheats (mods) feitos para o 1.07 nÃ£o '
                   'aparecem. Copie o param.sfo do 1.07 (no PS4: /system_data/priv/appmeta/CUSA00223/param.sfo) '
-                  'para o sce_sys/ da pasta do jogo; veja "Arquivos do jogo necessários" no README.'),
+                  'para o sce_sys/ da pasta do jogo; veja "Arquivos do jogo necessÃ¡rios" no README.'),
     'unreadable': ('{detail} could not be read (damaged, incomplete or still encrypted): dump it again from the PS4.',
-                   'Não deu para ler o {detail} (danificado, incompleto ou ainda criptografado): faça o dump de novo no PS4.'),
+                   'NÃ£o deu para ler o {detail} (danificado, incompleto ou ainda criptografado): faÃ§a o dump de novo no PS4.'),
 }
 # Problems that are reported but do not block Play.
 WARNINGS = {'other_eboot', 'old_param'}
@@ -769,6 +826,10 @@ def build_env(settings, extra=None):
                 env[key] = value
     if extra:
         env.update(extra)
+    # The Mods checkbox is authoritative, including when an older session script
+    # leaves scale variables in the launcher's inherited environment.
+    env.update(camera_mod_environment())
+    env['ISS_CAMERA_PREVENT_PITCH_SLOWDOWN'] = '1' if camera_pitch_mod_enabled() else '0'
     return env
 
 
@@ -930,7 +991,7 @@ def main(argv=None):
         freed, failures = clear_shader_cache(settings)
         print(f'Cache de shaders: {shader_cache.human_size(freed)} liberados', flush=True)
         for path, error in failures:
-            print(f'Não apagado (em uso? feche o jogo): {path}: {error}', file=sys.stderr)
+            print(f'NÃ£o apagado (em uso? feche o jogo): {path}: {error}', file=sys.stderr)
         return 1 if failures else 0
     problems = check_game(settings['game_dir'])
     for kind, detail in problems:

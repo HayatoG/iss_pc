@@ -16,6 +16,9 @@
 #include "view_hook.h"
 #include "spin_hook.h"
 #include "havok_spin.h"
+#include "iss_camera_hook.h"
+#include "iss_mouse_aim.h"
+#include "iss_camera_pitch_hook.h"
 #include "gpu/tlggpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
@@ -800,6 +803,225 @@ static void install_havok_spin(Segment *segments, uint64_t count, uint64_t size)
         printf("Havok spin: clamped %u sites to %llu (orig 1000-4000)\n", clamped, limit);
 }
 
+#include "iss_karma.h"
+#include "iss_karma_signatures.h"
+#include "iss_native_resolution.h"
+#include "iss_hud_trace.h"
+#include "iss_hud_corners.h"
+static void install_iss_hud_corners(const char *app0,Segment *segments,uint64_t count,uint64_t size){
+    const char *enable=getenv("ISS_EXPERIMENTAL_HUD_CORNERS");
+    if(!enable || strcmp(enable,"1"))return;
+    char path[4096],serial[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
+    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    int executable=0;
+    for(uint64_t i=0;i<count;i++)if((segments[i].flags&1) && ISS_HUD_TRACE_SITE>=segments[i].address &&
+        ISS_HUD_CORNER_SITE+sizeof(iss_hud_corner_tail)<=segments[i].address+segments[i].size)executable=1;
+    int valid=!strcmp(serial,"CUSA00223")&&!strcmp(version,"01.07")&&executable&&iss_hud_trace_signature(image,size);
+    if(valid)valid=!memcmp(image+ISS_HUD_CORNER_SITE,iss_hud_corner_tail,sizeof(iss_hud_corner_tail));
+    const uint32_t vtables[]={0xd74668,0xd795d0,0xcdb7d0};
+    const uint32_t methods[]={0x563710,0x5a7d50,0x2009e0};
+    for(unsigned i=0;i<3&&valid;i++){
+        uintptr_t method=0;
+        if(vtables[i]+24u>size){valid=0;break;}
+        memcpy(&method,image+vtables[i]+16,8);
+        if(method!=(uintptr_t)image+methods[i])valid=0;
+    }
+    if(!valid){puts("HUD corners: refused incompatible game code/types; no writes");return;}
+    unsigned char *bridge=allocate(page_size);
+    unsigned n=iss_karma_bridge_ex(bridge,(uintptr_t)runtime_hud_corner_node,image+ISS_HUD_CORNER_SITE,
+        (uintptr_t)image+ISS_HUD_CORNER_SITE+sizeof(iss_hud_corner_tail),sizeof(iss_hud_corner_tail),3);
+    if(n>page_size)fail("HUD corner bridge overflow");
+    protect(bridge,page_size,5);runtime_hud_corner_attach((uintptr_t)image);
+    memset(image+ISS_HUD_CORNER_SITE,0x90,sizeof(iss_hud_corner_tail));
+    iss_karma_jump(image+ISS_HUD_CORNER_SITE,(uintptr_t)bridge);
+    puts("HUD corners: guarded gameplay-root transform candidate active");
+}
+static void install_iss_hud_trace(const char *app0,Segment *segments,uint64_t count,uint64_t size){
+    const char *trigger=getenv("ISS_HUD_LAYOUT_TRACE_TRIGGER");
+    if(!trigger || !*trigger)return;
+    char path[4096],serial[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
+    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    int executable=0;
+    for(uint64_t i=0;i<count;i++)if((segments[i].flags&1) && ISS_HUD_TRACE_SITE>=segments[i].address &&
+        ISS_HUD_TRACE_SITE+0x4b4u<=segments[i].address+segments[i].size)executable=1;
+    if(strcmp(serial,"CUSA00223") || strcmp(version,"01.07") || !executable || !iss_hud_trace_signature(image,size)){
+        puts("HUD layout observer: refused incompatible title/code; no writes");return;
+    }
+    unsigned char *bridge=allocate(page_size);
+    unsigned n=iss_karma_bridge_ex(bridge,(uintptr_t)runtime_hud_trace_node,image+ISS_HUD_TRACE_SITE,
+        (uintptr_t)image+ISS_HUD_TRACE_SITE+ISS_HUD_TRACE_STOLEN,ISS_HUD_TRACE_STOLEN,2);
+    if(n>page_size)fail("HUD observer bridge overflow");
+    protect(bridge,page_size,5);runtime_hud_trace_attach((uintptr_t)image);
+    memset(image+ISS_HUD_TRACE_SITE,0x90,ISS_HUD_TRACE_STOLEN);
+    iss_karma_jump(image+ISS_HUD_TRACE_SITE,(uintptr_t)bridge);
+    puts("HUD layout observer: guarded US 1.07 hook active; widget values unchanged");
+}
+static void install_iss_native_resolution(const char *app0,Segment *segments,uint64_t count,uint64_t size) {
+    const char *config_path=getenv("TLG_CONFIG");
+    FILE *f=fopen(config_path && *config_path ? config_path : "tlg.ini","r");
+    IssNativeConfig config;int valid=iss_native_config(f,&config);if(f)fclose(f);
+    if(!valid){runtime_native_publish(-1,"Invalid native setting; no native patch applied",NULL);return;}
+    if(!config.output)return;
+    IssNativePlan plan;
+    if(!iss_native_plan(config,&plan)){
+        runtime_native_publish(-1,"Requested scale exceeds the 4K pixel budget; no native patch applied",NULL);
+        puts("Native rendering: refused dimensions/scale; original game dimensions retained");return;
+    }
+    char path[4096],serial[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
+    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    for(unsigned s=0;s<ISS_NATIVE_SITE_COUNT+2;s++) {
+        uint32_t at=s<ISS_NATIVE_SITE_COUNT ? iss_native_sites[s].offset : s==ISS_NATIVE_SITE_COUNT ? 0x58030c : 0x5802e6;
+        unsigned length=s<ISS_NATIVE_SITE_COUNT ? iss_native_sites[s].length : s==ISS_NATIVE_SITE_COUNT ? sizeof(iss_native_projection) : sizeof(iss_native_aspect_width);
+        int executable=0;
+        for(uint64_t i=0;i<count;i++)if((segments[i].flags&1) && at>=segments[i].address &&
+            at-segments[i].address<=segments[i].size && length<=segments[i].size-(at-segments[i].address))executable=1;
+        if(!executable){valid=0;break;}
+    }
+    if(!valid || !iss_native_apply(image,size,serial,version,config)) {
+        runtime_native_publish(-1,"US 1.07 code check failed or another resolution patch conflicts; no native writes",NULL);
+        printf("Native rendering: refused title=%s version=%s (signature/segment mismatch); no writes\n",serial,version);return;
+    }
+    runtime_native_publish(1,"Experimental native startup rendering active",&plan);
+    printf("Native rendering: output selection %ux%u, scale %d%%, scene/output surface %ux%u, logical HUD %ux%u, light entries %u; Hor+ vertical FOV preserved\n",
+        plan.output_width,plan.output_height,plan.percent,plan.width,plan.height,plan.ui_width,plan.ui_height,plan.light_entries);
+}
+static void install_iss_karma(const char *app0,Segment *segments,uint64_t count,uint64_t size,int before_rewrites){
+    char path[4096],serial[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
+    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    if(strcmp(serial,"CUSA00223")){
+        runtime_karma_compatibility_failure(1);printf("Karma switcher: unavailable: TITLE_ID='%s', expected CUSA00223\n",serial);return;
+    }
+    if(strcmp(version,"01.07")){
+        runtime_karma_compatibility_failure(2);printf("Karma switcher: unavailable: APP_VER='%s', expected 01.07\n",version);return;
+    }
+    int executable=0;
+    for(uint64_t i=0;i<count;++i)if((segments[i].flags&1) && ISS_KARMA_SITE>=segments[i].address && ISS_KARMA_SITE+ISS_KARMA_STOLEN<=segments[i].address+segments[i].size)executable=1;
+    if(!executable){runtime_karma_compatibility_failure(3);puts("Karma switcher: unavailable: hook outside executable segments");return;}
+    if(!iss_karma_signatures(image,size)){
+        runtime_karma_compatibility_failure(before_rewrites?5:4);
+        printf("Karma switcher: unavailable: code signatures differ; title=%s version=%s matched_before_cpu_rewrites=%d\n",serial,version,before_rewrites);
+        for(unsigned i=0;i<sizeof(iss_karma_code_checks)/sizeof(iss_karma_code_checks[0]);++i){
+            const IssKarmaCodeCheck *c=&iss_karma_code_checks[i];
+            if(c->offset>size || c->length>size-c->offset){printf("Karma compatibility: eboot+0x%x outside image\n",c->offset);continue;}
+            uint32_t actual=karma_hash(image+c->offset,c->length);
+            if(actual!=c->expected)printf("Karma compatibility: eboot+0x%x length=0x%x expected=%08x actual=%08x\n",c->offset,c->length,c->expected,actual);
+        }
+        return;
+    }
+    unsigned char *bridge=allocate(page_size);
+    unsigned n=iss_karma_bridge(bridge,(uintptr_t)runtime_karma_tick,image+ISS_KARMA_SITE,(uintptr_t)image+ISS_KARMA_SITE+ISS_KARMA_STOLEN);
+    if(n>page_size)fail("karma bridge overflow");
+    unsigned char *shard_bridge=bridge+2048;
+    unsigned sn=iss_karma_bridge_ex(shard_bridge,(uintptr_t)runtime_karma_shard_event,image+0x1e2270,(uintptr_t)image+0x1e2284,20,1);
+    if(sn>2048)fail("shard bridge overflow");
+    unsigned char *purchase_bridge=bridge+3072;
+    unsigned pn=iss_karma_bridge_ex(purchase_bridge,(uintptr_t)runtime_karma_purchase_event,image+0x231350,(uintptr_t)image+0x231364,20,1);
+    if(pn>1024)fail("purchase bridge overflow");
+    protect(bridge,page_size,5);memset(image+0x231350,0x90,20);
+    iss_karma_jump(image+0x231350,(uintptr_t)purchase_bridge);
+    memset(image+0x1e2270,0x90,20);
+    iss_karma_jump(image+0x1e2270,(uintptr_t)shard_bridge);
+    memset(image+ISS_KARMA_SITE,0x90,ISS_KARMA_STOLEN);
+    iss_karma_jump(image+ISS_KARMA_SITE,(uintptr_t)bridge);runtime_karma_attach(image);
+    puts("Karma switcher: supported CUSA00223 01.07 (normal game functions, game-thread queue)");
+}
+
+/* Opt-in, build/signature-guarded inFAMOUS camera angular-speed limits.
+ * Installation runs after ISA/red-zone rewriting, before guest threads start. */
+static void install_iss_camera_speed(const char *app0, Segment *segments, uint64_t count, uint64_t size) {
+    float pan, tilt;
+    if (!iss_camera_scale(getenv("ISS_CAMERA_PAN_SCALE"), &pan) ||
+        !iss_camera_scale(getenv("ISS_CAMERA_TILT_SCALE"), &tilt)) {
+        puts("Camera speed: disabled (scale must be a finite number from 0.25 to 4)");
+        return;
+    }
+    if (pan == 1.0f && tilt == 1.0f) return;
+    char path[4096], serial[32] = "", version[32] = "";
+    snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
+    sfo_value(path, "TITLE_ID", serial, sizeof(serial), NULL);
+    sfo_value(path, "APP_VER", version, sizeof(version), NULL);
+    int executable = 0;
+    for (uint64_t i=0; i<count; ++i)
+        if ((segments[i].flags & 1) && segments[i].address <= ISS_CAMERA_SITE &&
+            ISS_CAMERA_SITE-segments[i].address <= segments[i].size &&
+            ISS_CAMERA_LENGTH <= segments[i].size-(ISS_CAMERA_SITE-segments[i].address)) executable = 1;
+    if (!iss_camera_title_supported(serial,version) || !executable ||
+        !iss_camera_signature_match(image,size)) {
+        puts("Camera speed: disabled (title/version or original-code signature mismatch)");
+        return;
+    }
+    unsigned char *stub = allocate(page_size);
+    iss_camera_build_stub(stub,(uintptr_t)(image+ISS_CAMERA_SITE+ISS_CAMERA_LENGTH),pan,tilt);
+    protect(stub,page_size,5);
+    iss_camera_build_jump(image+ISS_CAMERA_SITE,(uintptr_t)stub);
+    printf("Camera speed: horizontal %.3gx, vertical %.3gx (angular limits; adaptive gain unchanged)\n",pan,tilt);
+}
+
+static void install_iss_mouse_aim(const char *app0,Segment *segments,uint64_t count,uint64_t size){
+    const char *enabled=getenv("ISS_DIRECT_MOUSE_AIM");
+    if(!enabled || strcmp(enabled,"1"))return;
+    char path[4096],serial[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
+    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    int executable=0,writable=0;
+    for(uint64_t i=0;i<count;i++){
+        if((segments[i].flags&1) && segments[i].address<=0x14936eu &&
+            ISS_MOUSE_SITE+ISS_MOUSE_STOLEN<=segments[i].address+segments[i].size)executable=1;
+        if((segments[i].flags&2) && segments[i].address<=0xe16c40u &&
+            0xe16c40u<segments[i].address+segments[i].size)writable=1;
+    }
+    if(strcmp(serial,"CUSA00223") || strcmp(version,"01.07") || !executable || !writable ||
+        !iss_mouse_signature(image,size)){
+        puts("Direct mouse: incompatible title/code/mapping; mouse-to-stick fallback retained");return;
+    }
+    unsigned char *bridge=allocate(page_size);
+    unsigned n=iss_karma_bridge_ex(bridge,(uintptr_t)runtime_mouse_aim_camera,image+ISS_MOUSE_SITE,
+        (uintptr_t)image+ISS_MOUSE_SITE+ISS_MOUSE_STOLEN,ISS_MOUSE_STOLEN,4);
+    if(n>page_size)fail("Direct mouse bridge overflow");
+    protect(bridge,page_size,5);
+    memset(image+ISS_MOUSE_SITE,0x90,ISS_MOUSE_STOLEN);
+    iss_karma_jump(image+ISS_MOUSE_SITE,(uintptr_t)bridge);
+    runtime_mouse_aim_attach((uintptr_t)image);
+    puts("Direct mouse: guarded US 1.07 angle input enabled; Controls sensitivity/invert apply; controller unchanged");
+}
+
+static void report_iss_pitch(void) {
+    printf("Camera pitch safeguard: calls=%" PRIu64 " changes=%" PRIu64
+           " last input=%.4g,%.4g pitch=%.4g zoom=%.4g cap=%.4g->%.4g\n",
+           iss_pitch_stats.calls,iss_pitch_stats.changed,iss_pitch_stats.last_x,
+           iss_pitch_stats.last_y,iss_pitch_stats.last_pitch,iss_pitch_stats.last_zoom,
+           iss_pitch_stats.last_cap,iss_pitch_stats.last_result);
+}
+static void install_iss_pitch_safeguard(const char *app0, Segment *segments, uint64_t count, uint64_t size) {
+    const char *enabled=getenv("ISS_CAMERA_PREVENT_PITCH_SLOWDOWN");
+    if (!enabled || strcmp(enabled,"1")) return;
+    char path[4096],serial[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
+    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);
+    sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    int executable=0;
+    for (uint64_t i=0;i<count;++i)
+        if ((segments[i].flags&1) && segments[i].address<=ISS_PITCH_SITE &&
+            ISS_PITCH_SITE-segments[i].address<=segments[i].size &&
+            ISS_PITCH_LENGTH<=segments[i].size-(ISS_PITCH_SITE-segments[i].address)) executable=1;
+    if (!iss_camera_title_supported(serial,version) || !executable ||
+        !iss_pitch_signature(image,size)) {
+        puts("Camera pitch safeguard: disabled (title/version or signature mismatch)");return;
+    }
+    unsigned char *stub=allocate(page_size);
+    unsigned length=iss_pitch_build_stub(stub,(uintptr_t)&iss_pitch_cap,
+                                        (uintptr_t)(image+ISS_PITCH_SITE+ISS_PITCH_LENGTH));
+    if (length>ISS_PITCH_MAX_STUB || length>page_size) fail("camera pitch stub overflow");
+    protect(stub,page_size,5);
+    iss_pitch_build_jump(image+ISS_PITCH_SITE,(uintptr_t)stub);
+    atexit(report_iss_pitch);
+    puts("Camera pitch safeguard: enabled (unzoomed full diagonal at pitch limit only)");
+}
+
 /* G3PATCH2 (patches.py): the patches' image base, then byte writes at image offsets, applied
  * after relocation. A write may replace a whole base-relative pointer slot (60/90 FPS++ swap
  * function pointers): the patch holds the address at the patches' base, rebased here. */
@@ -1337,6 +1559,7 @@ int main(int argc, char **argv) {
         _exit(missing ? 1 : 0); /* no destructors: GPU threads are running */
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+    const int karma_before_runtime_rewrites=iss_karma_signatures(image,size);
     if (gpu_enabled) install_orb_multiplier(app0, segments, ns, size);
     if (gpu_enabled) install_cheats(app0, segments, ns, size);
     if (gpu_enabled) install_actor_watch(app0, segments, ns, size);
@@ -1380,6 +1603,13 @@ int main(int argc, char **argv) {
     /* After the rewrites: a site they changed no longer matches and is left alone. */
     install_spin_pause(segments, ns, size);
     install_havok_spin(segments, ns, size);
+    if (gpu_enabled) install_iss_native_resolution(app0, segments, ns, size);
+    if (gpu_enabled) install_iss_hud_corners(app0, segments, ns, size);
+    if (gpu_enabled) install_iss_hud_trace(app0, segments, ns, size);
+    if (gpu_enabled) install_iss_camera_speed(app0, segments, ns, size);
+    if (gpu_enabled) install_iss_pitch_safeguard(app0, segments, ns, size);
+    if (gpu_enabled) install_iss_mouse_aim(app0, segments, ns, size);
+    if (gpu_enabled) install_iss_karma(app0, segments, ns, size, karma_before_runtime_rewrites);
     protect(traps, round_page((import_count + 1) * 32), 5);
     if (trace_stubs) protect(trace_stubs, round_page((import_count + 1) * TRACE_STUB_SIZE), 5);
     protect(image, round_page(size), 0);
