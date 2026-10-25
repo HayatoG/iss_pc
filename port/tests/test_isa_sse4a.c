@@ -57,6 +57,27 @@ static void model(uint8_t kind, uint64_t xmm[4], unsigned length, unsigned index
     isa_emulate_sse4a(&s, xmm);
 }
 
+/* An independent reference, bit by bit (AMD APM vol. 4): a field of length (0 = 64) bits at index,
+ * bits past 63 cut; the high qword zeroed as AMD hardware does. Register forms take the control
+ * from the source (EXTRQ: low qword, INSERTQ: high qword). */
+static void reference(uint8_t kind, uint64_t xmm[4], unsigned length, unsigned index) {
+    if (kind == ISA_EXTRQ || kind == ISA_INSERTQ) {
+        const uint64_t control = kind == ISA_EXTRQ ? xmm[2] : xmm[3];
+        length = control & 0xff;
+        index = control >> 8 & 0xff;
+    }
+    const unsigned bits = (length & 63) ? (length & 63) : 64;
+    index &= 63;
+    const int extract = kind == ISA_EXTRQ || kind == ISA_EXTRQ_IMM;
+    uint64_t r = extract ? 0 : xmm[0];
+    for (unsigned b = 0; b < bits && index + b < 64; b++) {
+        if (extract) r |= (xmm[0] >> (index + b) & 1) << b;
+        else r = (r & ~(1ull << (index + b))) | (xmm[2] >> b & 1) << (index + b);
+    }
+    xmm[0] = r;
+    xmm[1] = 0;
+}
+
 /* ---- the real instructions ---- */
 
 typedef void (ABI *Jit)(uint64_t *xmm);
@@ -140,7 +161,7 @@ static void compare_reg(uint8_t kind, const uint64_t in[4]) {
 }
 #endif
 
-static unsigned long long compared;
+static unsigned long long compared, reference_checked;
 
 static void test_against_cpu(void) {
 #ifdef __SSE4A__
@@ -309,13 +330,23 @@ static void expected_by_model(State *s, uint8_t kind, int dst, int src, unsigned
     uint64_t xmm[4];
     memcpy(xmm, s->ymm[dst], 16);
     if (src >= 0) memcpy(xmm + 2, s->ymm[src], 16);
+    uint64_t ref[4];
+    memcpy(ref, xmm, sizeof ref);
     model(kind, xmm, length, index);
+    reference(kind, ref, length, index);
+    assert(memcmp(ref, xmm, 16) == 0);   /* the model and the bitwise reference agree */
+    reference_checked++;
     memcpy(s->ymm[dst], xmm, 16);
     if (relocated) s->gpr[0]++;
     for (int i = 0; i < 16; i++) s->red_zone[i] = 0x5a5a5a5a5a5a5a5aull;
 }
 
 static unsigned sites_run[4];   /* by mode */
+/* run_site options: inline_on sets IsaTable.inline_sse4a (TLG_EXTRQ_INLINE=1), counters_off sets
+ * no_hits (the default in game: ISS_RUNTIME_COUNTERS=0). random_control: every round gets a control
+ * word with any length and index (index + length > 64 and length 0 included). */
+static int inline_on, counters_off, random_control;
+static unsigned inline_sites;
 
 static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned index, uint8_t mode, int rounds) {
     static const uint8_t lea_rax[] = {0x48, 0x8d, 0x40, 0x01};   /* lea rax, [rax+1]: plain, 4 bytes */
@@ -352,8 +383,15 @@ static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned i
     t.hits = &hits;
     t.count = 1;
     t.image_size = PAGE;
+    t.inline_sse4a = inline_on;
+    t.no_hits = counters_off;
     IsaReport r = isa_rewrite_apply(&t, image, stubs, CPU_SET_SSE4A);
     assert(r.rewritten == 1 && r.skipped == 0);
+    /* Inline: every jmp/relocated EXTRQ imm, INSERTQ imm and EXTRQ xmm, xmm (distinct registers). */
+    const int inlinable = inline_on && mode != ISA_MODE_INT3 &&
+                          (kind == ISA_EXTRQ_IMM || kind == ISA_INSERTQ_IMM || (kind == ISA_EXTRQ && dst != src));
+    assert(r.inlined == (uint32_t)inlinable);
+    inline_sites += r.inlined;
     trap_table = &t;
     for (int round = 0; round < rounds; round++) {
         State in, want, got;
@@ -362,7 +400,9 @@ static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned i
             /* Half the time a valid field (index + length <= 64) in the control word. */
             const unsigned l = (unsigned)(next() % 64), i = l ? (unsigned)(next() % (65 - l)) : 0;
             uint64_t control = (next() & ~0x3f3full) | l | (uint64_t)i << 8;
-            if (round & 1 && src != dst) memcpy(&in.ymm[src][kind == ISA_INSERTQ ? 8 : 0], &control, 8);
+            if (random_control) control = (next() & ~0x3f3full) | next() % 64 | (next() % 64) << 8;
+            if ((round & 1 || random_control) && src != dst)
+                memcpy(&in.ymm[src][kind == ISA_INSERTQ ? 8 : 0], &control, 8);
         }
         memcpy(&want, &in, sizeof want);
         memcpy(&got, &in, sizeof got);
@@ -371,6 +411,11 @@ static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned i
 #endif
         if (!native) expected_by_model(&want, kind, dst, kind == ISA_EXTRQ_IMM ? -1 : src, length, index, relocated);
         run_state(image + SITE_AT, &got);
+#ifdef _WIN32
+        /* Windows writes its exception frame below rsp: an int3 site cannot keep the red zone
+         * (docs/red_zone.md: int3 ISA sites are not protected). */
+        if (mode == ISA_MODE_INT3) memcpy(got.red_zone, want.red_zone, sizeof got.red_zone);
+#endif
         if (memcmp(&want, &got, sizeof want) != 0) {
             fprintf(stderr, "%s xmm%d, xmm%d (length %u, index %u) mode %u: state differs\n", isa_kind_name(kind), dst,
                     src, length, index, mode);
@@ -390,7 +435,7 @@ static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned i
             assert(memcmp(&model_state, &want, sizeof want) == 0);
         }
     }
-    assert(hits == (uint64_t)rounds);
+    assert(hits == (counters_off ? 0 : (uint64_t)rounds));
     sites_run[mode]++;
 }
 
@@ -414,6 +459,45 @@ static void test_sites(void) {
     /* The site of the Windows crash (inFAMOUS 1.07, 0x8938f1): extrq xmm4, xmm7. */
     run_site(ISA_EXTRQ, 4, 7, 0, 0, ISA_MODE_INT3, 2000);
     run_site(ISA_EXTRQ, 4, 7, 0, 0, ISA_MODE_JMP_RELOCATE, 2000);
+}
+
+/* TLG_EXTRQ_INLINE=1: the inline stubs against the CPU (SSE4A host) or the model, which is itself
+ * checked against the bitwise reference on every round. Whole state compared as above: GPRs, flags,
+ * all 16 YMM registers (the scratch one included) and the red zone. */
+static void test_inline_sites(void) {
+    static const uint8_t kinds[] = {ISA_EXTRQ, ISA_INSERTQ, ISA_EXTRQ_IMM, ISA_INSERTQ_IMM};
+    inline_on = 1;
+    for (int counters = 0; counters < 2; counters++) {
+        counters_off = !counters;
+        /* Every register pair and form (the INSERTQ register form and EXTRQ xmmN, xmmN keep the C
+         * stub: run_site checks that too). */
+        for (int k = 0; k < 4; k++)
+            for (int dst = 0; dst < 16; dst++)
+                for (int src = 0; src < 16; src++) {
+                    if (kinds[k] == ISA_EXTRQ_IMM && src) continue;
+                    const unsigned length = (unsigned)(next() % 64), index = (unsigned)(next() % 64);
+                    uint8_t probe[16];
+                    const size_t n = encode(probe, kinds[k], dst, src, length, index);
+                    run_site(kinds[k], dst, src, length, index, n == 4 ? ISA_MODE_JMP_RELOCATE : ISA_MODE_JMP, 16);
+                }
+        /* Immediate forms: every length and index, including length 0 (= 64) and index + length > 64. */
+        for (unsigned length = 0; length < 64; length++)
+            for (unsigned index = 0; index < 64; index++) {
+                run_site(ISA_EXTRQ_IMM, (int)(next() % 16), 0, length, index, ISA_MODE_JMP, 4);
+                run_site(ISA_INSERTQ_IMM, (int)(next() % 16), (int)(next() % 16), length, index, ISA_MODE_JMP, 4);
+            }
+        /* EXTRQ xmm, xmm (every inFAMOUS 1.07 SSE4A site): random controls over many rounds, the
+         * game's forms (4-byte relocated and REX 5-byte) and scratch registers past xmm0. */
+        random_control = 1;
+        static const int pairs[][2] = {{4, 7}, {0, 1}, {1, 0}, {0, 15}, {12, 14}, {8, 2}, {15, 0}, {3, 10}};
+        for (size_t i = 0; i < sizeof pairs / sizeof *pairs; i++) {
+            uint8_t probe[16];
+            const size_t n = encode(probe, ISA_EXTRQ, pairs[i][0], pairs[i][1], 0, 0);
+            run_site(ISA_EXTRQ, pairs[i][0], pairs[i][1], 0, 0, n == 4 ? ISA_MODE_JMP_RELOCATE : ISA_MODE_JMP, 20000);
+        }
+        random_control = 0;
+    }
+    inline_on = counters_off = 0;
 }
 
 static void test_table_records(void) {
@@ -464,8 +548,11 @@ int main(void) {
     test_against_cpu();
     test_table_records();
     test_sites();
-    printf("isa-sse4a-test ok (%s: %llu operand sets against the CPU; sites: %u jmp, %u relocated, %u int3)\n",
+    test_inline_sites();
+    printf("isa-sse4a-test ok (%s: %llu operand sets against the CPU; sites: %u jmp, %u relocated, %u int3; "
+           "%u inline stubs; %llu model results checked against the bitwise reference)\n",
            native ? "SSE4A host, CPU as oracle" : "no SSE4A, recorded AMD results and model", compared,
-           sites_run[ISA_MODE_JMP], sites_run[ISA_MODE_JMP_RELOCATE], sites_run[ISA_MODE_INT3]);
+           sites_run[ISA_MODE_JMP], sites_run[ISA_MODE_JMP_RELOCATE], sites_run[ISA_MODE_INT3], inline_sites,
+           reference_checked);
     return 0;
 }

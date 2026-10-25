@@ -1348,6 +1348,10 @@ int main(int argc, char **argv) {
     if (isa_table) {
         isa_table->protect_red_zone = red_zone_on;
         isa_table->no_hits = !runtime_counters;   /* TLG_RUNTIME_COUNTERS, read by runtime_start */
+        /* TLG_EXTRQ_INLINE=1 (default 0): SSE4A sites an SSE2 sequence computes get an inline stub
+         * instead of the isa_emulate_sse4a call (docs/isa_rewrite.md). */
+        const char *extrq_inline = getenv("TLG_EXTRQ_INLINE");
+        isa_table->inline_sse4a = extrq_inline && !strcmp(extrq_inline, "1");
         IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
         if (r.unsupported_needed) {
             printf("STOP: this CPU lacks %s and %u sites use encodings the rewrite cannot emulate\n", missing, r.unsupported_needed);
@@ -1358,6 +1362,8 @@ int main(int argc, char **argv) {
                            r.rewritten, policy, r.jmp, r.relocated, r.int3, r.skipped);
         else if (isa_sets) printf("ISA: CPU lacks %s: %u sites rewritten (%u jmp, %u relocated, %u int3), %u skipped\n",
                                   missing, r.rewritten, r.jmp, r.relocated, r.int3, r.skipped);
+        if (isa_table->inline_sse4a && (isa_sets & CPU_SET_SSE4A))
+            printf("ISA: SSE4A inline stubs (TLG_EXTRQ_INLINE=1): %u sites, the others call isa_emulate_sse4a\n", r.inlined);
         if (red_zone_on) {
             const uint32_t *st = isa_table->rz_stats;   /* scripts/red_zone.py STATS_FIELDS */
             IsaRedZoneReport z = isa_red_zone_apply(isa_table, image, stubs + stub_area);

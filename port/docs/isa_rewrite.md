@@ -18,6 +18,38 @@ leaves every XMM/YMM register alone). SSE4.2, POPCNT and AVX are still required.
 or a list (`sse4a`, `f16c`, `f16c,movbe`, ...) forced on top of what the CPU lacks (testing on a
 complete CPU).
 
+## SSE4A inline stubs (`ISS_EXTRQ_INLINE=1`, default 0)
+
+All 96 SSE4A sites of the 1.07 eboot are `extrq xmmD, xmmS` with a register control (73 four-byte
+sites relocated, 23 REX five-byte jmp sites, D != S, no INSERTQ, no immediate forms), in one routine
+group (0x890a77-0x89475c). They are hot: with `ISS_RUNTIME_COUNTERS=1` the top ten each ran about
+3.2 million times in a 60 s bench run (`ISA: most executed sites:` at exit). The default stub saves
+11 GPRs and rflags, stores two XMM registers, calls `isa_emulate_sse4a` and reloads (popfq alone is
+about 20 cycles on Intel).
+
+With `ISS_EXTRQ_INLINE=1` (`TLG_EXTRQ_INLINE`) the sites an SSE2 sequence computes get an inline
+stub instead: EXTRQ with a register control and distinct registers, EXTRQ imm, INSERTQ imm. The
+register INSERTQ form and `extrq xmmN, xmmN` keep the C stub. For `extrq d, s`:
+
+```
+lea rsp, [rsp-0x90]      ; below the red zone
+movdqu [rsp], t          ; scratch: lowest XMM other than d and s
+movdqa t, s ; psrlq t, 8 ; pand t, [63]                  ; t = index
+psrlq d, t
+movdqa t, s ; pandn t, [63] ; paddq t, [1] ; pand t, [63] ; t = (64 - length) & 63
+psllq d, t ; psrlq d, t                                   ; keep length bits (0 = 64)
+movq d, d                ; high qword = 0, as AMD hardware and isa_emulate_sse4a
+movdqu t, [rsp] ; lea rsp, [rsp+0x90] ; (relocated instruction) ; jmp back
+```
+
+No flags or GPRs change (with `ISS_RUNTIME_COUNTERS=1` the hit count saves rflags and rax around
+its inc); legacy SSE keeps bits 255:128 of every YMM register. The constants sit at the end of the
+16-aligned stub slot. `ISA: SSE4A inline stubs (TLG_EXTRQ_INLINE=1): N sites` in the log says how
+many were inlined. `tests/test_isa_sse4a.c` runs every register pair and form, every immediate
+pair and 20,000 random controls per game form through the inline stubs with the whole state
+compared (GPRs, flags, 16 YMM, red zone), against the CPU on AMD and the model elsewhere; the model
+is checked against a bitwise reference on every round.
+
 ## F16C (iss_pc #51)
 
 ### The sites
