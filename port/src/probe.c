@@ -767,10 +767,15 @@ static void install_spin_pause(Segment *segments, uint64_t count, uint64_t size)
  * each constant count to min(original, N) in place, all 11 sites or none; unset or "orig" keeps
  * the original 1000-4000. */
 static void install_havok_spin(Segment *segments, uint64_t count, uint64_t size) {
-    for (unsigned i = 0; i < TLG_HAVOK_SPIN_SITES; ++i)
-        if (!mapped(segments, count, tlg_havok_spin_sites[i].site, TLG_HAVOK_SPIN_SITE_LENGTH)) return;
-    if (!tlg_havok_spin_signature_match(image, size)) return; /* another game or build: silent */
     const char *policy = getenv("TLG_HAVOK_SPIN");
+    int match = 1;
+    for (unsigned i = 0; match && i < TLG_HAVOK_SPIN_SITES; ++i)
+        if (!mapped(segments, count, tlg_havok_spin_sites[i].site, TLG_HAVOK_SPIN_SITE_LENGTH)) match = 0;
+    if (!match || !tlg_havok_spin_signature_match(image, size)) {
+        /* another game or build: silent unless the clamp was asked for */
+        if (policy && *policy) printf("Havok spin: unavailable (code signature mismatch)\n");
+        return;
+    }
     if (!policy || !*policy || !strcmp(policy, "orig")) {
         printf("Havok spin: original counts\n");
         return;
@@ -789,7 +794,10 @@ static void install_havok_spin(Segment *segments, uint64_t count, uint64_t size)
         memcpy(image + s->site + 1, &value, 4);
         ++clamped;
     }
-    printf("Havok spin: clamped %u sites to %llu (orig 1000-4000)\n", clamped, limit);
+    if (!clamped)
+        printf("Havok spin: %llu >= all original counts, nothing clamped\n", limit);
+    else
+        printf("Havok spin: clamped %u sites to %llu (orig 1000-4000)\n", clamped, limit);
 }
 
 /* G3PATCH2 (patches.py): the patches' image base, then byte writes at image offsets, applied
