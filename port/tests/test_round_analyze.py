@@ -272,6 +272,38 @@ class Bench(unittest.TestCase):
         self.assertIn("cache not warm", out)
         self.assertEqual(json.loads((self.root / "t.json").read_text())["control"], "A")
 
+    def test_paired_fps_ci(self):
+        # per-round pairs (run.json 'round'): a steady +2% the unpaired table calls noise ('~'),
+        # the paired CI excludes 0
+        rows = [(1, "A", 60.0), (1, "B", 61.2), (2, "B", 62.2), (2, "A", 61.0), (3, "A", 59.0), (3, "B", 60.1)]
+        files = []
+        for i, (rd, n, v) in enumerate(rows, 1):
+            files.append(self.write(f"s/{i:02d}-{n}/bench.json", bench(n, v)))
+            self.write(f"s/{i:02d}-{n}/run.json", dict(status="ok", round=rd, warmup=0))
+        runs = [ra.load_bench(f) for f in files]
+        p = ra.paired_fps(runs, ["A", "B"], "A")["B"]
+        self.assertTrue(p["by_round"])
+        self.assertEqual(p["n"], 3)
+        d = [100 * (61.2 - 60) / 60, 100 * (62.2 - 61) / 61, 100 * (60.1 - 59) / 59]
+        self.assertAlmostEqual(p["mean"], sum(d) / 3)
+        self.assertGreater(p["ci95"][0], 0)
+        out = self.run_cmd(ra.cmd_bench, runs=files, control=None, noise_k=2.0, skip_ms=1000.0,
+                           csv=None, json=str(self.root / "p.json"))
+        self.assertIn("B vs A: +1.94% over 3 rounds", out)
+        self.assertIn("(excludes 0)", out)
+        self.assertEqual(json.loads((self.root / "p.json").read_text())["paired_avg_fps"]["B"]["n"], 3)
+        # without run.json: the k-th run of each variant pairs with the k-th control run
+        loose = [dict(bench(n, v), name=n, path=str(self.root / f"x{i}" / "bench.json"))
+                 for i, (n, v) in enumerate([("A", 60.0), ("B", 60.0), ("A", 62.0), ("B", 61.0)])]
+        p = ra.paired_fps(loose, ["A", "B"], "A")["B"]
+        self.assertFalse(p["by_round"])
+        self.assertEqual(p["n"], 2)
+        self.assertLess(p["ci95"][0], 0)   # 0% and -1.6%: the CI includes 0
+        # one pair: no CI; a missing control round: that round is not paired
+        one = ra.paired_fps(loose[:2], ["A", "B"], "A")["B"]
+        self.assertEqual((one["n"], one["ci95"]), (1, None))
+        self.assertEqual(ra.paired_fps(loose[1:2], ["A", "B"], "A")["B"]["n"], 0)
+
     def frame_csv(self, rel, rows):
         """rows: (present_ms, shader_compiles, bench mark or None for no 'bench' column)."""
         bench = rows[0][2] is not None
