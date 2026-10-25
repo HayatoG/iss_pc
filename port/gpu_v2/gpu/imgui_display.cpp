@@ -15,6 +15,7 @@
 #include "core/debug_state.h"
 #include "overlay.h"
 #include "visual_capture.h"
+#include "ab_switch.h"
 
 namespace iss::save_ui {
 void LoadFonts(ImGuiIO& io);
@@ -46,6 +47,7 @@ void OnSurfaceFormatChange(vk::Format f){ImGui::Vulkan::OnSurfaceFormatChange(f)
 void Shutdown(vk::Device d){d.waitIdle();TextureManager::StopWorker();ImGui::Vulkan::Shutdown();ImGui::DestroyContext();}
 ImGuiID NewFrame(bool reused){
     static unsigned frames=0;++frames;
+    iss::ab::OnFrame();
     if(frames==120){const char *p=std::getenv("ISS_CAPTURE_OVERLAY");if(p&&p[0]=='1')VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::WithOverlays);}
     static uint64_t capture_tick=0;const uint64_t tick=SDL_GetTicks();
     static const bool capture=[] {const char *p=std::getenv("ISS_CAPTURE_FRAMES");return p&&p[0]=='1';}();

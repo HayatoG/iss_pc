@@ -18,6 +18,7 @@ namespace iss::native_gbuffer { int InstallCensus(std::uint64_t base); }
 #include "compute_phase.h"
 #include "infamous_renderer/feedback_identity_registry.h"
 #include "runtime_timeline.h"
+#include "ab_switch.h"
 #include <SDL3/SDL.h>
 #include <atomic>
 // The shader preload's progress (vk_pipeline_serialization.cpp): entries read, phase
@@ -411,6 +412,7 @@ extern "C" void iss_gpu_install_image(uint64_t image_base){
 }
 extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
     if(!callbacks||callbacks->struct_size!=sizeof(host)||!callbacks->backing||!callbacks->clamp||!callbacks->visit_mappings||!callbacks->protect||!callbacks->mapping_epoch||!callbacks->mapping_lock_shared||!callbacks->mapping_unlock_shared)return -1;
+    iss::ab::ApplyEnvFile();
     host=*callbacks;
     iss::timeline::Emit("gpu_initialize",0,0,host.image_base);
     // Linux (this port's loader): the image is known later, iss_gpu_install_image.
