@@ -131,6 +131,37 @@ void raise_gpu_threads(){
     }
     CloseHandle(snap);
 }
+// ISS_HIGH_QOS (default 1; 0 skips it): Windows 11 may run a process or thread it judges to be
+// in the background with EcoQoS (on E-cores, at low clocks). This opts the process and the command
+// processor out of execution-speed throttling. Best effort: the calls are looked up at run time.
+bool high_qos_enabled() {
+    static const bool on = [] { const char* p = std::getenv("ISS_HIGH_QOS"); return !p || p[0] != '0'; }();
+    return on;
+}
+struct IssPowerThrottlingState { ULONG Version, ControlMask, StateMask; };
+constexpr ULONG kPowerThrottlingVersion = 1, kPowerThrottlingExecutionSpeed = 0x1;
+constexpr int kProcessPowerThrottling = 4, kThreadPowerThrottling = 3;
+using SetInformationFn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+// thread=false: the process; thread=true: the calling thread.
+void iss_set_high_qos(bool thread) {
+    if (!high_qos_enabled()) {
+        if (!thread) std::fprintf(stderr, "PORT_TUNING high_qos=0 (ISS_HIGH_QOS=0)\n");
+        return;
+    }
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    const auto set = kernel ? reinterpret_cast<SetInformationFn>(reinterpret_cast<void*>(GetProcAddress(
+                                  kernel, thread ? "SetThreadInformation" : "SetProcessInformation")))
+                            : nullptr;
+    if (!set) {
+        std::fprintf(stderr, "PORT_TUNING high_qos %s unavailable\n", thread ? "thread" : "process");
+        return;
+    }
+    IssPowerThrottlingState state{kPowerThrottlingVersion, kPowerThrottlingExecutionSpeed, 0};
+    const BOOL ok = thread ? set(GetCurrentThread(), kThreadPowerThrottling, &state, sizeof(state))
+                           : set(GetCurrentProcess(), kProcessPowerThrottling, &state, sizeof(state));
+    std::fprintf(stderr, "PORT_TUNING high_qos=1 %s ok=%d%s\n", thread ? "thread=command_processor" : "process",
+                 ok ? 1 : 0, ok ? "" : " (EcoQoS opt-out refused)");
+}
 #endif
 }
 namespace Core::Loader {
@@ -488,6 +519,7 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
         const BOOL ok=SetPriorityClass(GetCurrentProcess(),ABOVE_NORMAL_PRIORITY_CLASS);
         std::fprintf(stderr,"PORT_TUNING process_priority=above_normal ok=%d\n",ok?1:0);
     }
+    iss_set_high_qos(false);
 #endif
     // ISS_TUNING="name=value,...": existing renderer toggles for A/B tests, applied last.
     if(const char *p=std::getenv("ISS_TUNING")){
@@ -689,6 +721,7 @@ static const char* cp_mode_name(CpMode mode) {
 }
 
 void IssPinCommandProcessor() {
+    iss_set_high_qos(true);
     const char* value = std::getenv("ISS_CP_CPU");
     const CpMode mode = cp_mode(value);
     ULONG length = 0;
