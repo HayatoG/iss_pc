@@ -2606,8 +2606,13 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     LOG_DEBUG(Lib_GnmDriver, "called");
     SubmitLockGuard lk{};
     WaitGpuIdle(GateSite::Done);
-    if (!liverpool->IsGpuIdle()) {
-        submission_lock = true;
+    {
+        // Checked and set under m_wait_idle: a GpuIdle signal (ResetSubmissionLock) between the
+        // check and the store would otherwise be lost and leave the lock set.
+        std::unique_lock lock{m_wait_idle};
+        if (!liverpool->IsGpuIdle()) {
+            submission_lock = true;
+        }
     }
     liverpool->SubmitDone();
     send_init_packet = true;
