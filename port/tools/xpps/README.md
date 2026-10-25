@@ -179,6 +179,16 @@ Faltas por parte (uma assinatura pode faltar em mais de uma):
 
 `python -m xpps.jobs_eval infer` grava as tabelas INFERIDAS (`tables.json`, fora do git) e `eval --tables tables.json --cv 5` mede com validação cruzada. A v1 usava perfis de estado e de sharps do motor tirados de outros pares da mesma captura.
 
+### Testemunhas observadas (renderer v2)
+
+Os buffers do motor que o modelo não conhece saem com o fallback (stride 16), e a pré-compilação monta permutações de vertex shader que o jogo nunca pede: no renderer v2, 1.370 dos 1.599 pipelines compilados jogando (rota de combate, cache vazio) eram uma permutação nova de um vertex shader que já estava nos jobs.
+
+- `ISS_RECORD_WITNESSES=1` (renderer v2, `gpu_v2/gpu/witness_record.inl`): cada pipeline gráfico compilado jogando grava uma linha em `<user>/cache/<serial>-witnesses.jsonl` com as dwords do flat de onde os sharps do VS e do PS são lidos e os V# de cada atributo do fetch. Os endereços viram os placeholders de `words_of` e o tamanho dos buffers vira ligado/desligado: nada de código nem de endereço.
+- `python -m xpps.witnesses merge <jsonl...> -o xpps/data/CUSA00223-witnesses.json` confere isso e junta as linhas por par de shaders. A tabela vai no git e no pacote (`cp -r tools/xpps`), e entra no hash do gerador (`launcher/precompile.py`), então os jobs são refeitos quando ela muda.
+- `jobs.py` (produto, sem `--tables`): para cada par da tabela, uma cópia de cada registro do par por variante observada, com aquelas dwords e V#; a assinatura descarta as que já existem.
+
+**Medido (25/10/2026, RTX 4070, mesma rota, cache vazio, tabela de uma sessão):** +3.351 registros gráficos (14.670 pipelines pré-compilados em 36,6 s contra 11.368 em 23,6 s); jogando, ~470 pipelines realmente novos contra ~1.780, 115 módulos de shader contra 316 e 0,8 s de espera do gravador por pipelines contra 2,9 s. O que sobra é sobretudo par VS+PS que a tabela ainda não viu: mais sessões gravadas (outras rotas, outras missões) cobrem mais.
+
 ---
 
 ## English summary
@@ -190,3 +200,4 @@ Faltas por parte (uma assinatura pode faltar em mais de uma):
 - Measured on the game: 10,374 unique shaders, 314,869 code starts, 138,900 pass records, 2,195 VS/PS pairs (879/879 of the reference cache), 22,518 effects, 119,582 texture objects, 210,244 meshes; 44 s cold, 14 s warm.
 - Tests: `python3 -m unittest discover -s tests -p 'test_xpps_index.py'` (synthetic KCAP; the real-game test is skipped without the game folder).
 - Stages 2-3 (`jobs.py`, `eboot.py`, `engine_tables.py`, `jobs_eval.py`, `signature.py`): job builder v2 from the player's own files only (the `.xpps` and `eboot.bin`), no capture. Launcher interface: `python -m xpps.jobs build <xpps dir> <out.jobs> [--index <sqlite>]` prints `PROGRESS index|jobs <n> <total>` and exits 0 on success. The engine model (render target sets, per-class blend/mask, engine buffers and textures by descriptor name hash, instance stream) comes from the 1.07 executable, every value with its all.c line; class and name hashes are read from the player's eboot at code addresses, so git only holds numbers. Measured with no inferred table: 92.0% of the graphics pipelines of a 150 s capture (4.3 records per needed one) and 92.6% of another session (6.1x); compute 88.1% and 100% (1.2x). Whole game: 22,634 records in 47 s. The link-table reader now follows tables split across several items (12,209 material instances were wrongly "unlinked").
+- Observed witnesses (`witnesses.py`): renderer v2 with `ISS_RECORD_WITNESSES=1` writes, per graphics pipeline compiled in play, the flat dwords the VS/PS sharps are loaded from and the fetch attributes' V#, addresses replaced by placeholders; `python -m xpps.witnesses merge` builds `data/<serial>-witnesses.json`, part of the generator hash, and `jobs.py` adds one copy of a pair's records per observed variant. Same route, empty cache: ~470 pipelines new in play instead of ~1,780, 115 shader modules instead of 316.

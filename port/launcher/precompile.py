@@ -43,11 +43,13 @@ def parse_progress(line):
 
 
 def generator_version(root=None):
-    """Hash of the generator's sources (every .py of tools/xpps): changes when the generator does."""
+    """Hash of the generator's sources (every .py of tools/xpps) and of its data (data/*.json, the
+    observed witness table): changes when the generator or what it reads does."""
     digest = hashlib.sha256()
     folder = Path(root) if root else tools_dir() / 'xpps'
-    for path in sorted(folder.glob('*.py')):
-        digest.update(path.name.encode() + b'\0' + path.read_bytes() + b'\0')
+    for path in sorted(folder.glob('*.py')) + sorted(folder.glob('data/*.json')):
+        name = path.relative_to(folder).as_posix()
+        digest.update(name.encode() + b'\0' + path.read_bytes() + b'\0')
     return digest.hexdigest()[:16]
 
 
