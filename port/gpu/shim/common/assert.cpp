@@ -16,6 +16,7 @@ void assert_fail_impl() {
     }
     std::fflush(stdout);
     std::fputs("STOP: GPU library assertion failed (see GPU log above)\n", stderr);
+    std::fflush(stderr); // TLG_LOG_BUFFER: buffered
     std::_Exit(23);
 }
 

@@ -177,6 +177,7 @@ static ABI __attribute__((noreturn)) void hard_exit(int status) {
     printf("Runtime: guest requested _exit(%d)\n",status);
     runtime_report();
     fflush(stdout);
+    fflush(stderr); /* TLG_LOG_BUFFER: buffered too */
     _exit(status);
 }
 static ABI __attribute__((noreturn)) void raise_exception(uint32_t code,uint64_t argument) {

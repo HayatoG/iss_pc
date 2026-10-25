@@ -6,6 +6,8 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <signal.h>
+#include <pthread.h>
 #include "runtime.h"
 #include "cpu_check.h"
 #include "isa_rewrite.h"
@@ -56,6 +58,10 @@ static uintptr_t guest_code_end; /* end of the image and its stub areas (emulati
 #endif
 static void isa_report_hook(void) { isa_rewrite_report(isa_table, stdout); }
 int vulkan_smoke(void);
+/* TLG_LOG_BUFFER=1: stdout and stderr are fully buffered (log_buffer_start); the crash paths
+ * write out what is still buffered before their own report. */
+static int log_buffered;
+static void log_flush(void) { fflush(stdout); fflush(stderr); }
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 static uint64_t read64(FILE *f) {
@@ -176,6 +182,8 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
 static int fatal_reported;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
+    /* The buffered lines first: a fault inside this report parks the thread above (no exit). */
+    if (log_buffered) log_flush();
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     const CONTEXT *c=info->ContextRecord;
     char where[MAX_PATH+64];
@@ -357,7 +365,9 @@ static void fault(int sig, siginfo_t *info, void *context) {
         clobber_below(context);
         return;
     }
-    /* The process is terminating: dladdr/snprintf are acceptable here. */
+    /* The process is terminating: dladdr/snprintf are acceptable here. TLG_LOG_BUFFER: the
+     * buffered lines go first, before the raw writes below. */
+    if (log_buffered) log_flush();
     ucontext_t *uc = context;
     uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
     char line[512];
@@ -501,6 +511,7 @@ static void dump_all_threads(void *context, const char *head) {
 }
 static void watchdog(int sig, siginfo_t *info, void *context) {
     (void)info;
+    if (log_buffered) log_flush(); /* before the other threads are interrupted */
     dump_all_threads(context, "STOP: watchdog timeout; thread stacks:\n");
     _exit(128 + sig);
 }
@@ -1067,7 +1078,8 @@ void runtime_restart(void) {
     /* run.py sets TLG_RESTART_COMMAND: the launch command line, started again (new patches). */
     const char *command=getenv("TLG_RESTART_COMMAND");
     puts("Runtime: restarting through run.py");
-    if (!command || !*command) { fputs("runtime_restart: TLG_RESTART_COMMAND is not set\n",stderr); _exit(1); }
+    log_flush(); /* TLG_LOG_BUFFER: before the new launch writes to the same log */
+    if (!command || !*command) { fputs("runtime_restart: TLG_RESTART_COMMAND is not set\n",stderr); log_flush(); _exit(1); }
     char *line=_strdup(command);
     /* Same output handles: a launcher reading the game's log keeps reading the new launch. */
     STARTUPINFOA startup={.cb=sizeof(startup),.dwFlags=STARTF_USESTDHANDLES,
@@ -1075,16 +1087,18 @@ void runtime_restart(void) {
                           .hStdError=GetStdHandle(STD_ERROR_HANDLE)};
     PROCESS_INFORMATION process;
     if (!line || !CreateProcessA(NULL,line,NULL,NULL,TRUE,0,NULL,NULL,&startup,&process)) {
-        fprintf(stderr,"runtime_restart: CreateProcess failed (%lu)\n",GetLastError()); _exit(1);
+        fprintf(stderr,"runtime_restart: CreateProcess failed (%lu)\n",GetLastError()); log_flush(); _exit(1);
     }
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
     /* The new launch waits for this process's GPU device to go away (run.py --after). */
     TerminateProcess(GetCurrentProcess(),0);
 #else
     puts("Runtime: restarting through run.sh");
+    log_flush(); /* TLG_LOG_BUFFER: exec drops the buffers */
     syscall(SYS_close_range, 3u, ~0u, 0u);
     execlp("bash", "bash", "run.sh", (char *)NULL);
     perror("runtime_restart: exec");
+    log_flush();
     _exit(1);
 #endif
 }
@@ -1191,6 +1205,84 @@ static void boot_step(const char *what) {
            (long)((now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000));
 }
 
+/* TLG_LOG_BUFFER=1 (ISS_LOG_BUFFER, default 0): stdout and stderr are fully buffered (64 KB each)
+ * instead of unbuffered. The launcher sends both into the log file, where an unbuffered stream
+ * costs a write system call per character on Windows (~500 us for a 300-byte line, on the thread
+ * that logs: mostly the command processor; the characters of lines written at the same time
+ * interleave). A thread writes both buffers out every 200 ms, and the exit and crash paths do it
+ * too (the fault reports, abort, invalid CRT parameters, the watchdog, the _exit and
+ * TerminateProcess calls), so a line reaches the file at most ~200 ms late and is only lost when
+ * the process is killed from outside. Lines stay whole; within one period the lines of one stream
+ * may land before older ones of the other. Started after the memory reservation (thread stack). */
+static void (*log_previous_abort)(int);
+static void log_abort(int sig) {
+    log_flush();
+    if (log_previous_abort && log_previous_abort != SIG_DFL && log_previous_abort != SIG_IGN &&
+        log_previous_abort != SIG_ERR)
+        log_previous_abort(sig); /* the GPU library's report (renderer v2: host_hooks.cpp) */
+}
+#ifndef _WIN32
+/* SIGTERM (the launcher's Ctrl+C), SIGINT, SIGHUP: written out, then the default action. On
+ * Windows the launcher's terminate is TerminateProcess, which nothing can intercept. */
+static void log_terminate(int sig) {
+    log_flush();
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+#endif
+#ifdef _WIN32
+static _invalid_parameter_handler log_previous_invalid_parameter;
+static void __cdecl log_invalid_parameter(const wchar_t *expression, const wchar_t *function, const wchar_t *file,
+                                          unsigned line, uintptr_t reserved) {
+    log_flush();
+    if (log_previous_invalid_parameter) log_previous_invalid_parameter(expression, function, file, line, reserved);
+    else _invoke_watson(expression, function, file, line, reserved); /* what the CRT does without a handler */
+}
+#endif
+static void *log_flusher(void *unused) {
+    (void)unused;
+#ifndef _WIN32
+    pthread_setname_np(pthread_self(), "tlg:logflush");
+#endif
+    for (;;) {
+#ifdef _WIN32
+        Sleep(200);
+#else
+        struct timespec period = {0, 200000000L};
+        nanosleep(&period, NULL); /* a signal ends it early: one more flush, harmless */
+#endif
+        log_flush();
+    }
+    return NULL;
+}
+static void log_buffer_start(void) {
+    const char *mode = getenv("TLG_LOG_BUFFER");
+    if (!mode || strcmp(mode, "1")) return;
+    static char out_buffer[64 * 1024], err_buffer[64 * 1024];
+    setvbuf(stdout, out_buffer, _IOFBF, sizeof out_buffer);
+    setvbuf(stderr, err_buffer, _IOFBF, sizeof err_buffer);
+    log_buffered = 1;
+    log_previous_abort = signal(SIGABRT, log_abort);
+#ifdef _WIN32
+    log_previous_invalid_parameter = _set_invalid_parameter_handler(log_invalid_parameter);
+#else
+    const int ends[] = {SIGTERM, SIGINT, SIGHUP};
+    for (unsigned i = 0; i < sizeof ends / sizeof *ends; ++i) {
+        void (*previous)(int) = signal(ends[i], log_terminate);
+        if (previous != SIG_DFL) signal(ends[i], previous); /* someone else's (or ignored): kept */
+    }
+#endif
+    pthread_attr_t attr;
+    pthread_t thread;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 256 * 1024);
+    const int started = !pthread_create(&thread, &attr, log_flusher, NULL);
+    pthread_attr_destroy(&attr);
+    if (started) pthread_detach(thread);
+    printf("Runtime: log buffered (TLG_LOG_BUFFER=1): 64 KB per stream, written out every 200 ms%s and on exit\n",
+           started ? "" : " (flush thread not started: only when full)");
+}
+
 #ifndef TLG_BUILD_COMMIT
 #define TLG_BUILD_COMMIT "unknown"
 #endif
@@ -1224,6 +1316,7 @@ int main(int argc, char **argv) {
     runtime_memory_reserve();
     runtime_thread_tcb_offset();
 #endif
+    log_buffer_start();
     int cpu_only = 0, strict_imports = 0, check_imports = 0;
     unsigned timeout_seconds = 10;
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *isa_file=NULL;

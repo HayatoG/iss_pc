@@ -355,6 +355,7 @@ extern "C" int tlggpu_init(const TlgGpuConfig* config) {
         runtime_report();
         std::fflush(stdout);
         TlgPerf::Stop(); // _Exit bypasses atexit; finish diagnostics on normal window close.
+        std::fflush(stderr); // TLG_LOG_BUFFER: buffered
         std::_Exit(0);
     });
     g_window_thread.detach();
