@@ -3,6 +3,7 @@
 // runtime (src/runtime_*.c) calls the tlggpu_* functions; they drive the renderer through its own
 // host interface (iss_gpu.h), whose callbacks are the runtime's memory functions.
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -193,6 +194,19 @@ void FrameStats(Clock::time_point now, double frame_ms, u32 vblank_hz) {
                last_faults = Total(FaultWrites), last_busy_ns = Total(GpuBusyNs),
                last_spin_ns = Total(GpuSpinNs),
                last_draws = DebugState.TotalDraws();
+    // Submit gate counters (separate line, the "Frame stats" format stays as scripts parse it).
+    static constexpr Counter GateCounters[]{
+        SubmitGateWaitsGfx,  SubmitGateWaitsAsc,   SubmitGateWaitsDone, SubmitGateWaitNsGfx,
+        SubmitGateWaitNsAsc, SubmitGateWaitNsDone, SubmitLockWaitNs,    IdleAdmitGapNs,
+        GpuLagFrames,        GpuLagSamples,        GpuLagWaitNs};
+    constexpr size_t NumGateCounters = sizeof(GateCounters) / sizeof(GateCounters[0]);
+    static std::array<u64, NumGateCounters> last_gate = [] {
+        std::array<u64, NumGateCounters> values{};
+        for (size_t i = 0; i < NumGateCounters; ++i) {
+            values[i] = Total(GateCounters[i]);
+        }
+        return values;
+    }();
     worst_ms = std::max(worst_ms, frame_ms);
     intervals.push_back(frame_ms);
     ++frames;
@@ -221,6 +235,25 @@ void FrameStats(Clock::time_point now, double frame_ms, u32 vblank_hz) {
                 (compile_ns - last_compile_ns) / 1e6, 0.0, 0.0, 0.0, 0.0, 0.0, 0u, 0ull,
                 (faults - last_faults) / window, 0ll, us_per_draw, draws_per_frame, idle, 0.0, 0.0,
                 0.0, 0.0, 0.0, 0.0, 0.0);
+    {
+        std::array<u64, NumGateCounters> gate{};
+        std::array<double, NumGateCounters> delta{};
+        for (size_t i = 0; i < NumGateCounters; ++i) {
+            gate[i] = Total(GateCounters[i]);
+            delta[i] = double(gate[i] - last_gate[i]);
+        }
+        last_gate = gate;
+        const double n = frames ? double(frames) : 1.0;
+        std::printf("Submit gate: waits/frame %.2f (gfx %.2f, asc %.2f, done %.2f), "
+                    "wait ms/frame %.2f (gfx %.2f/asc %.2f/done %.2f), "
+                    "lock contention ms/frame %.3f, idle->admit gap ms/frame %.2f, "
+                    "lag frames avg %.2f, lag wait ms/frame %.2f\n",
+                    (delta[0] + delta[1] + delta[2]) / n, delta[0] / n, delta[1] / n,
+                    delta[2] / n, (delta[3] + delta[4] + delta[5]) / 1e6 / n, delta[3] / 1e6 / n,
+                    delta[4] / 1e6 / n, delta[5] / 1e6 / n, delta[6] / 1e6 / n,
+                    delta[7] / 1e6 / n, delta[9] != 0 ? delta[8] / delta[9] : 0.0,
+                    delta[10] / 1e6 / n);
+    }
     // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
     if (intervals.size() > 2) {
         std::vector<double> sorted = intervals;

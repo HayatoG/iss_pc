@@ -276,6 +276,21 @@ enum Counter : u32 {
     CrossWaitsCompute,
     CrossQueueFlushes,
     CrossQueueFirstTouches,
+    // Submit gate (the submission lock sceGnmSubmitDone sets until the command processor is
+    // idle): guest waits that found it set, by site (graphics submits, asynchronous compute
+    // DingDongs, SubmitDone), and their time; waits for the driver's submit mutex held by another
+    // guest thread, and their time; command processor idle periods ended by a submission, and
+    // their time (from the GpuIdle signal to the submission).
+    SubmitGateWaitsGfx,
+    SubmitGateWaitsAsc,
+    SubmitGateWaitsDone,
+    SubmitGateWaitNsGfx,
+    SubmitGateWaitNsAsc,
+    SubmitGateWaitNsDone,
+    SubmitLockContentions,
+    SubmitLockWaitNs,
+    IdleAdmitGaps,
+    IdleAdmitGapNs,
     CounterCount,
 };
 

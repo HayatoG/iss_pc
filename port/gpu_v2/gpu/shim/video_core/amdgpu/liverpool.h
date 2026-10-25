@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <coroutine>
@@ -19,6 +20,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <deque>
 #include <queue>
 
 #include "common/assert.h"
@@ -104,6 +106,14 @@ public:
     void WaitGpuIdle() noexcept {
         std::unique_lock lk{submit_mutex};
         submit_cv.wait(lk, [this] { return num_submits == 0 || cp_stopping; });
+    }
+
+    /// WaitGpuIdle, bounded: false when the command processor still had work after `timeout`.
+    template <typename Rep, typename Period>
+    bool WaitGpuIdleFor(std::chrono::duration<Rep, Period> timeout) noexcept {
+        std::unique_lock lk{submit_mutex};
+        return submit_cv.wait_for(lk, timeout,
+                                  [this] { return num_submits == 0 || cp_stopping; });
     }
 
     bool IsGpuIdle() const {
@@ -387,6 +397,8 @@ private:
     void ProcessCommands();
     void Process(std::stop_token stoken);
     bool OnlyGraphicsSubmitsPending();
+    /// The same, with submit_mutex held.
+    bool OnlyGraphicsSubmitsPendingLocked() const;
 
     /// Remembers values the command processor wrote at small addresses (labels, fences), so a
     /// wait satisfied by one of them is not mistaken for a guest CPU signal.
@@ -488,6 +500,9 @@ private:
     std::array<u64, NumFrameMarks> frame_marks{};
     std::array<G4Stage1Ledger<NumTotalQueues>::MarkSnapshot, NumFrameMarks> g4_frame_marks{};
     u64 g4_shadow_global_ready_gap{};
+    /// ISS_FRAME_END_MARK: marks of the guest frame ends whose end of frame work the command
+    /// processor has not run yet, oldest first (submit_mutex).
+    std::deque<G4Stage1Ledger<NumTotalQueues>::MarkSnapshot> pending_frame_ends{};
     u64 frame_index{};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
