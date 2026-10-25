@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/perf_stats.h"
@@ -17,7 +18,13 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <thread>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -29,11 +36,144 @@ extern std::atomic<u64> submitted, shown, presented, vblanks;
 void OnFlip(u32 vblank_hz);
 } // namespace IssFrames
 
+// bridge.cpp: the present clock's sleep (a per-thread high resolution timer on Windows).
+extern "C" int IssVblankSleepNs(long long ns);
+
 namespace Libraries::VideoOut {
 
 namespace {
 std::atomic<u64> next_trace_id{1};
+
+// ISS_VBLANK_TIMER: how the present thread waits for its next vblank.
+//   legacy (default): Common::AccurateTimer. On Windows its AccurateSleep makes a plain waitable
+//     timer per call (~15.6 ms granular without timeBeginPeriod), and the timer's debt accounting
+//     turns that into one long sleep and then catch-up ticks without one: the vblanks (and the
+//     flips the CP waits on, sceGnmInsertWaitFlipDone) cluster on the OS tick.
+//   hr: absolute deadlines (next += period) slept on a high resolution waitable timer; more than
+//     a period behind, the clock resyncs (next = now + period) instead of bursting.
+//   hrspin: hr, sleeping to ~200 us before the deadline and spinning (_mm_pause) to it.
+enum class VblankTimer { Legacy, Hr, HrSpin };
+
+VblankTimer VblankTimerMode() {
+    const char* value = std::getenv("ISS_VBLANK_TIMER");
+    if (!value || !*value || !std::strcmp(value, "legacy")) return VblankTimer::Legacy;
+    if (!std::strcmp(value, "hr")) return VblankTimer::Hr;
+    if (!std::strcmp(value, "hrspin")) return VblankTimer::HrSpin;
+    std::fprintf(stderr, "PORT_TUNING vblank_timer: unknown ISS_VBLANK_TIMER=%s, using legacy\n",
+                 value);
+    return VblankTimer::Legacy;
 }
+
+const char* VblankTimerName(VblankTimer mode) {
+    switch (mode) {
+    case VblankTimer::Hr:
+        return "hr";
+    case VblankTimer::HrSpin:
+        return "hrspin";
+    default:
+        return "legacy";
+    }
+}
+
+// The hr/hrspin present clock: ticks on an absolute grid of the vblank period.
+class PresentClock {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    PresentClock(VblankTimer mode, std::chrono::nanoseconds period)
+        : spin(mode == VblankTimer::HrSpin), period(period), next(Clock::now()) {}
+
+    // Waits for the current deadline.
+    void Wait() const {
+        constexpr auto spin_margin = std::chrono::microseconds(200);
+        auto now = Clock::now();
+        const auto sleep_until = spin ? next - spin_margin : next;
+        if (now < sleep_until) {
+            IssVblankSleepNs(std::chrono::duration_cast<std::chrono::nanoseconds>(sleep_until - now)
+                                 .count());
+            now = Clock::now();
+        }
+        if (spin) {
+            while (now < next) {
+#if defined(__x86_64__) || defined(_M_X64)
+                _mm_pause();
+#else
+                std::this_thread::yield();
+#endif
+                now = Clock::now();
+            }
+        }
+    }
+
+    // After a tick: the next deadline. Returns true when it resynced.
+    bool Advance() {
+        next += period;
+        const auto now = Clock::now();
+        if (now - next > period) {
+            next = now + period;
+            return true;
+        }
+        return false;
+    }
+
+private:
+    bool spin;
+    std::chrono::nanoseconds period;
+    Clock::time_point next;
+};
+
+// The "Vblank:" line (with TLG_FRAME_STATS, every 5 s, beside "Frame stats"): ticks/s, how many
+// ticks came over 500 us late on the ideal vblank grid (the same grid as the hr clock, kept for
+// legacy too), the worst lateness and tick gap, and the hr clock's resyncs. Shows the legacy
+// timer's quantisation.
+class VblankStats {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    VblankStats(const char* mode, std::chrono::nanoseconds period)
+        : mode(mode), period(period), window_start(Clock::now()), grid(window_start) {
+        const char* v = std::getenv("TLG_FRAME_STATS");
+        enabled = v && (v[0] == '1' || v[0] == 'y' || v[0] == 't');
+    }
+
+    void Tick(bool resynced) {
+        if (!enabled) return;
+        const auto now = Clock::now();
+        resyncs += resynced;
+        if (last_tick != Clock::time_point{}) {
+            max_gap = std::max(max_gap, now - last_tick);
+        }
+        last_tick = now;
+        const auto late = now - grid;
+        if (late > std::chrono::microseconds(500)) ++late_ticks;
+        max_late = std::max(max_late, late);
+        ++ticks;
+        grid += period;
+        if (now - grid > period) grid = now + period;
+        const double window = std::chrono::duration<double>(now - window_start).count();
+        if (window < 5.0) return;
+        using us = std::chrono::microseconds;
+        std::printf("Vblank: %.1f ticks/s, late %.1f/s, max_late_us %lld, max_gap_us %lld, "
+                    "resyncs %u (timer %s)\n",
+                    ticks / window, late_ticks / window,
+                    static_cast<long long>(std::chrono::duration_cast<us>(max_late).count()),
+                    static_cast<long long>(std::chrono::duration_cast<us>(max_gap).count()),
+                    resyncs, mode);
+        std::fflush(stdout);
+        window_start = now;
+        ticks = late_ticks = resyncs = 0;
+        max_late = max_gap = Clock::duration::zero();
+    }
+
+private:
+    const char* mode;
+    std::chrono::nanoseconds period;
+    bool enabled{};
+    Clock::time_point window_start, grid, last_tick{};
+    Clock::duration max_late{}, max_gap{};
+    u32 ticks{}, late_ticks{}, resyncs{};
+};
+} // namespace
 
 constexpr static bool Is32BppPixelFormat(PixelFormat format) {
     switch (format) {
@@ -435,6 +575,22 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     Common::SetCurrentThreadRealtime(vblank_period);
 
     Common::AccurateTimer timer{vblank_period};
+    const VblankTimer timer_mode = VblankTimerMode();
+    const bool legacy_timer = timer_mode == VblankTimer::Legacy;
+    PresentClock clock{timer_mode, vblank_period};
+    VblankStats vblank_stats{VblankTimerName(timer_mode), vblank_period};
+    std::fprintf(stderr, "PORT_TUNING vblank_timer=%s hz=%u highres=%d\n",
+                 VblankTimerName(timer_mode), EmulatorSettings.GetVblankFrequency(),
+                 legacy_timer ? 0 : IssVblankSleepNs(0));
+    // The end of a tick: the legacy timer's debt, or the next deadline of the hr clock.
+    bool resynced = false;
+    const auto end_tick = [&] {
+        if (legacy_timer) {
+            timer.End();
+        } else {
+            resynced = clock.Advance();
+        }
+    };
 
     const auto receive_request = [this](u64 vblank_count, s32 flip_rate,
                                         u64& queue_depth) -> Request {
@@ -478,7 +634,13 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     s32 seen_flip_rate = -1;
     bool was_paused = false;
     while (!token.stop_requested()) {
-        timer.Start();
+        if (legacy_timer) {
+            timer.Start();
+        } else {
+            clock.Wait();
+        }
+        vblank_stats.Tick(resynced);
+        resynced = false;
         if (main_port.flip_rate != seen_flip_rate) {
             seen_flip_rate = main_port.flip_rate;
             std::fprintf(stderr, "VIDEOOUT flip_rate=%d (guest) forced=%d\n", seen_flip_rate,
@@ -494,7 +656,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         was_paused = paused;
         if (paused) {
             DrawLastFrame();
-            timer.End();
+            end_tick();
             continue;
         }
 
@@ -509,7 +671,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             const auto request = receive_request(vblank_count, flip_rate,
                                                  queue_depth);
             if (!request) {
-                if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
+                // Dont draw too fast: legacy only when its timer is behind; the hr clock never
+                // bursts, so each of its ticks may redraw.
+                if (!legacy_timer || timer.GetTotalWait().count() < 0) {
                     if (!main_port.is_open) {
                         DrawBlankFrame();
                     } else if (ImGui::Core::MustKeepDrawing()) {
@@ -559,7 +723,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                                 vblank_event_count);
         }
 
-        timer.End();
+        end_tick();
     }
 }
 

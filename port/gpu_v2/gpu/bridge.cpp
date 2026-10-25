@@ -418,6 +418,30 @@ extern "C" void IssPreciseSleepUs(unsigned us){
     else SwitchToThread();
 #endif
 }
+// The present thread's vblank clock (ISS_VBLANK_TIMER=hr|hrspin, videoout_driver.cpp): sleeps
+// ns on a per-thread timer created once, high resolution when Windows has it (a plain one, about
+// 15.6 ms granular, otherwise). Returns 1 when that timer is high resolution; ns<=0 only creates it.
+extern "C" int IssVblankSleepNs(long long ns){
+#ifndef _WIN32
+    if(ns>0){timespec ts{static_cast<time_t>(ns/1000000000),static_cast<long>(ns%1000000000)};
+        while(nanosleep(&ts,&ts)!=0&&errno==EINTR){}}
+    return 1;
+#else
+    thread_local int highres=1;
+    thread_local HANDLE timer=[]{
+        HANDLE t=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+        if(!t){highres=0;t=CreateWaitableTimerW(nullptr,TRUE,nullptr);}
+        return t;
+    }();
+    if(ns<=0)return highres;
+    if(!timer){SwitchToThread();return highres;}
+    LARGE_INTEGER due;due.QuadPart=-static_cast<LONGLONG>(ns/100);
+    if(due.QuadPart==0)due.QuadPart=-1;
+    if(SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE))WaitForSingleObject(timer,INFINITE);
+    else SwitchToThread();
+    return highres;
+#endif
+}
 // The renderer's hooks in the game's code and the checked readback sites: once the image is
 // loaded and relocated, before the guest threads start.
 extern "C" void iss_gpu_install_image(uint64_t image_base){
