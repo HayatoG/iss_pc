@@ -163,6 +163,7 @@ void SubmitFeedbackBatch(Scheduler& scheduler) {
 thread_local u64 periodic_tick{};
 thread_local u32 periodic_draws{};
 thread_local u64 periodic_start_ns{};
+thread_local bool periodic_held{}; ///< SubmitsHeldOcclusion counted for the pending submit.
 // The interval is clamped to [100, 100000] us; 0, empty, negative or not a number: off.
 u64 SubmitIntervalNs() {
     static const u64 interval_ns = [] {
@@ -176,6 +177,12 @@ u64 SubmitIntervalNs() {
             const unsigned long long v = *p >= '0' && *p <= '9' ? std::strtoull(p, &end, 10) : 0;
             while (end && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) ++end;
             const bool parsed = end && end != p && *end == '\0';
+            if (!parsed && *p != '\0') {
+                std::fprintf(stderr,
+                             "PORT_TUNING submit_interval_us warning: ISS_SUBMIT_INTERVAL_US=\"%s\" "
+                             "is not a number of microseconds: off\n",
+                             p);
+            }
             if (parsed && v != 0) {
                 // strtoull saturates at ULLONG_MAX (ERANGE): clamped here, before the * 1000.
                 us = std::clamp<unsigned long long>(errno == ERANGE ? 100000ull : v, 100ull,
@@ -191,7 +198,9 @@ u64 SubmitIntervalNs() {
 // hold (OcclusionQueries::AtSegmentLimit): an open occlusion query has used all its counter
 // pairs. A submit ends the rendering scope and so the query's segment; one more segment than
 // counter pairs and the query is emulated (all visible, no culling). The periodic submit waits
-// until the query ends or is cut anyway (readbacks and the other submits are not held).
+// until the query ends or is cut anyway. Both periodic submits are held (ISS_SUBMIT_EVERY and
+// ISS_SUBMIT_INTERVAL_US); readbacks and the other submits are not. Counted once per held
+// submit (SubmitsHeldOcclusion).
 void PeriodicSubmit(Scheduler& scheduler, bool hold) {
     static const u32 every = [] {
         const char* p = std::getenv("ISS_SUBMIT_EVERY");
@@ -204,17 +213,22 @@ void PeriodicSubmit(Scheduler& scheduler, bool hold) {
         periodic_tick = tick;
         periodic_draws = 0;
         periodic_start_ns = interval_ns ? Common::Perf::NowNs() : 0;
+        periodic_held = false;
     }
     const bool due = interval_ns && Common::Perf::NowNs() - periodic_start_ns >= interval_ns;
     if (!due && (every == 0 || ++periodic_draws < every)) return;
     if (hold) [[unlikely]] {
-        Common::Perf::Add(Common::Perf::SubmitsHeldOcclusion);
+        if (!periodic_held) {
+            periodic_held = true;
+            Common::Perf::Add(Common::Perf::SubmitsHeldOcclusion);
+        }
         return;
     }
     scheduler.Flush();
     periodic_tick = scheduler.CurrentTick();
     periodic_draws = 0;
     periodic_start_ns = interval_ns ? Common::Perf::NowNs() : 0;
+    periodic_held = false;
 }
 bool WritesFeedbackRecord(const Shader::Info& stage) {
     if(!EarlyFeedbackEnabled())return false;
@@ -719,6 +733,13 @@ void OcclusionQueries::BeginSegment(const CommandRecorder& cmdbuf) {
     query_ticks[query] = scheduler.CurrentTick();
     cmdbuf.beginQuery(*pool, query, control_flags);
     segments.push_back(query);
+    // A query with more segments than counter pairs is emulated at its end dump: marked now, so
+    // that it no longer holds the periodic submits (AtSegmentLimit).
+    for (OpenQuery& q : open) {
+        if (segments.size() - q.first_segment > q.max_segments) {
+            q.incomplete = true;
+        }
+    }
     active = true;
 }
 

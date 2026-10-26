@@ -115,13 +115,14 @@ public:
 
     /// A counted open query has a segment per counter pair, the last one active: a submit now
     /// (which ends the rendering scope, so the segment) would leave it uncounted (emulated).
+    /// A query past its pairs is marked incomplete (BeginSegment) and never holds.
     [[nodiscard]] bool AtSegmentLimit() const noexcept {
         if (open.empty() || !active) [[likely]] {
             return false;
         }
         const u32 num_segments = static_cast<u32>(segments.size());
         return std::any_of(open.begin(), open.end(), [num_segments](const OpenQuery& q) {
-            return !q.incomplete && num_segments - q.first_segment >= q.max_segments;
+            return !q.incomplete && num_segments - q.first_segment == q.max_segments;
         });
     }
 
