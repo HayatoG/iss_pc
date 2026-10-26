@@ -628,14 +628,24 @@ def bench_table(runs, control=None, noise_k=2.0, all_runs=None):
         if all(c["n"] == 0 for c in cells.values()): continue
         c = cells[control]
         noise = (100.0 * c["sd"] / abs(c["mean"])) if (c["sd"] is not None and c["mean"]) else None
+        paired = paired_diffs(runs, groups, control, key)
         for g in groups[1:]:
             v = cells[g]
             d = pct(v["mean"], c["mean"]) if (v["mean"] is not None and c["mean"] is not None) else None
             v["diff_pct"] = d
             if d is None and v["mean"] is not None and c["mean"] == 0:
                 v["diff_abs"] = v["mean"]   # control 0 (over33 often is): the absolute difference
-            # a stdev of 0 is no noise estimate: a 0% diff is not "within the noise"
-            v["noise"] = bool(d is not None and noise and abs(d) <= noise_k * noise)
+            # '~' (noise): with 2+ paired rounds (paired sd above 0), the paired 95% CI of the
+            # per-round diff includes 0 (the statistic of the "paired avg_fps diff" lines, so the
+            # two agree); else the unpaired test: |diff| within noise_k x the control's CV (a stdev of 0 is no noise
+            # estimate: a 0% diff is not "within the noise")
+            e = paired.get(g)
+            if d is not None and e and e["ci95"] is not None and e["sd"]:
+                v["noise"] = e["ci95"][0] <= 0 <= e["ci95"][1]
+                v["noise_test"] = "paired"
+            else:
+                v["noise"] = bool(d is not None and noise and abs(d) <= noise_k * noise)
+                v["noise_test"] = "unpaired"
             v["unreliable"] = g in unreliable
             v["better"] = None if (d is None or d == 0 or v["noise"] or v["unreliable"]) else ((d > 0) == better)
         # split: only in compare.json (the table and compare.csv show cpu_game)
@@ -666,7 +676,12 @@ def paired_fps(runs, groups, control):
     """{variant: dict(n, mean, sd, ci95)} of the per-round diff 100 (test - control) / control of
     avg_fps. Rounds from run.json when every run has one, else the k-th run of each variant (in run
     order) pairs with the k-th control run. Fewer than 2 pairs: n only."""
-    fps = [x for x in runs if x.get("avg_fps") is not None]
+    return paired_diffs(runs, groups, control, "avg_fps")
+
+
+def paired_diffs(runs, groups, control, key):
+    """paired_fps of any metric (key); bench_table's '~' uses it, so it agrees with the CI lines."""
+    fps = [x for x in runs if x.get(key) is not None]
     rounds = [run_round(x) for x in fps]
     by_round = bool(fps) and all(rd is not None for rd in rounds)
     def series(g):
@@ -674,7 +689,7 @@ def paired_fps(runs, groups, control):
         for x, rd in zip(fps, rounds):
             if x["name"] != g: continue
             k = rd if by_round else len(out)
-            out.setdefault(k, x["avg_fps"])   # a round counted twice: its first run
+            out.setdefault(k, x[key])   # a round counted twice: its first run
         return out
     ctl = series(control)
     res = {}
@@ -833,8 +848,9 @@ def cmd_bench(a):
     print_table(hdr + [extra_hdr[i] for i in shown] + split_hdr,
                 [rw + [extra_cells[g][i] for i in shown] + [fmt_cell(split[k]["groups"][g], k) for k in split_keys]
                  for rw, g in zip(rows, t["groups"])])
-    print(f"\nmean +-stdev per variant; % = diff vs '{t['control']}'; '~' = within {a.noise_k:g}x the "
-          "control's stdev when above 0 (likely noise)."
+    print(f"\nmean +-stdev per variant; % = diff vs '{t['control']}'; '~' = likely noise: the paired 95% CI "
+          f"of the per-round diff includes 0 (2+ paired rounds; else within {a.noise_k:g}x the control's "
+          "stdev when above 0)."
           + (" One control run only: no noise estimate." if t["runs"][t["control"]] < 2 else "")
           + (" cpu_ms/f: process CPU ms per frame (GetProcessTimes: tick-sampled, noisy); cpu_game_ms/f: "
              "guest + command processor + GPU helper threads, cycle time, no background compiles (lower is "

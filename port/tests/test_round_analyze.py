@@ -130,7 +130,7 @@ class Bench(unittest.TestCase):
                                 "worst_ms=40.0 over33=0 over50=0 compiles=0 cpu_ms_per_frame=31.25 "
                                 "cpu_s=156.25 cpu_util=1.74 label=A\n")
         self.assertEqual((d["cpu_ms_per_frame"], d["cpu_s"], d["cpu_util"], d["label"]), (31.25, 156.25, 1.74, "A"))
-        cpu = {"A": (30.0, 30.2), "B": (30.1, 30.3), "C": (27.0, 27.1)}
+        cpu = {"A": (30.0, 30.2), "B": (30.3, 30.1), "C": (27.0, 27.1)}   # B: +1.0% then -0.3% (paired: noise)
         files = [self.write(f"{i:02d}-{n}/bench.json", dict(bench(n, 55.0 + i % 2 * 0.1), cpu_ms_per_frame=v))
                  for i, (n, v) in enumerate([(n, v) for n in "ABC" for v in cpu[n]], 1)]
         out = self.run_cmd(ra.cmd_bench, runs=files, control=None, noise_k=2.0, skip_ms=1000.0,
@@ -292,6 +292,13 @@ class Bench(unittest.TestCase):
         self.assertIn("B vs A: +1.94% over 3 rounds", out)
         self.assertIn("(excludes 0)", out)
         self.assertEqual(json.loads((self.root / "p.json").read_text())["paired_avg_fps"]["B"]["n"], 3)
+        # the table's '~' uses the same paired CI: no '~' on B's avg_fps although the unpaired
+        # test (|diff| within 2x the control's CV) would call it noise
+        fps = next(r for r in json.loads((self.root / "p.json").read_text())["rows"] if r["metric"] == "avg_fps")
+        self.assertEqual(fps["groups"]["B"]["noise_test"], "paired")
+        self.assertFalse(fps["groups"]["B"]["noise"])
+        self.assertTrue(fps["groups"]["B"]["better"])
+        self.assertLessEqual(abs(fps["groups"]["B"]["diff_pct"]), 2.0 * fps["noise_pct"])
         # without run.json: the k-th run of each variant pairs with the k-th control run
         loose = [dict(bench(n, v), name=n, path=str(self.root / f"x{i}" / "bench.json"))
                  for i, (n, v) in enumerate([("A", 60.0), ("B", 60.0), ("A", 62.0), ("B", 61.0)])]
