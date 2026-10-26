@@ -207,6 +207,17 @@ static void event_flags(void) {
     assert(!done_within(&c,20));
     assert(ef_set(ef,0x2)==0 && done_within(&c,2000));
     assert(pthread_join(tc,NULL)==0 && c.r==0 && c.result==0x2);
+    /* A cancel followed at once by a matching set: the cancelled waiter (still listed until it
+     * retakes the lock) gets ECANCELED and takes no handoff, so the set's bits stay. */
+    for (int i=0;i<20;++i) {
+        assert(ef_clear(ef,0)==0);
+        a=(EfTask){ef,0x1,0,0x2|0x10,2000000,99,0};           /* OR, CLEAR_ALL */
+        assert(pthread_create(&ta,NULL,ef_waiter,&a)==0); nap_ms(20);
+        int32_t waiting=-1;
+        assert(ef_cancel(ef,0,&waiting)==0 && waiting==1 && ef_set(ef,0x1)==0);
+        assert(pthread_join(ta,NULL)==0 && (uint32_t)a.r==0x80020055 && a.result<=0x1);
+        assert(ef_poll(ef,0x1,0x2,&bits)==0 && bits==0x1);
+    }
     assert(ef_delete(ef)==0);
 }
 int main(int argc,char **argv) {

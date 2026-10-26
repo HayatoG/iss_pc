@@ -52,6 +52,7 @@ typedef struct EfWaiter {
     uint64_t pattern;
     uint32_t mode;
     int done;          /* TLG_EF_HANDOFF: a set satisfied (and consumed for) this waiter */
+    int generation;    /* the cancel generation it enrolled under: a cancelled waiter takes no handoff */
     uint64_t result;   /* the bits that set saw, before its clear */
 #ifdef _WIN32
     CONDITION_VARIABLE cv;   /* TLG_EF_SRW */
@@ -87,8 +88,9 @@ static int ef_toggle(int *cache,const char *name) {
     return v;
 }
 static int ef_selective(void) { static int v=-1; return ef_toggle(&v,"TLG_EF_WAKE_WAITERS"); }
-/* TLG_EF_HANDOFF (default on, =0 disables): a set hands the bits to each waiter it satisfies, in
- * FIFO order, and applies that waiter's clear mode at once, as the PS4 kernel does. Without it a
+/* TLG_EF_HANDOFF (default on, =0 disables): a set hands the bits to each waiter it satisfies and
+ * applies that waiter's clear mode at once, like the PS4 kernel. The order is FIFO (arrival) only:
+ * the kernel's TH_PRIO (thread priority) ordering is not modelled. Without it a
  * waiter re-tests the bits only once it has retaken the lock, so a set followed at once by a clear
  * (or another waiter's consume) loses the wakeup. Read once. */
 static int ef_handoff(void) {
@@ -158,7 +160,7 @@ static ABI int32_t ef_delete(EventFlag *ef) {
     ef_lock(ef);
     ef->deleted=1;
     ef_wake(ef,0);
-    int busy=ef->waiters;
+    int busy=ef->waiters || ef->first;   /* a handed-off waiter is uncounted but still listed */
     ef_unlock(ef);
     /* Waiters return ESRCH; the object is leaked if any were blocked, since they still read it. */
     if (!busy) { ef->magic=0; pthread_cond_destroy(&ef->cond); pthread_mutex_destroy(&ef->lock); free(ef); }
@@ -166,12 +168,14 @@ static ABI int32_t ef_delete(EventFlag *ef) {
 }
 static void ef_consume(EventFlag *ef,uint64_t pattern,uint32_t mode,uint64_t *result);
 /* TLG_EF_HANDOFF: satisfies the waiters the bits now match, in arrival order (a clear mode can
- * leave later ones unsatisfied), and wakes only those. */
+ * leave later ones unsatisfied), and wakes only those. A handed-off waiter stops counting as a
+ * waiter at once. A cancelled waiter is still listed until it retakes the lock, but it belongs to
+ * an older cancel generation and gets ECANCELED, so it is skipped and its bits stay set. */
 static void ef_hand_off(EventFlag *ef) {
     int any=0;
     for (EfWaiter *w=ef->first;w;w=w->next) {
-        if (w->done || !ef_match(ef->bits,w->pattern,w->mode)) continue;
-        w->done=1; any=1;
+        if (w->done || w->generation!=ef->cancel_generation || !ef_match(ef->bits,w->pattern,w->mode)) continue;
+        w->done=1; any=1; --ef->waiters;
         ef_consume(ef,w->pattern,w->mode,&w->result);
 #ifdef _WIN32
         if (ef_srw()) { WakeConditionVariable(&w->cv); EF_COUNT(ef_wakeups); }
@@ -185,6 +189,7 @@ static ABI int32_t ef_set(EventFlag *ef,uint64_t bits) {
     if (!ef_valid(ef)) return KERR_ESRCH;
     EF_COUNT(ef_sets);
     ef_lock(ef);
+    if (ef->deleted) { ef_unlock(ef); return KERR_ESRCH; }
     ef->bits|=bits;
     if (ef_handoff()) ef_hand_off(ef);
     else ef_wake(ef,ef_selective());
@@ -273,7 +278,7 @@ static ABI int32_t ef_wait(EventFlag *ef,uint64_t pattern,uint32_t mode,uint64_t
     int32_t r=0;
     const int generation=ef->cancel_generation;
     ++ef->waiters;
-    EfWaiter w={.pattern=pattern,.mode=mode};
+    EfWaiter w={.pattern=pattern,.mode=mode,.generation=generation};
 #ifdef _WIN32
     InitializeConditionVariable(&w.cv);
 #endif
@@ -289,8 +294,11 @@ static ABI int32_t ef_wait(EventFlag *ef,uint64_t pattern,uint32_t mode,uint64_t
     }
     runtime_wait_end();
     for (EfWaiter **p=&ef->first;*p;p=&(*p)->next) if (*p==&w) { *p=w.next; break; }
-    --ef->waiters;
-    if (w.done) { r=0; if (result) *result=w.result; }   /* handed off: already consumed */
+    if (!w.done) --ef->waiters;   /* a handoff already uncounted it */
+    /* done is only ever set under this waiter's own cancel generation (ef_hand_off skips stale
+     * ones), so it was satisfied and its bits consumed before any later cancel: that cancel did not
+     * count it either, and returning ECANCELED now would lose the consumed bits. */
+    if (w.done) { r=0; if (result) *result=w.result; }
     else if (ef->deleted) r=KERR_ESRCH;
     else if (ef->cancel_generation!=generation) { r=KERR_ECANCELED; if (result) *result=ef->bits; }
     else if (!r) ef_consume(ef,pattern,mode,result);
