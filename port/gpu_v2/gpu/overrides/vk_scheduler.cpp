@@ -69,6 +69,61 @@ void EmitKnownCompletion(u64 owner, u64 known_tick) {
 
 std::mutex Scheduler::submit_mutex;
 
+std::unique_lock<std::mutex> Scheduler::LockSubmit(SubmitLockCaller caller) {
+    std::unique_lock lk{submit_mutex, std::try_to_lock};
+    if (lk.owns_lock()) {
+        return lk;
+    }
+    const u64 start = Common::Perf::NowNs();
+    lk.lock();
+    const u64 wait_ns = Common::Perf::NowNs() - start;
+    switch (caller) {
+    case SubmitLockCaller::Cp:
+        Common::Perf::Add(Common::Perf::SubmitMutexContentionsCp);
+        Common::Perf::Add(Common::Perf::SubmitMutexWaitNsCp, wait_ns);
+        break;
+    case SubmitLockCaller::Recorder:
+        Common::Perf::Add(Common::Perf::SubmitMutexContentionsRecorder);
+        Common::Perf::Add(Common::Perf::SubmitMutexWaitNsRecorder, wait_ns);
+        break;
+    case SubmitLockCaller::Present:
+        Common::Perf::Add(Common::Perf::SubmitMutexContentionsPresent);
+        Common::Perf::Add(Common::Perf::SubmitMutexWaitNsPresent, wait_ns);
+        break;
+    }
+    return lk;
+}
+
+bool Scheduler::SplitSubmitLock() {
+    // ISS_SUBMIT_LOCK=split (default global): the wait for the upload worker jobs a submission
+    // depends on (UploadWorker::Wait, which may do the queued jobs itself) runs before
+    // submit_mutex is taken instead of under it, so the other queues' submissions, the command
+    // processor's on_submit and vkQueuePresentKHR do not wait behind it. It touches no queue:
+    // the submission order of each scheduler is still set by its single submitting thread (the
+    // recording thread, or the command processor once that thread is idle) and by the lock.
+    static const bool split = [] {
+        const char* value = std::getenv("ISS_SUBMIT_LOCK");
+        const bool on = value && std::strcmp(value, "split") == 0;
+        std::fprintf(stderr, "PORT_TUNING submit_lock=%s\n", on ? "split" : "global");
+        return on;
+    }();
+    return split;
+}
+
+void Scheduler::WaitUploadDependency(SubmitInfo& info) {
+    if (info.upload_dependency == 0) {
+        return;
+    }
+    std::scoped_lock lk{dependency_mutex};
+    if (!submit_dependency_wait) {
+        return;
+    }
+    const u64 wait_start = Common::Perf::NowNs();
+    submit_dependency_wait(info.upload_dependency);
+    Common::Perf::Add(Common::Perf::AsyncUploadWaitNs, Common::Perf::NowNs() - wait_start);
+    info.upload_dependency = 0;
+}
+
 extern bool g_iss_amd_buffer_marker; // vk_instance.cpp
 
 namespace GpuCrashDiag {
@@ -507,7 +562,10 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
             const vk::CommandBuffer cmdbuf = RecorderCommandBuffer();
             Check(cmdbuf.end());
             recorder_cmdbuf = vk::CommandBuffer{};
-            std::scoped_lock lk{submit_mutex};
+            if (SplitSubmitLock()) {
+                WaitUploadDependency(job.info);
+            }
+            const auto lk = LockSubmit(SubmitLockCaller::Recorder);
             SubmitToQueue(std::span{&cmdbuf, 1}, job.info);
         }
         const u64 busy_ns = Common::Perf::NowNs() - busy_start;
@@ -804,8 +862,36 @@ void Scheduler::WaitSubmitted(u64 tick) {
         // Not flushed yet: the caller flushes first.
         Flush();
     }
+    WaitTickPublished(tick, "WaitSubmitted");
+}
+
+void Scheduler::WaitFlushedSubmitted(u64 tick) {
+    if (submitted_tick.load(std::memory_order_acquire) >= tick) {
+        return;
+    }
+    if (tick >= work_semaphore.CurrentTick()) {
+        // Not flushed: nothing would submit it, the caller's flush must not run here.
+        LOG_ERROR(Render_Vulkan, "WaitFlushedSubmitted: tick {} not flushed ({})", tick, name);
+        return;
+    }
+    WaitTickPublished(tick, "WaitFlushedSubmitted");
+}
+
+void Scheduler::WaitTickPublished(u64 tick, const char* who) {
+    // Bounded steps of whole milliseconds (libc++ on Win32 turns sub-ms waits into 0): a submit
+    // that failed never publishes its tick, which is logged instead of hanging silently.
     std::unique_lock lk{submitted_mutex};
-    submitted_cv.wait(lk, [&] { return submitted_tick.load(std::memory_order_acquire) >= tick; });
+    const auto published = [&] { return submitted_tick.load(std::memory_order_acquire) >= tick; };
+    const u64 start = Common::Perf::NowNs();
+    bool logged = false;
+    while (!submitted_cv.wait_for(lk, std::chrono::milliseconds{100}, published)) {
+        if (!logged && Common::Perf::NowNs() - start >= 1'000'000'000ULL) {
+            logged = true;
+            LOG_ERROR(Render_Vulkan, "{}: tick {} not submitted after 1 s ({}, submitted {}), "
+                      "still waiting", who, tick, name,
+                      submitted_tick.load(std::memory_order_acquire));
+        }
+    }
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
@@ -819,7 +905,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         // Threaded recording: the recording thread submits the session after recording it.
         const u64 signal_value = work_semaphore.NextTick();
         {
-            std::scoped_lock lk{submit_mutex};
+            const auto lk = LockSubmit(lock_caller);
             if (on_submit) {
                 on_submit(info);
             }
@@ -837,7 +923,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
                                     signal_value, 1, 1, work_semaphore.KnownGpuTick(),
                                     session_used ? 1 : 0);
             }
-            std::scoped_lock lk{submit_mutex};
+            if (SplitSubmitLock()) {
+                WaitUploadDependency(info);
+            }
+            const auto lk = LockSubmit(lock_caller);
             SubmitToQueue(std::span{&direct_cmdbuf, 1}, info);
         } else {
             std::unique_ptr<CommandStream> next;
@@ -880,7 +969,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         return;
     }
 
-    std::scoped_lock lk{submit_mutex};
+    if (SplitSubmitLock()) {
+        WaitUploadDependency(info);
+    }
+    const auto lk = LockSubmit(lock_caller);
     const u64 signal_value = work_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED
