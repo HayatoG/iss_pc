@@ -491,6 +491,21 @@ Follow-up: the command processor still waits for a video-out label in 1 ms timed
 (`WaitVoLabelFor`, `port/gpu_v2/gpu/overrides/liverpool.cpp:~3384`), a remaining 1 ms spin like
 the old upload worker idle wait.
 
+## Findings 2026-10-26 (cloud audit)
+
+Paired-round A/B sessions on the bench route (renderer v2), each against the main of the time.
+
+- **Audit integration** (perf log, CSV counters, command processor touch queue off the CP
+  thread): +2.0% FPS.
+- **`ISS_SUBMIT_INTERVAL_US=500`** (now the default in `port/gpu_v2/defaults.env`, with the
+  occlusion hold and overlap age): +19.2% FPS (95% CI +15.4..+23.0%).
+- **Interval sweep:** 250 to 1000 us is a plateau (all within noise of each other); 500 stays the
+  default.
+- **Keep off:** `ISS_ASC_NATIVE_QUEUE` hangs the game after about 55 s of gameplay.
+- **Neutral** (no FPS change outside the noise): the VO, FLIP, SPLIT, LP, RSPIN and PS variants.
+- **Borderline:** `ISS_EXTRQ_INLINE=1` (inline SSE2 stubs for SSE4A `extrq` sites) about +2%,
+  not clearly outside the noise; it stays opt-in.
+
 ## Tests and rollout
 
 The standalone recorder test does not need Vulkan or MSYS2:
