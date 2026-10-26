@@ -291,6 +291,14 @@ enum Counter : u32 {
     SubmitLockWaitNs,
     IdleAdmitGaps,
     IdleAdmitGapNs,
+    // Command processor waits on a flip label (video out, liverpool.cpp WaitRegMem) and their
+    // time (ISS_VO_WAIT); waits on a label or semaphore not yet written (WaitRegMem and
+    // MemSemaphore, graphics and compute), counted when the first test fails, and the time until
+    // it passed (the queue yields meanwhile; the time can overlap between queues).
+    VoWaits,
+    VoWaitNs,
+    CpLabelStalls,
+    CpLabelStallNs,
     CounterCount,
 };
 
@@ -905,7 +913,8 @@ inline void OnFlip(float draws_per_frame, float dispatches_per_frame) {
              "{:.0f}% submissions {} ({:.2f} ms avg, in flight {:.1f} avg) with readbacks {} "
              "({:.2f} ms avg) compute {} ({:.1f} ms) | relaxed readbacks {} (pages refreshed {} "
              "left {}) | asc queue dispatches {} fallbacks {} submits {} waits gfx {} compute {} "
-             "flushes {} first touches {} | draws/frame {:.0f} dispatches/frame {:.0f}",
+             "flushes {} first touches {} | draws/frame {:.0f} dispatches/frame {:.0f} | "
+             "vo waits {} ({:.2f} ms/frame) | cp label stalls {} ({:.2f} ms/frame)",
              static_cast<double>(r.frames) / seconds,
              r.frames ? r.frame_ms_sum / static_cast<double>(r.frames) : 0.0, r.frame_ms_max,
              r.frames_over_33, r.frames_over_50, pct(t[GpuBusyNs]), pct(t[GpuSpinNs]),
@@ -972,7 +981,9 @@ inline void OnFlip(float draws_per_frame, float dispatches_per_frame) {
              t[ReadbackRelaxedRefreshes], t[ReadbackRelaxedSkips], t[AscQueueDispatches],
              t[AscQueueFallbacks], t[ComputeQueueSubmits], t[CrossWaitsGraphics],
              t[CrossWaitsCompute], t[CrossQueueFlushes], t[CrossQueueFirstTouches],
-             draws_per_frame, dispatches_per_frame);
+             draws_per_frame, dispatches_per_frame, t[VoWaits],
+             r.frames ? ms(t[VoWaitNs]) / static_cast<double>(r.frames) : 0.0, t[CpLabelStalls],
+             r.frames ? ms(t[CpLabelStallNs]) / static_cast<double>(r.frames) : 0.0);
 
     const u64 last_flip = r.last_flip;
     const u64 flip_index = r.flip_index;

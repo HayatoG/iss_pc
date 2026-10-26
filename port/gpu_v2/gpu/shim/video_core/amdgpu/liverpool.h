@@ -255,6 +255,7 @@ public:
                 ++num_commands;
                 submit_cv.notify_all();
             }
+            WakeVoWait();
             completion->sem.acquire();
             {
                 std::scoped_lock lk{submit_mutex};
@@ -263,13 +264,33 @@ public:
             ASSERT_MSG(completion->state.load(std::memory_order_acquire) == 2u,
                        "CP command cancelled or failed during shutdown");
         } else {
-            std::scoped_lock lk{submit_mutex};
-            ASSERT_MSG(!cp_stopping, "CP command submitted during shutdown");
-            command_queue.emplace(std::move(func));
-            ++num_commands;
-            submit_cv.notify_all();
+            {
+                std::scoped_lock lk{submit_mutex};
+                ASSERT_MSG(!cp_stopping, "CP command submitted during shutdown");
+                command_queue.emplace(std::move(func));
+                ++num_commands;
+                submit_cv.notify_all();
+            }
+            WakeVoWait();
         }
     }
+
+    /// ISS_VO_WAIT=event: wakes the command processor sleeping on a flip label (it waits on the
+    /// video out port's condition variable, not on submit_cv) when it has new work. Called after
+    /// num_commands/asc_submits were published, outside submit_mutex. With the seq_cst fence
+    /// here and the one after the command processor sets cp_in_vo_wait, either this sees the
+    /// flag and signals under vo_mutex, or the command processor's predicate sees the work.
+    void WakeVoWait() {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (cp_in_vo_wait.load(std::memory_order_relaxed)) {
+            SignalVoWait();
+        }
+    }
+    void SignalVoWait(); // liverpool.cpp (VideoOutPort is incomplete here)
+
+    /// The command processor thread only (a no-op on others): serves the queued guest commands,
+    /// as its loop does between packets (ISS_NATIVE_WAIT_PUMP: while it waits for the pool).
+    void ServeCommandsOnCp();
 
     void ReserveCopyBufferSpace() {
         GpuQueue& gfx_queue = mapped_queues[GfxQueueId];
@@ -506,6 +527,8 @@ private:
     u64 frame_index{};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
+    /// ISS_VO_WAIT=event: the command processor sleeps on a flip label (see WakeVoWait).
+    std::atomic<bool> cp_in_vo_wait{};
     std::mutex submit_mutex;
     // Serializes scout sequence and coroutine preparation without holding
     // submit_mutex or queue.m_access during Scout::Submit allocation.

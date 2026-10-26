@@ -24,9 +24,14 @@
 #define ISS_SYSV __attribute__((sysv_abi))
 #endif
 
+#include "core/memory.h"
+
 #ifdef _WIN32
 bool IssCommandProcessorCpuSets(std::vector<ULONG>& out); // bridge.cpp, ISS_CP_CPU
 #endif
+// liverpool.cpp: the command processor serves the guest commands queued for it (a no-op on any
+// other thread). ISS_NATIVE_WAIT_PUMP, below.
+void IssCpServeCommands();
 
 namespace iss::native_passes {
 namespace {
@@ -44,6 +49,21 @@ constexpr u32 MaxComputeDispatches = 64;
 // 'NPS', the segment's generation, the lane's tag. The command processor takes a segment only
 // with its token there, so a command buffer address reused later never finds an older one.
 constexpr u32 TokenMagic = 0x4E505300u;
+// Writes a segment token (TokenMagic, generation, tag) into the payload of a command buffer NOP
+// through the host backing of the guest memory: no fault. A plain store into a command buffer
+// page the GPU modified (labels or query results the command processor wrote into data embedded
+// in it) faults into a readback, which waits for the command processor, which may be waiting for
+// this pool thread: a deadlock. A readback overwriting the page later just loses the token (Claim
+// misses, the segment takes the full path). Plain store only without a backing.
+void WriteToken(const u32* at, u32 generation, u32 token) {
+    const u32 words[3]{TokenMagic, generation, token};
+    auto* dest = const_cast<u32*>(at);
+    if (!Core::Memory::Instance()->TryWriteBacking(dest, words, sizeof(words))) {
+        dest[0] = words[0];
+        dest[1] = words[1];
+        dest[2] = words[2];
+    }
+}
 constexpr u32 TrackedWords_ = 0x400 + 0x80 + 0x20;
 
 struct CommandBuffer {
@@ -725,9 +745,7 @@ u64 ISS_SYSV DrawIndexHook(CommandBuffer* dcb, u32 count, u64 index_address, u32
     }
     if (token_for && dcb->cursor == packet + DrawDwords && ((packet[6] >> 8) & 0xFF) == 0x10 &&
         ((packet[6] >> 16) & 0x3FFF) == 2) {
-        packet[7] = TokenMagic;
-        packet[8] = token_for->generation;
-        packet[9] = token_for->token;
+        WriteToken(packet + 7, token_for->generation, token_for->token);
     }
     if (l->begin == dcb->begin && dcb->cursor >= packet) l->scanned = dcb->cursor;
     return result;
@@ -894,10 +912,7 @@ const u32* RecordDispatch(Lane& l, const u32* packet, const u32* next, const u32
         if (seg.draw_packets.size() >= MaxComputeDispatches) CloseCompute(l, CloseFull, 0x15);
     }
     if (token_for && has_nop) {
-        auto* w = const_cast<u32*>(next);
-        w[1] = TokenMagic;
-        w[2] = token_for->generation;
-        w[3] = token_for->token;
+        WriteToken(next + 1, token_for->generation, token_for->token);
     }
     return after;
 }
@@ -1037,10 +1052,7 @@ void RecordCommandBuffer(Lane& l, const u32* begin, const u32* end, const std::v
             if (seg.draw_packets.size() >= MaxSegmentDraws) CloseSegment(l, CloseFull);
         }
         if (token_for && has_nop) {
-            auto* w = const_cast<u32*>(next);
-            w[1] = TokenMagic;
-            w[2] = token_for->generation;
-            w[3] = token_for->token;
+            WriteToken(next + 1, token_for->generation, token_for->token);
         }
         plain_from = after;
         p = after;
@@ -1407,12 +1419,36 @@ bool JobWait() {
     }();
     return enabled;
 }
+// ISS_NATIVE_WAIT_PUMP=1 (default 0: untimed waits): the command processor waiting for the pool
+// wakes every 1 ms (not sub-ms: libc++ on Win32 truncates that to a busy poll) and serves the
+// guest commands queued for it, the pool lock released. A pool or scan thread faulting on a
+// GPU-modified command buffer page waits for such a command (a readback): without it, both wait
+// for each other. The waits are at a packet boundary, where the command processor's loop serves
+// the commands anyway (ProcessCommands before WaitRecordedAt).
+bool WaitPump() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_NATIVE_WAIT_PUMP");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
+void WaitDone(std::unique_lock<std::mutex>& lock, const auto& done) {
+    if (!WaitPump()) {
+        submit.done_cv.wait(lock, done);
+        return;
+    }
+    while (!submit.done_cv.wait_for(lock, std::chrono::milliseconds(1), done)) {
+        lock.unlock();
+        IssCpServeCommands();
+        lock.lock();
+    }
+}
 // Waits (pool lock held) until job k of the command processor's command buffer is recorded.
 void WaitJob(std::unique_lock<std::mutex>& lock, DcbWork& work, u32 k) {
     const auto done = [&] { return work.job_done[k].load(std::memory_order_acquire) != 0; };
     if (done()) return;
     const u64 t0 = NowUs();
-    submit.done_cv.wait(lock, done);
+    WaitDone(lock, done);
     submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
     submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
 }
@@ -1439,7 +1475,7 @@ void WaitRecorded(const u32* dcb) {
         // others as the command processor reaches them (WaitRecordedAt).
         if (!scanned()) {
             const u64 t0 = NowUs();
-            submit.done_cv.wait(lock, scanned);
+            WaitDone(lock, scanned);
             submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
             submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
         }
@@ -1457,7 +1493,7 @@ void WaitRecorded(const u32* dcb) {
     }
     if (done()) return;
     const u64 t0 = NowUs();
-    submit.done_cv.wait(lock, done);
+    WaitDone(lock, done);
     submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
     submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
 }
