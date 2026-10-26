@@ -203,15 +203,17 @@ public:
         return HasImagesInRange(addr, 1);
     }
 
-    void TouchImageLocked(ImageId image_id) {
+    void TouchImageLocked(ImageId image_id,
+                          const std::source_location& where = std::source_location::current()) {
         AssertNoAscTextureAccess();
         std::scoped_lock lock{mutex};
-        TouchImage(slot_images[image_id]);
+        TouchImage(slot_images[image_id], where);
     }
 
 
     /// Updates image contents if it was modified by CPU.
-    void UpdateImage(ImageId image_id) {
+    void UpdateImage(ImageId image_id,
+                     const std::source_location& where = std::source_location::current()) {
         AssertNoAscTextureAccess();
         Image& image = slot_images[image_id];
         // Clean, and tracked over its whole range: nothing to do but touch it (bound every
@@ -221,12 +223,12 @@ public:
             False(image.LoadFlags() & ImageFlagBits::Dirty) &&
             image.track_addr == image.info.guest_address &&
             image.track_addr_end == image.info.guest_address + image.info.guest_size) {
-            TouchImage(image);
+            TouchImage(image, where);
             return;
         }
         std::scoped_lock lk{mutex};
         TrackImage(image_id);
-        TouchImage(image);
+        TouchImage(image, where);
         RefreshImage(image);
     }
 
@@ -282,10 +284,11 @@ public:
     }
 
     /// Retrieves the image with the specified id.
-    [[nodiscard]] Image& GetImage(ImageId id) {
+    [[nodiscard]] Image& GetImage(ImageId id,
+                                  const std::source_location& where = std::source_location::current()) {
         AssertNoAscTextureAccess();
         auto& image = slot_images[id];
-        TouchImage(image);
+        TouchImage(image, where);
         return image;
     }
 
@@ -516,9 +519,15 @@ private:
     /// Touch the image in the LRU cache. Command processor only, with or without the lock: by
     /// default (ISS_TEX_DEFER_LRU_TOUCH) the touch is queued and applied to the LRU under the
     /// lock (ApplyPendingTouchesLocked), as guest threads change the LRU list under it (unmaps).
-    void TouchImage(const Image& image);
+    /// A touch from another thread (sceVideoOutRegisterBuffers -> RegisterVideoOutSurface) goes
+    /// to off_cp_touches. where: the caller (GetImage, UpdateImage pass theirs on), for
+    /// TEXTURE_TOUCH_OFF_CP.
+    void TouchImage(const Image& image,
+                    const std::source_location& where = std::source_location::current());
     /// Applies the queued touches to the LRU (command processor, mutex held).
     void ApplyPendingTouchesLocked();
+    /// Counts and logs touches from outside the command processor (TEXTURE_TOUCH_OFF_CP).
+    void NoteOffCpTouch(const std::source_location& where);
     static bool DeferLruTouchesSetting();
 
     /// Counts frees by thread (TEXTURE_FREE_OFF_CP; ISS_ASSERT_FREE_ON_CP=1 asserts).
@@ -604,6 +613,11 @@ private:
     /// single owner only because AssertNoAscTextureAccess keeps the ASC queue out of the texture
     /// cache (GetImage, UpdateImage, Find*). A texture path opened to ASC must change this.
     std::vector<size_t> pending_lru_touches;
+    /// iss: LRU ids touched outside the command processor (any thread, with or without mutex),
+    /// under off_cp_touch_mutex; applied with pending_lru_touches. Lock order: mutex, then this.
+    std::mutex off_cp_touch_mutex;
+    std::vector<size_t> off_cp_touches;
+    std::atomic<bool> off_cp_touches_pending{false};
     const bool defer_lru_touches = DeferLruTouchesSetting();
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     const bool readback_linear_images;

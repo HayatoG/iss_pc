@@ -1892,7 +1892,8 @@ void TextureCache::RunGarbageCollector() {
     };
     gc_scheduler_ticks[gc_tick % gc_scheduler_ticks.size()] = scheduler.CurrentTick();
 
-    if (!pending_lru_touches.empty()) {
+    if (!pending_lru_touches.empty() ||
+        off_cp_touches_pending.load(std::memory_order_acquire)) {
         std::scoped_lock lk{mutex};
         ApplyPendingTouchesLocked();
     }
@@ -1923,17 +1924,77 @@ void TextureCache::ApplyPendingTouchesLocked() {
         lru_cache.Touch(id, gc_tick);
     }
     pending_lru_touches.clear();
+    if (off_cp_touches_pending.exchange(false, std::memory_order_acq_rel)) {
+        std::scoped_lock lk{off_cp_touch_mutex};
+        for (const size_t id : off_cp_touches) {
+            lru_cache.Touch(id, gc_tick);
+        }
+        off_cp_touches.clear();
+    }
 }
 
-void TextureCache::TouchImage(const Image& image) {
-    if (defer_lru_touches && liverpool && !liverpool->IsCurrentCpThread()) [[unlikely]] {
-        // lru_touched and the queue belong to the command processor: a touch from elsewhere
-        // is dropped (it only orders the collector, which spares recently bound images too).
-        static std::atomic<u64> off_cp{};
-        if (off_cp.fetch_add(1, std::memory_order_relaxed) == 0) {
-            std::fprintf(stderr, "TEXTURE_TOUCH_OFF_CP: an image touch outside the command "
-                                 "processor was dropped (first one)\n");
+} // namespace VideoCore
+#include <cstring>
+#include <string>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+#include "common/thread.h"
+namespace VideoCore {
+
+void TextureCache::NoteOffCpTouch(const std::source_location& where) {
+    // Known caller: sceVideoOutRegisterBuffers (a guest thread) -> RegisterVideoOutSurface ->
+    // FindImage + GetImage, once per display buffer at startup. The first touches are logged
+    // with the thread, the caller and the return addresses (module+offset, for the linker map;
+    // a guest frame has no module), then the count at each power of two.
+    static std::atomic<u64> off_cp{};
+    const u64 n = off_cp.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n > 8) {
+        if (std::has_single_bit(n)) {
+            std::fprintf(stderr, "TEXTURE_TOUCH_OFF_CP n=%llu (queued)\n", (unsigned long long)n);
         }
+        return;
+    }
+    const std::string thread = Common::GetCurrentThreadName();
+    std::fprintf(stderr, "TEXTURE_TOUCH_OFF_CP n=%llu thread=%s caller=%s line %u (queued)\n",
+                 (unsigned long long)n, thread.c_str(), where.function_name(), where.line());
+#ifdef _WIN32
+    void* frames[12];
+    const USHORT count = RtlCaptureStackBackTrace(2, 12, frames, nullptr);
+    for (USHORT i = 0; i < count; ++i) {
+        HMODULE module = nullptr;
+        char name[MAX_PATH] = "?";
+        u64 offset = reinterpret_cast<u64>(frames[i]);
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<LPCSTR>(frames[i]), &module)) {
+            GetModuleFileNameA(module, name, MAX_PATH);
+            offset -= reinterpret_cast<u64>(module);
+        }
+        const char* base = std::strrchr(name, '\\');
+        std::fprintf(stderr, "TEXTURE_TOUCH_OFF_CP n=%llu frame %u %s+0x%llx\n",
+                     (unsigned long long)n, unsigned(i), base ? base + 1 : name,
+                     (unsigned long long)offset);
+    }
+#endif
+    std::fflush(stderr);
+}
+
+void TextureCache::TouchImage(const Image& image, const std::source_location& where) {
+    if (defer_lru_touches && liverpool && !liverpool->IsCurrentCpThread()) [[unlikely]] {
+        // lru_touched and pending_lru_touches belong to the command processor: a touch from
+        // elsewhere goes to a side queue, applied under the lock before the next collection.
+        NoteOffCpTouch(where);
+        {
+            std::scoped_lock lk{off_cp_touch_mutex};
+            if (off_cp_touches.size() < 4096) {
+                off_cp_touches.push_back(image.lru_id);
+            }
+        }
+        off_cp_touches_pending.store(true, std::memory_order_release);
         return;
     }
     const size_t id = image.lru_id;
