@@ -206,6 +206,7 @@ extern "C" __declspec(dllexport) void iss_gpu_file_opened(const char* guest_path
 
 namespace Vulkan {
 
+void RemoveStaleDriverCacheTemporaries(const std::filesystem::path& driver_cache_path); // pipeline_checkpoint.cpp
 
 /**
  * Worker threads creating the Vulkan pipeline objects whose compilation was deferred, so the
@@ -1311,9 +1312,17 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     std::vector<u8> stored;
     std::span<const u8> initial;
     const auto properties = instance.GetPhysicalDevice().getProperties();
+    if (EmulatorSettings.IsPipelineCacheEnabled()) {
+        RemoveStaleDriverCacheTemporaries(driver_cache_path);
+    }
     if (EmulatorSettings.IsPipelineCacheEnabled() && std::filesystem::exists(driver_cache_path)) {
         Common::FS::IOFile file{driver_cache_path, Common::FS::FileAccessMode::Read};
-        if (file.IsOpen() && file.GetSize() <= 256ULL * 1024 * 1024) {
+        if (file.IsOpen() && file.GetSize() > DriverCacheMaxBytes()) {
+            LOG_WARNING(Render_Vulkan,
+                        "Vulkan driver cache is {} MB, over ISS_PIPELINE_CACHE_MAX_MB ({} MB): not read",
+                        file.GetSize() >> 20, DriverCacheMaxBytes() >> 20);
+        }
+        if (file.IsOpen() && file.GetSize() <= DriverCacheMaxBytes()) {
             stored.resize(file.GetSize());
             file.Read(stored);
             initial = UnpackDriverCache(stored, properties.vendorID, properties.deviceID,
@@ -2361,8 +2370,9 @@ void PipelineCache::SaveDriverCache() {
     if (compiler) compiler->WaitIdle();
     const auto result = instance.GetDevice().getPipelineCacheData(*pipeline_cache);
     if ((result.result != vk::Result::eSuccess && result.result != vk::Result::eIncomplete) ||
-        result.value.size() < 32 || result.value.size() > 256ULL * 1024 * 1024 - 24) {
-        LOG_WARNING(Render_Vulkan, "Vulkan driver cache snapshot unavailable");
+        result.value.size() < 32 || result.value.size() > DriverCacheMaxBytes() - 24) {
+        LOG_WARNING(Render_Vulkan, "Vulkan driver cache snapshot unavailable ({} bytes, cap {} MB "
+                    "ISS_PIPELINE_CACHE_MAX_MB)", result.value.size(), DriverCacheMaxBytes() >> 20);
         return;
     }
     const auto envelope = PackDriverCache(result.value);

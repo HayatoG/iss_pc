@@ -2,7 +2,10 @@
 // Preserve the driver's cache during long sessions and diagnostic termination.
 #include <windows.h>
 #include <cstdio>
+#include <filesystem>
 #include <mutex>
+#include <string>
+#include <vector>
 #include <xxhash.h>
 #include "common/perf_stats.h"
 #include "core/emulator_settings.h"
@@ -11,6 +14,24 @@
 #include "video_core/renderer_vulkan/driver_cache_data.h"
 
 namespace Vulkan {
+// iss: <cache>.pending-<pid> files left by checkpoints whose process was killed mid-write (each
+// up to the cache's size). Called at startup, before this process writes its own.
+void RemoveStaleDriverCacheTemporaries(const std::filesystem::path& driver_cache_path){
+    const auto prefix=driver_cache_path.filename().wstring()+L".pending-";
+    const auto own=prefix+std::to_wstring(GetCurrentProcessId());
+    std::error_code ec;std::vector<std::filesystem::path> stale;
+    for(const auto& entry:std::filesystem::directory_iterator{driver_cache_path.parent_path(),ec}){
+        const auto name=entry.path().filename().wstring();
+        if(name.starts_with(prefix)&&name!=own)stale.push_back(entry.path());
+    }
+    u64 bytes=0;unsigned removed=0;
+    for(const auto& path:stale){
+        std::error_code size_ec;const auto size=std::filesystem::file_size(path,size_ec);
+        if(std::filesystem::remove(path,ec)){++removed;bytes+=size_ec?0:size;}
+    }
+    if(removed)std::fprintf(stderr,"PIPELINE_CHECKPOINT removed %u stale pending files (%.1f MB)\n",removed,double(bytes)/1048576.0);
+}
+
 bool PipelineCache::CheckpointDriverCache(bool final){
     // Vulkan internally synchronizes this cache (no EXTERNALLY_SYNCHRONIZED flag).
     // This mutex serializes our snapshot writers; no compiler or draw is skipped.
@@ -29,8 +50,15 @@ bool PipelineCache::CheckpointDriverCache(bool final){
     if(!final&&creates==checkpointed_creates)return true;
     const auto started=Common::Perf::NowNs();
     const auto snapshot=instance.GetDevice().getPipelineCacheData(*pipeline_cache);
-    if(snapshot.result!=vk::Result::eSuccess||snapshot.value.size()<32||snapshot.value.size()>256ULL*1024*1024-24){
-        std::fprintf(stderr,"PIPELINE_CHECKPOINT unavailable result=%d\n",int(snapshot.result));return false;}
+    if(snapshot.result==vk::Result::eSuccess&&snapshot.value.size()>DriverCacheMaxBytes()-24){
+        // Once: every later checkpoint would say the same. The cache keeps working, unsaved.
+        static bool reported=false;
+        if(!reported){reported=true;
+            std::fprintf(stderr,"PIPELINE_CHECKPOINT over cap: driver cache %.1f MB > %.1f MB (ISS_PIPELINE_CACHE_MAX_MB); not saved, new pipelines will compile again next session\n",
+                double(snapshot.value.size())/1048576.0,double(DriverCacheMaxBytes()-24)/1048576.0);}
+        return false;}
+    if(snapshot.result!=vk::Result::eSuccess||snapshot.value.size()<32){
+        std::fprintf(stderr,"PIPELINE_CHECKPOINT unavailable result=%d bytes=%zu\n",int(snapshot.result),snapshot.value.size());return false;}
     const u64 hash=XXH3_64bits(snapshot.value.data(),snapshot.value.size());
     if(hash==previous_hash){checkpointed_creates=creates;return true;}
     const auto bytes=PackDriverCache(snapshot.value);

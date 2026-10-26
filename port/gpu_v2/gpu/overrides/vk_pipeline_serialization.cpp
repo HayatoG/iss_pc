@@ -9,6 +9,7 @@
 #include <filesystem>
 #include "common/path_util.h"
 #include "shader_salt.h"
+#include "cache_blob.h"
 #include "common/serdes.h"
 #include "common/elf_info.h"
 #include "pipeline_library.h"
@@ -18,6 +19,7 @@
 
 namespace iss {
 extern thread_local unsigned long long recipe_hash;
+extern thread_local bool assert_throws; // host_hooks.cpp
 }
 #include "common/perf_stats.h"
 #include "core/emulator_settings.h"
@@ -79,6 +81,22 @@ std::unordered_map<u64, std::vector<u32>> recipe_spirv; // permutation hash -> S
 /// ISS_AOT_RECIPE_VERIFY: the stages whose SPIR-V made from the game files is identical to the
 /// cached one (written to ISS_AOT_RECIPE_VERIFIED for make_recipes.py: recipes keep only those).
 std::vector<u64> recipe_verified;
+
+// iss: a truncated or corrupt cache blob is skipped and deleted instead of aborting the boot. Its
+// reads assert (serdes.h); on the WarmUp thread those throw while one of these is active. Off again
+// before anything is added to the caches, so a half-built pipeline is never left in one.
+struct AssertsThrow {
+    explicit AssertsThrow(bool value) : previous{iss::assert_throws} {
+        iss::assert_throws = value;
+    }
+    ~AssertsThrow() {
+        iss::assert_throws = previous;
+    }
+    AssertsThrow(const AssertsThrow&) = delete;
+    AssertsThrow& operator=(const AssertsThrow&) = delete;
+    bool previous;
+};
+u32 corrupt_blobs = 0; // WarmUp is serial
 } // Anonymous namespace
 
 void SetComputeShaderVariant(u32 variant) {
@@ -224,12 +242,23 @@ bool PipelineCache::LoadCachedPipelineStage(u64 hash, size_t stage) {
     // Storage is read-only during WarmUp. Repeated keys resolve to the same
     // validated metadata/SPIR-V; retain an index, not a vector element pointer.
     std::vector<u8> meta_blob;
-    if (!iss::pipeline_library::Read(fmt::format("{:#018x}.meta", hash), meta_blob))
-        Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta,
-                                          fmt::format("{:#018x}", hash), meta_blob);
+    const auto meta_name = fmt::format("{:#018x}", hash);
+    const bool from_library = iss::pipeline_library::Read(meta_name + ".meta", meta_blob);
+    if (!from_library)
+        Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta, meta_name, meta_blob);
     if (meta_blob.empty()) return false;
     Serialization::Archive meta_ar{std::move(meta_blob)};
-    return LoadPipelineStage(meta_ar, stage, hash);
+    try {
+        return LoadPipelineStage(meta_ar, stage, hash);
+    } catch (const std::exception& e) {
+        ++corrupt_blobs;
+        LOG_WARNING(Render_Vulkan, "Corrupt cached shader metadata {} skipped: {}", meta_name,
+                    e.what());
+        if (!from_library) {
+            Storage::DataBase::Instance().Remove(Storage::BlobType::ShaderMeta, meta_name);
+        }
+        return false;
+    }
 }
 
 bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
@@ -246,6 +275,7 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
         return false;
     }
 
+    const AssertsThrow asserts_abort{false};
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     if (!is_new) {
         // A merged library can carry the same pipeline from two cache lineages (different file
@@ -322,6 +352,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         }
     }
 
+    const AssertsThrow asserts_abort{false};
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (!is_new) {
         return false; // the same pipeline from another lineage of a merged library
@@ -359,14 +390,27 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
         return false;
     }
 
+    // The metadata is read: what follows adds to the caches, so a failed assert aborts again.
+    const AssertsThrow asserts_abort{false};
+
     std::vector<u32> spv{};
     std::vector<u8> bytes;
-    if (iss::pipeline_library::Read(fmt::format("{:#018x}_{}.spv", program->info.pgm_hash, perm_idx), bytes)) {
+    const auto spv_name = fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx);
+    const bool spv_from_library = iss::pipeline_library::Read(spv_name + ".spv", bytes);
+    if (!spv_from_library) {
+        Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary, spv_name, bytes);
+    }
+    if (!bytes.empty() && !iss::cache_blob::IsValidSpirv(bytes)) {
+        // Truncated or not SPIR-V: never handed to the driver. Made again when the game needs it.
+        ++corrupt_blobs;
+        LOG_WARNING(Render_Vulkan, "Corrupt cached SPIR-V {} ({} bytes) skipped", spv_name,
+                    bytes.size());
+        if (!spv_from_library) {
+            Storage::DataBase::Instance().Remove(Storage::BlobType::ShaderBinary, spv_name);
+        }
+    } else if (!bytes.empty()) {
         spv.resize(bytes.size() / sizeof(u32));
         std::memcpy(spv.data(), bytes.data(), bytes.size());
-    } else {
-        Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                           fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx), spv);
     }
     // ISS_AOT_RECIPES / ISS_AOT_RECIPE_VERIFY: the stage's SPIR-V made from the game files.
     static const bool recipes = [] {
@@ -615,10 +659,22 @@ void PipelineCache::WarmUp() {
     }
     iss::g_preload_phase.store(1, std::memory_order_relaxed);
 
-    const auto preload_key = [&](std::vector<u8>&& data) {
+    // name: the key's blob name in this cache (empty for the shader library's keys, read-only).
+    const auto preload_key = [&](const std::string& name, std::vector<u8>&& data) {
             ++num_total_pipelines;
             iss::g_preload_entries.fetch_add(1, std::memory_order_relaxed);
-            if (data.size() < 16) return;
+            const auto drop_corrupt = [&](const char* why) {
+                ++corrupt_blobs;
+                LOG_WARNING(Render, "Corrupt cached pipeline key {} skipped: {}",
+                            name.empty() ? "(library)" : name, why);
+                if (!name.empty()) {
+                    Storage::DataBase::Instance().Remove(Storage::BlobType::PipelineKey, name);
+                }
+            };
+            if (data.size() < 16) {
+                drop_corrupt("truncated");
+                return;
+            }
             const u64 now = Common::Perf::NowNs();
             if (now - last_progress >= 1'000'000'000ULL) {
                 LOG_INFO(Render, "Pipeline preload: {} entries, {} accepted, {} reused stages, {:.1f} s",
@@ -640,10 +696,16 @@ void PipelineCache::WarmUp() {
             pldata.Read(is_compute);
 
             bool result{};
-            if (is_compute) {
-                result = LoadComputePipeline(ar);
-            } else {
-                result = LoadGraphicsPipeline(ar);
+            try {
+                const AssertsThrow asserts_throw{true};
+                if (is_compute) {
+                    result = LoadComputePipeline(ar);
+                } else {
+                    result = LoadGraphicsPipeline(ar);
+                }
+            } catch (const std::exception& e) {
+                drop_corrupt(e.what());
+                return;
             }
 
             if (result) {
@@ -653,10 +715,12 @@ void PipelineCache::WarmUp() {
     if (const char* value = std::getenv("ISS_AOT_RECIPES"); value && value[0] == '1' && library_ready) {
         PrepareRecipeStages();
     }
-    Storage::DataBase::Instance().ForEachBlob(Storage::BlobType::PipelineKey, preload_key);
+    corrupt_blobs = 0;
+    Storage::DataBase::Instance().ForEachNamedBlob(Storage::BlobType::PipelineKey, preload_key);
     const u32 normal_accepted = num_pipelines;
     const u32 normal_total = num_total_pipelines;
-    iss::pipeline_library::ForEachKey(preload_key);
+    iss::pipeline_library::ForEachKey(
+        [&](std::vector<u8>&& data) { preload_key(std::string{}, std::move(data)); });
 
     if (parallel_preload) {
         // ISS_PRELOAD_BACKGROUND=1 (with ISS_ASYNC_SKIP_DRAWS): the game starts once every
@@ -698,6 +762,12 @@ void PipelineCache::WarmUp() {
     if (num_total_pipelines > num_pipelines) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines);
+    }
+    if (corrupt_blobs) {
+        LOG_WARNING(Render, "{} corrupt pipeline cache files were skipped and deleted",
+                    corrupt_blobs);
+        std::fprintf(stderr, "PIPELINE_PRELOAD corrupt_blobs=%u (skipped and deleted)\n",
+                     corrupt_blobs);
     }
 
     Storage::DataBase::Instance().FinishPreload();
@@ -797,15 +867,18 @@ bool PersistentSrtInfo::Deserialize(Serialization::Archive& ar) {
         srt.Read(capture_relocations);
     }
 
+    // iss: Advance checks the code is within the blob before it is copied (a truncated one).
     if (walker_func_size) {
-        walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
+        const u8* code = ar.CurrPtr();
         ar.Advance(walker_func_size);
+        walker_func = RegisterWalkerCode(code, walker_func_size);
     }
 
     if (capture_walker_func_size) {
-        capture_walker_func = RegisterCaptureWalkerCode(ar.CurrPtr(), capture_walker_func_size,
-                                                        capture_relocations);
+        const u8* code = ar.CurrPtr();
         ar.Advance(capture_walker_func_size);
+        capture_walker_func = RegisterCaptureWalkerCode(code, capture_walker_func_size,
+                                                        capture_relocations);
         if (!capture_walker_func) return false;
     }
 

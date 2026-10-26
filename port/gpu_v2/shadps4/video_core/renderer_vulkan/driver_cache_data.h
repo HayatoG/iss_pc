@@ -2,10 +2,24 @@
 #pragma once
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <span>
 #include <vector>
 
 namespace Vulkan {
+/// iss: the largest driver cache file read or written (the 24-byte envelope included).
+/// ISS_PIPELINE_CACHE_MAX_MB, default 1024 (was a fixed 256 MB; past it saving stopped silently).
+inline std::uint64_t DriverCacheMaxBytes() {
+    static const std::uint64_t bytes = [] {
+        std::uint64_t mb = 1024;
+        if (const char* value = std::getenv("ISS_PIPELINE_CACHE_MAX_MB"); value && *value) {
+            const auto parsed = std::strtoull(value, nullptr, 10);
+            if (parsed) mb = std::clamp<std::uint64_t>(parsed, 64, 4000); // one WriteFile call
+        }
+        return mb * 1024 * 1024;
+    }();
+    return bytes;
+}
 inline std::uint64_t CacheChecksum(std::span<const std::uint8_t> bytes) {
     std::uint64_t hash = 0xcbf29ce484222325ULL;
     for (auto value : bytes) hash = (hash ^ value) * 0x100000001b3ULL;
