@@ -21,8 +21,10 @@ Automated, repeatable A/B benchmark of inFAMOUS Second Son on Windows (renderer 
            caches are linked (junctions) to a cache copy of the bench (a persistent slot by
            default), so runs stay warm. Exit code 3 when a measured run did not end cleanly.
   compare  Table of the session: per variant mean +- stdev of avg_fps, low1_fps, p99_ms,
-           over33..., % diff vs the control variant and '~' when the diff is within 2x the
-           control's stdev (noise; only when that stdev is above 0). Uses
+           over33..., % diff vs the control variant and '~' (likely noise) when the paired 95% CI
+           of the per-round diff includes 0 (round_analyze.py, 2+ paired rounds; the same CI as
+           its "paired avg_fps diff" lines), else when the diff is within 2x the control's stdev
+           (only when that stdev is above 0; also the table without Python). Uses
            scripts\round_analyze.py when Python is present, which also checks scene drift: a run
            whose mean draws/frame is more than -DriftPct (5) off the median of all runs rendered
            another scene (the replay diverged); its variant's diffs are marked unreliable ('!'),
@@ -98,7 +100,10 @@ param(
     [ValidateSet('slot', 'variant')][string]$CacheMode = 'slot',
     # run: never skip the warm-up of a variant whose cache slot is known to be warm.
     [switch]$AlwaysWarmup,
-    # Variant name -> @{ VAR = 'value' }; '' or $null unsets VAR. Keys 'ini:<key>' set tlg.ini keys.
+    # Variant name -> @{ VAR = 'value' }; '' or $null unsets VAR (refused for a gpu_v2\defaults.env
+    # key, which the launcher would fill in again: '__unset__' runs without it). TLG_X is passed
+    # as ISS_X. ISS_TUNING is merged per key with defaults.env's (logged as effective_tuning).
+    # Keys 'ini:<key>' set tlg.ini keys.
     [System.Collections.IDictionary]$Variants,
     # The same as JSON: { "A": {}, "B": { "ISS_TUNING": "x=1" } } (file order kept).
     [string]$VariantFile,
@@ -798,10 +803,14 @@ function Save-Env([string[]]$keys) {
 function Restore-Env {
     foreach ($k in @($script:SavedEnv.Keys)) { [Environment]::SetEnvironmentVariable($k, $script:SavedEnv[$k], 'Process') }
 }
-# Applies one run's variables over the saved (original) environment; '' / $null unset.
+# Applies one run's variables over the saved (original) environment; '' / $null unset. The
+# TLG_ twins of the variables set, and the shell's TLG_ twins of defaults.env keys
+# ($script:StaleTlg, Resolve-VariantDefaults), are unset too.
+$script:StaleTlg = @()
 function Set-RunEnv($vars) {
     $keys = @($vars.Keys)
     $twins = @($keys | Where-Object { $_ -like 'ISS_*' } | ForEach-Object { 'TLG_' + $_.Substring(4) })
+    $twins += @($script:StaleTlg | Where-Object { $keys -notcontains $_ -and $twins -notcontains $_ })
     Save-Env ($keys + $twins)
     Restore-Env
     foreach ($t in $twins) { [Environment]::SetEnvironmentVariable($t, $null, 'Process') }   # the ISS_ name wins
@@ -810,6 +819,93 @@ function Set-RunEnv($vars) {
         if ($null -eq $v -or "$v" -eq '') { [Environment]::SetEnvironmentVariable($k, $null, 'Process') }
         else { [Environment]::SetEnvironmentVariable($k, "$v", 'Process') }
     }
+}
+
+# --------------------------------------------------------------- gpu_v2\defaults.env (launcher)
+# The launcher (infamous_run.py build_env) applies <port>\gpu_v2\defaults.env to every key the
+# environment does not set, merges an ISS_TUNING set outside it per key with the defaults' one
+# (merge_tuning) and removes a variable whose value is $UnsetValue after that.
+$UnsetValue = '__unset__'
+$TuningRepeatable = @('relaxed_site')   # ISS_TUNING keys that add an entry instead of replacing
+
+function Read-DefaultsEnv($launcher) {
+    $out = [ordered]@{}
+    if (-not $launcher -or $launcher.Missing) { return $out }
+    $path = Join-Path $launcher.PortDir 'gpu_v2\defaults.env'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $out }
+    foreach ($line in [IO.File]::ReadAllLines($path)) {
+        $s = $line.Trim()
+        $i = $s.IndexOf('=')
+        if ($i -lt 1 -or $s.StartsWith('#')) { continue }
+        $out[$s.Substring(0, $i)] = $s.Substring($i + 1)
+    }
+    return $out
+}
+
+# infamous_run.py merge_tuning: base's items with override's applied per key (in place; a new key
+# or a repeatable one / an item without '=' is appended unless already there).
+function Merge-Tuning([string]$base, [string]$override) {
+    $items = New-Object Collections.Generic.List[string]
+    foreach ($i in $base.Split(',')) { if ($i) { $items.Add($i) } }
+    foreach ($item in $override.Split(',')) {
+        if (-not $item) { continue }
+        $eq = $item.IndexOf('='); $name = if ($eq -ge 0) { $item.Substring(0, $eq) } else { $item }
+        $at = -1
+        for ($n = 0; $n -lt $items.Count; $n++) { if ($items[$n].Split('=')[0] -ceq $name) { $at = $n; break } }
+        if ($eq -lt 0 -or $TuningRepeatable -ccontains $name -or $at -lt 0) { if (-not $items.Contains($item)) { $items.Add($item) } }
+        else { $items[$at] = $item }
+    }
+    return ($items -join ',')
+}
+
+# Before a session, per variant (with the defaults.env of its own launcher):
+#  - '' / $null for a key defaults.env sets is refused: the launcher would apply the default
+#    anyway (an unset variable is what defaults.env fills in). '__unset__' runs without it.
+#  - ISS_TUNING: the merged string the launcher gives the game, which this script also sets for
+#    the run (an older launcher merges nothing) and logs (env.txt, variants.json effective_tuning).
+#  - a TLG_X in this shell whose ISS_X defaults.env sets would win over the default in every run
+#    (the probe copies ISS_X only to an unset TLG_X): it is unset for the runs ($script:StaleTlg).
+function Resolve-VariantDefaults($set, $launchers) {
+    $stale = [ordered]@{}
+    foreach ($v in $set.Keys) {
+        $defs = Read-DefaultsEnv $launchers[$v]
+        $envs = $set[$v].Env
+        foreach ($k in @($envs.Keys)) {
+            $val = $envs[$k]
+            if (($null -eq $val -or "$val" -eq '') -and $defs.Contains($k)) {
+                Fail ("variant '$v': $k='' would leave gpu_v2\defaults.env's $k=$($defs[$k]) in place (the launcher " +
+                    "fills in every unset key). Use '$UnsetValue' to run without $k, or a value (0, off, ...).")
+            }
+        }
+        $unsets = @($envs.Keys | Where-Object { "$($envs[$_])" -ceq $UnsetValue })
+        if ($unsets.Count) {
+            $l = $launchers[$v]
+            if ($l.Kind -eq 'py' -and -not $l.Missing) {
+                # A source launcher supports the sentinel when its infamous_run.py defines it.
+                if (-not ([IO.File]::ReadAllText($l.Exe)).Contains("UNSET = '$UnsetValue'")) {
+                    Fail ("variant '$v': $($unsets -join ', ') = '$UnsetValue' needs a launcher that removes it " +
+                        "(infamous_run.py UNSET); $($l.Exe) does not, so the game would get the literal value")
+                }
+            } else {
+                Note ("warning: variant '$v': $($unsets -join ', ') = '$UnsetValue': only a launcher built with " +
+                    "infamous_run.py UNSET removes it ($($l.Exe) cannot be checked); an older one passes the literal value")
+            }
+        }
+        if ($envs.Contains('ISS_TUNING') -and "$($envs['ISS_TUNING'])" -and "$($envs['ISS_TUNING'])" -ne $UnsetValue -and $defs.Contains('ISS_TUNING')) {
+            $set[$v].Tuning = Merge-Tuning $defs['ISS_TUNING'] "$($envs['ISS_TUNING'])"
+        }
+        foreach ($k in $defs.Keys) {
+            if ($k -notlike 'ISS_*') { continue }
+            $t = 'TLG_' + $k.Substring(4)
+            $shell = [Environment]::GetEnvironmentVariable($t, 'Process')
+            if ($shell -and -not $stale.Contains($t)) { $stale[$t] = $shell }
+        }
+    }
+    foreach ($t in $stale.Keys) {
+        Note ("note: $t=$($stale[$t]) is set in this shell and would override gpu_v2\defaults.env's ISS_$($t.Substring(4)) " +
+            "in every run (the probe keeps a TLG_ that is set): unset for the runs. To test a value, set ISS_$($t.Substring(4)) in a variant.")
+    }
+    $script:StaleTlg = @($stale.Keys)
 }
 
 function Format-Env($vars) {   # the variables set; Format-Unset lists the ones removed
@@ -1100,9 +1196,16 @@ function Get-VariantSet {
             if ($Reserved -contains $k.ToUpper() -or $Reserved -contains $twin.ToUpper() -or $k -match '^(ISS|TLG)_USER_DIR$') {
                 Fail "variant '$name': $k is set by bench.ps1 itself"
             }
+            if ($k -like 'TLG_*') {
+                # The probe copies ISS_X to TLG_X (unless TLG_X is set), and renderer v2 reads its
+                # ISS_ names only: as ISS_X the value reaches both kinds of reader.
+                if ($vars.Contains($twin) -or $envs.Contains($twin)) { Fail "variant '$name': both $k and $twin; set $twin only" }
+                Note "note: variant '$name': $k is passed as $twin (the probe copies it to $k; renderer v2 reads only the ISS_ name)"
+                $k = $twin
+            }
             $envs[$k] = $v
         }
-        $set[$name] = @{ Env = $envs; Ini = $ini; Cache = $cache; Exe = $vexe }
+        $set[$name] = @{ Env = $envs; Ini = $ini; Cache = $cache; Exe = $vexe; Tuning = $null }
     }
     if ($Control -and -not $set.Contains($Control)) { Fail "-Control '$Control' is not one of: $($set.Keys -join ', ')" }
     if ($Control) {
@@ -1277,6 +1380,7 @@ function Get-RunSignature($def, $runIni, $build, $launcher, $mods) {
         $n = "$k".ToUpper()
         if ($n -notmatch '^(ISS|TLG|SHADPS4)_') { continue }
         if ($Reserved -contains ($n -replace '^TLG_', 'ISS_') -or $n -match '^(ISS|TLG)_(USER_DIR|GPU_USER_DIR)$') { continue }
+        if ($script:StaleTlg -contains $n) { continue }   # unset for the runs (Set-RunEnv)
         $envs[$n] = "$($all[$k])"
     }
     foreach ($k in $mods.Keys) { $envs[$k.ToUpper()] = "$($mods[$k])" }
@@ -1328,7 +1432,8 @@ function F([string]$format, [object[]]$values) { [string]::Format($Invariant, $f
 # of avg_fps (both runs of the round ok; the pairing cancels slow drift, which the alternating order
 # spreads over both sides), its mean and stdev (at least -PairSdFloorPct). Decided when
 #   clear difference: the 95% CI excludes 0 and |mean| > -NoiseK x max(-NoiseCvPct, control CV)
-#                     (the noise test of round_analyze.py bench, '~', with a floor), or
+#                     (the unpaired noise test, with a floor; the CI is the paired one of
+#                     round_analyze.py bench, which also sets its '~', with a sd floor here), or
 #   no change:        the 90% CI lies within +-EquivPct (an equivalence test at 5% per side).
 # @{ Stop = all decided; Why; Lines; Verdicts }.
 function Test-AdaptiveStop($measured, $names, [int]$round) {
@@ -1442,6 +1547,7 @@ function Invoke-Run {
             $builds[$v] = Get-BuildInfo $launchers[$v]
         } else { $launchers[$v] = $launcher; $builds[$v] = $build }
     }
+    Resolve-VariantDefaults $set $launchers
     Assert-CacheMode $set $source
     $name = $Session; if (-not $name) { $name = Get-Date -Format 'yyyyMMdd-HHmmss' }
     if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$') { Fail "-Session '$name': use letters, digits, _ . -" }
@@ -1524,6 +1630,7 @@ function Invoke-Run {
         foreach ($k in $set[$v].Ini.Keys) { $desc += "ini:$k=$($set[$v].Ini[$k])" }
         if (-not $desc) { $desc = @('(no changes)') }
         Info ("    {0,-10} {1}" -f $v, ($desc -join ' '))
+        if ($set[$v].Tuning) { Info ("    {0,-10} -> ISS_TUNING={1} (merged per key with gpu_v2\defaults.env)" -f '', $set[$v].Tuning) }
     }
     $info = [ordered]@{ variants = $names; control = $names[0]; rounds = $maxR; route = $route; launcher = $launcher.Exe;
         source_user_dir = $source; ini = $Ini; started = (Get-Date).ToString('s'); env = [ordered]@{}; ini_variants = [ordered]@{}
@@ -1531,9 +1638,14 @@ function Invoke-Run {
         round_mode = $(if ($adaptive) { 'adaptive' } else { 'fixed' }); min_rounds = $minR; max_rounds = $maxR;
         warmup_skipped = @($names | Where-Object { $warmSkip.ContainsKey($_) });
         game_dir = $env:ISS_GAME_DIR; build = $build }
+    if ($script:StaleTlg.Count) { $info['unset_shell_tlg'] = @($script:StaleTlg) }
     if ($adaptive) { $info['adaptive'] = [ordered]@{ equiv_pct = $EquivPct; noise_cv_pct = $NoiseCvPct; noise_k = $NoiseK; pair_sd_floor_pct = $PairSdFloorPct } }
     foreach ($v in $names) {
         $info.env[$v] = $set[$v].Env; $info.ini_variants[$v] = $set[$v].Ini
+        if ($set[$v].Tuning) {
+            if (-not $info.Contains('effective_tuning')) { $info['effective_tuning'] = [ordered]@{} }
+            $info.effective_tuning[$v] = $set[$v].Tuning
+        }
         if ($launchers[$v] -ne $launcher) {
             if (-not $info.Contains('variant_launchers')) { $info['variant_launchers'] = [ordered]@{}; $info['variant_builds'] = [ordered]@{} }
             $info.variant_launchers[$v] = $launchers[$v].Exe; $info.variant_builds[$v] = $builds[$v]
@@ -1578,6 +1690,7 @@ function Invoke-Run {
         if ($launcher.Kind -eq 'py') { $vars['PYTHONUSERBASE'] = (Join-Path $env:APPDATA 'Python') }
         foreach ($e in $mods.Keys) { $vars[$e] = $mods[$e] }
         foreach ($e in $set[$v].Env.Keys) { $vars[$e] = $set[$v].Env[$e] }
+        if ($set[$v].Tuning) { $vars['ISS_TUNING'] = $set[$v].Tuning }   # merged with defaults.env (Resolve-VariantDefaults)
         $runIni = $runInis[$v]
         $cacheKey = if ($SharePlayerCache) { $v } else { $caches[$v].Key }
         $what = if ($step.Warmup) { "warm-up $($step.Warmup) of $v" } else { "round $($step.Round), $v" }
