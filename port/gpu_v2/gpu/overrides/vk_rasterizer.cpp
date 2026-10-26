@@ -5783,9 +5783,24 @@ void Rasterizer::AscBeforeComputeWork(u32 vqid) {
 
 bool Rasterizer::AscRelease(u32 vqid, VAddr dst, u32 bytes, std::optional<u32> value, bool irq,
                             Common::UniqueFunction<void>&& write) {
+    // Without unified memory (the Windows default) the label is written when the command
+    // processor parses the release (the caller's immediate path): a compute-queue write deferred
+    // to compute_scheduler's priority operations would run after the graphics-path writes of the
+    // same ring that the command processor makes later, at parse time. A newer value of a
+    // monotonic guest fence written at parse time could then be overwritten by an older deferred
+    // one, and the guest that waits for the newer value spins forever (ISS_ASC_NATIVE_QUEUE=1 hang).
+    if (!iss::unified::enabled) return false;
     if (!compute_scheduler || !AscQueueEnabled() || vqid >= g_asc.last.size() ||
         g_asc.last[vqid] != 1)
         return false;
+    static const bool warned = [] {
+        // With unified memory the graphics-path labels are deferred too (DeferUnifiedFence), but
+        // to the graphics scheduler: the two queues' label writes of one ring are not ordered.
+        std::fprintf(stderr, "PORT_TUNING asc_native_queue=1 with unified memory: label writes of "
+                             "the compute and graphics queues are not ordered against each other\n");
+        return true;
+    }();
+    (void)warned;
     // The compute queue's writes to the unified heap reach the host before the label.
     const vk::MemoryBarrier2 barrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
