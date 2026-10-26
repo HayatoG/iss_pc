@@ -309,6 +309,79 @@ static void rw_concurrency(void) {
     assert(atomic_load(&f.value)==1);
     fixture_destroy(&f);
 }
+/* A thread that reads re-enters while a writer is queued (winpthreads blocks the nested read behind
+ * the writer, which waits for that reader: TLG_RWLOCK_REENTRANT). The nested read is timed, so a
+ * regression fails instead of hanging. */
+static void *queued_writer(void *context) {
+    RwFixture *f=context;
+    barrier(&f->writer_ready);
+    assert(rw_write(&f->lock)==0);
+    atomic_store(&f->value,1);
+    assert(rw_unlock(&f->lock)==0); return NULL;
+}
+static void rw_reentry(void) {
+    rw_setup();
+    TimedLock read_timed=GET(TimedLock,"iPtZRWICjrM#libkernel");
+    RwFixture f={0}; fixture_init(&f);
+    pthread_t writer;
+    assert(rw_read(&f.lock)==0);
+    assert(pthread_create(&writer,NULL,queued_writer,&f)==0);
+    barrier(&f.writer_ready);
+    struct timespec nap={0,100000000}; nanosleep(&nap,NULL);   /* the writer is queued */
+    struct timespec now; clock_gettime(CLOCK_REALTIME,&now);
+    TestTime deadline={(int64_t)now.tv_sec+2,now.tv_nsec};
+    assert(read_timed(&f.lock,&deadline)==0);
+    assert(rw_read(&f.lock)==0 && rw_tryread(&f.lock)==0);
+    assert((uint32_t)rw_trywrite(&f.lock)==0x80020010);
+    assert(rw_unlock(&f.lock)==0 && rw_unlock(&f.lock)==0 && rw_unlock(&f.lock)==0);
+    assert(atomic_load(&f.value)==0);   /* still read */
+    assert(rw_unlock(&f.lock)==0);
+    assert(pthread_join(writer,NULL)==0 && atomic_load(&f.value)==1);
+    assert((uint32_t)rw_unlock(&f.lock)==0x80020001);
+    fixture_destroy(&f);
+}
+/* A condition wait on a recursive mutex held twice releases it fully (TLG_COND_RECURSIVE): the
+ * signaller can take the mutex, and the waiter gets both levels back. */
+typedef int32_t (ABI *CondInit)(void **, void **, const char *);
+typedef int32_t (ABI *CondWait)(void **, void **);
+typedef int32_t (ABI *TimedMutex)(void **, uint32_t);
+static struct { void *mutex, *cond; _Atomic int ready, signalled, timedlock; } nested;
+static void *nested_signaller(void *unused) {
+    (void)unused;
+    TimedMutex timedlock=GET(TimedMutex,"IafI2PxcPnQ#libkernel");
+    HandleOp unlock=GET(HandleOp,"tn3VlD0hG60#libkernel"), signal=GET(HandleOp,"kDh-NfxgMtE#libkernel");
+    while (!atomic_load(&nested.ready)) { struct timespec n={0,1000000}; nanosleep(&n,NULL); }
+    int32_t e=timedlock(&nested.mutex,2000000);
+    atomic_store(&nested.timedlock,e);
+    if (e) { atomic_store(&nested.signalled,1); return NULL; }   /* the waiter times out below */
+    atomic_store(&nested.signalled,1);
+    assert(signal(&nested.cond)==0 && unlock(&nested.mutex)==0);
+    return NULL;
+}
+static void nested_cond_wait(void) {
+    AttrInit attr_init=GET(AttrInit,"F8bUHwAG284#libkernel");
+    AttrType type=GET(AttrType,"iMp8QpE+XO4#libkernel");
+    HandleOp attr_destroy=GET(HandleOp,"smWEktiyyG0#libkernel");
+    MutexInit init=GET(MutexInit,"cmo1RIYva9o#libkernel");
+    HandleOp lock=GET(HandleOp,"9UK1vLZQft4#libkernel"), unlock=GET(HandleOp,"tn3VlD0hG60#libkernel");
+    HandleOp destroy=GET(HandleOp,"2Of0f+3mhhE#libkernel"), cond_destroy=GET(HandleOp,"g+PZd2hiacg#libkernel");
+    CondInit cond_init=GET(CondInit,"2Tb92quprl0#libkernel");
+    typedef int32_t (ABI *CondTimed)(void **, void **, uint32_t);
+    CondTimed timedwait=GET(CondTimed,"BmMjYxmew1w#libkernel");
+    void *attr=NULL;
+    assert(attr_init(&attr)==0 && type(&attr,2)==0 && init(&nested.mutex,&attr,"nested-cond")==0);
+    assert(attr_destroy(&attr)==0 && cond_init(&nested.cond,NULL,"nested-cond")==0);
+    pthread_t t; assert(pthread_create(&t,NULL,nested_signaller,NULL)==0);
+    assert(lock(&nested.mutex)==0 && lock(&nested.mutex)==0);
+    atomic_store(&nested.ready,1);
+    int32_t e=0;
+    while (!atomic_load(&nested.signalled) && !e) e=timedwait(&nested.cond,&nested.mutex,3000000);
+    assert(pthread_join(t,NULL)==0);
+    assert(atomic_load(&nested.timedlock)==0 && e==0);
+    assert(unlock(&nested.mutex)==0 && unlock(&nested.mutex)==0);   /* both levels came back */
+    assert((uint32_t)unlock(&nested.mutex)==0x80020001);
+    assert(destroy(&nested.mutex)==0 && cond_destroy(&nested.cond)==0);
+}
 /* scePthreadOnce: one caller runs the routine, the others wait for it (and back off instead of
  * spinning: see runtime_kernel.c thread_once). */
 static int32_t once_state;
@@ -382,8 +455,10 @@ int main(int argc,char **argv) {
     if (argc>1 && !strcmp(argv[1],"--rwlock-lifecycle")) { rw_lifecycle(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-concurrency")) { rw_concurrency(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-timeouts")) { rw_timeouts(); return 0; }
+    if (argc>1 && !strcmp(argv[1],"--rwlock-reentry")) { rw_reentry(); return 0; }
+    if (argc>1 && !strcmp(argv[1],"--cond-recursive")) { nested_cond_wait(); return 0; }
     libc_support(); posix_mutexes(); wall_time(); exit_handlers(); guards(); mutexes(); direct_memory(); memory_primitives();
-    rw_lifecycle(); rw_concurrency(); rw_timeouts(); pthread_once_calls();
+    rw_lifecycle(); rw_concurrency(); rw_timeouts(); rw_reentry(); nested_cond_wait(); pthread_once_calls();
     puts("PASS: callback lifecycle, guard ABI, mutex errors, shared direct memory, memory primitives, resolver scope");
     return 0;
 }

@@ -51,6 +51,8 @@ static void once(const char *what) {
 typedef struct EfWaiter {
     uint64_t pattern;
     uint32_t mode;
+    int done;          /* TLG_EF_HANDOFF: a set satisfied (and consumed for) this waiter */
+    uint64_t result;   /* the bits that set saw, before its clear */
 #ifdef _WIN32
     CONDITION_VARIABLE cv;   /* TLG_EF_SRW */
 #endif
@@ -85,6 +87,16 @@ static int ef_toggle(int *cache,const char *name) {
     return v;
 }
 static int ef_selective(void) { static int v=-1; return ef_toggle(&v,"TLG_EF_WAKE_WAITERS"); }
+/* TLG_EF_HANDOFF (default on, =0 disables): a set hands the bits to each waiter it satisfies, in
+ * FIFO order, and applies that waiter's clear mode at once, as the PS4 kernel does. Without it a
+ * waiter re-tests the bits only once it has retaken the lock, so a set followed at once by a clear
+ * (or another waiter's consume) loses the wakeup. Read once. */
+static int ef_handoff(void) {
+    static int v=-1;
+    int c=__atomic_load_n(&v,__ATOMIC_RELAXED);
+    if (c<0) { const char *e=getenv("TLG_EF_HANDOFF"); c=!(e && e[0]=='0'); __atomic_store_n(&v,c,__ATOMIC_RELAXED); }
+    return c;
+}
 #ifdef _WIN32
 static int ef_srw(void) { static int v=-1; return ef_toggle(&v,"TLG_EF_SRW"); }
 #else
@@ -152,12 +164,30 @@ static ABI int32_t ef_delete(EventFlag *ef) {
     if (!busy) { ef->magic=0; pthread_cond_destroy(&ef->cond); pthread_mutex_destroy(&ef->lock); free(ef); }
     return 0;
 }
+static void ef_consume(EventFlag *ef,uint64_t pattern,uint32_t mode,uint64_t *result);
+/* TLG_EF_HANDOFF: satisfies the waiters the bits now match, in arrival order (a clear mode can
+ * leave later ones unsatisfied), and wakes only those. */
+static void ef_hand_off(EventFlag *ef) {
+    int any=0;
+    for (EfWaiter *w=ef->first;w;w=w->next) {
+        if (w->done || !ef_match(ef->bits,w->pattern,w->mode)) continue;
+        w->done=1; any=1;
+        ef_consume(ef,w->pattern,w->mode,&w->result);
+#ifdef _WIN32
+        if (ef_srw()) { WakeConditionVariable(&w->cv); EF_COUNT(ef_wakeups); }
+#endif
+    }
+    if (ef_srw()) return;
+    if (any) { pthread_cond_broadcast(&ef->cond); EF_COUNT(ef_wakeups); }
+    else if (ef->first) EF_COUNT(ef_skipped);
+}
 static ABI int32_t ef_set(EventFlag *ef,uint64_t bits) {
     if (!ef_valid(ef)) return KERR_ESRCH;
     EF_COUNT(ef_sets);
     ef_lock(ef);
     ef->bits|=bits;
-    ef_wake(ef,ef_selective());
+    if (ef_handoff()) ef_hand_off(ef);
+    else ef_wake(ef,ef_selective());
     ef_unlock(ef);
     return 0;
 }
@@ -252,7 +282,7 @@ static ABI int32_t ef_wait(EventFlag *ef,uint64_t pattern,uint32_t mode,uint64_t
     *tail=&w;
     int blocked=0;
     runtime_wait_begin(timeout_us ? "event flag (timed)" : "event flag",ef,ef->name,NULL,RUNTIME_GUEST_FRAME());
-    while (!ef->deleted && ef->cancel_generation==generation && !ef_match(ef->bits,pattern,mode)) {
+    while (!w.done && !ef->deleted && ef->cancel_generation==generation && !ef_match(ef->bits,pattern,mode)) {
         if (!blocked) { blocked=1; EF_COUNT(ef_blocking); }
         int e=ef_sleep(ef,&w,timeout_us ? &deadline : NULL,mono_deadline);
         if (e==ETIMEDOUT) { r=KERR_ETIMEDOUT; break; }
@@ -260,7 +290,8 @@ static ABI int32_t ef_wait(EventFlag *ef,uint64_t pattern,uint32_t mode,uint64_t
     runtime_wait_end();
     for (EfWaiter **p=&ef->first;*p;p=&(*p)->next) if (*p==&w) { *p=w.next; break; }
     --ef->waiters;
-    if (ef->deleted) r=KERR_ESRCH;
+    if (w.done) { r=0; if (result) *result=w.result; }   /* handed off: already consumed */
+    else if (ef->deleted) r=KERR_ESRCH;
     else if (ef->cancel_generation!=generation) { r=KERR_ECANCELED; if (result) *result=ef->bits; }
     else if (!r) ef_consume(ef,pattern,mode,result);
     else if (result) *result=ef->bits;
@@ -279,7 +310,8 @@ static ABI int32_t ef_wait(EventFlag *ef,uint64_t pattern,uint32_t mode,uint64_t
 void runtime_event_flag_report(void) {
     if (runtime_counters)
         printf("Runtime: event flags sets=%zu, blocking waits=%zu, wakeups=%zu, wakeups skipped=%zu%s%s\n",
-               ef_sets,ef_blocking,ef_wakeups,ef_skipped,ef_selective() ? " (wake satisfied)" : "",ef_srw() ? " (SRW)" : "");
+               ef_sets,ef_blocking,ef_wakeups,ef_skipped,
+               ef_handoff() ? " (handoff)" : ef_selective() ? " (wake satisfied)" : "",ef_srw() ? " (SRW)" : "");
 }
 
 /* ---- Kernel queries ---- */

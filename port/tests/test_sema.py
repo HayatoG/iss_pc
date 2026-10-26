@@ -13,9 +13,9 @@ class SemaphoreTests(unittest.TestCase):
         return subprocess.run([str(EXE.resolve()),*args],capture_output=True,text=True,timeout=10,env=full)
 
     def test_sync_toggles_keep_contracts(self):
-        # TLG_SEMA_SRW, TLG_EF_SRW and TLG_EF_WAKE_WAITERS change the host primitives only.
+        # TLG_SEMA_SRW, TLG_EF_SRW, TLG_EF_WAKE_WAITERS and TLG_EF_HANDOFF change the host primitives only.
         on={'TLG_SEMA_SRW':'1','TLG_EF_SRW':'1','TLG_EF_WAKE_WAITERS':'1'}
-        for env in ({},{'TLG_EF_WAKE_WAITERS':'1'},on):
+        for env in ({},{'TLG_EF_WAKE_WAITERS':'1'},on,{'TLG_EF_HANDOFF':'0'},dict(on,TLG_EF_HANDOFF='0')):
             for case in ((),('--concurrency',),('--cancel-delete',),('--priority',),('--event-flags',)):
                 with self.subTest(env=env,case=case):
                     r=self.run_case(*case,env=env)

@@ -89,7 +89,17 @@ static ABI int32_t kernel_load_start_module(const char *path,uint64_t args,const
     return own ? __atomic_fetch_add(&next_handle,1,__ATOMIC_RELAXED) : KERR_ENOENT;
 }
 static ABI int32_t kernel_set_gpo(uint32_t bits) { (void)bits; return 0; }
-static ABI int32_t kernel_sleep(uint32_t seconds) { sleep(seconds); return 0; }
+/* sleep() returns early when a signal handler runs (the probe's SIGUSR1/SIGUSR2/SIGALRM); the
+ * guest asked for the whole time, so the remainder is slept again. */
+static ABI int32_t kernel_sleep(uint32_t seconds) {
+#ifdef _WIN32
+    sleep(seconds);
+#else
+    struct timespec t={.tv_sec=(time_t)seconds,.tv_nsec=0};
+    while (nanosleep(&t,&t) && errno==EINTR) {}
+#endif
+    return 0;
+}
 static ABI int32_t kernel_uuid_create(uint8_t *uuid) {
     if (!uuid) return KERR_EINVAL;
 #ifdef _WIN32

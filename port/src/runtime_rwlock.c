@@ -81,6 +81,20 @@ static void prune_locked(Rwlock *r, Holder *h) {
     while (*link!=h) link=&(*link)->next;
     *link=h->next; free(h);
 }
+/* A thread that already reads re-enters without the host lock: the holder count alone records the
+ * nesting and the thread keeps one host read lock until its last unlock. winpthreads' rwlock (see
+ * rwlock_rp.h) blocks a nested read behind a queued writer, which waits for that same reader, so
+ * both hang. TLG_RWLOCK_REENTRANT=0 restores one host read lock per guest read. Read once. */
+static int reentrant_reads(void) {
+    static int cache=-1;
+    int v=__atomic_load_n(&cache,__ATOMIC_RELAXED);
+    if (v<0) {
+        const char *e=getenv("TLG_RWLOCK_REENTRANT");
+        v=!(e && e[0]=='0');
+        __atomic_store_n(&cache,v,__ATOMIC_RELAXED);
+    }
+    return v;
+}
 enum Operation { READ, WRITE, TRY_READ, TRY_WRITE, TIMED_READ, TIMED_WRITE };
 static int32_t acquire(Rwlock **handle, enum Operation op, const GuestTime *time, uintptr_t frame) {
     if (!handle) return error(EINVAL);
@@ -98,6 +112,10 @@ static int32_t acquire(Rwlock **handle, enum Operation op, const GuestTime *time
         pthread_mutex_unlock(&registry_lock); return error(attempt ? EBUSY : EDEADLK);
     }
     if (h && h->readers==UINT_MAX) { pthread_mutex_unlock(&registry_lock); return error(EAGAIN); }
+    if (h && h->readers && !writer && reentrant_reads()) {   /* nested read: holds the host lock */
+        ++h->readers; ++reads;
+        pthread_mutex_unlock(&registry_lock); return 0;
+    }
     if (!h) {
         h=calloc(1,sizeof(*h));
         if (!h) { pthread_mutex_unlock(&registry_lock); return error(ENOMEM); }
@@ -148,7 +166,8 @@ static ABI int32_t rw_unlock(Rwlock **handle) {
     Holder *h=r->holders;
     while (h && !pthread_equal(h->thread,pthread_self())) h=h->next;
     if (!h || (!h->readers && !h->writer)) { pthread_mutex_unlock(&registry_lock); return error(EPERM); }
-    int e=pthread_rwlock_unlock(&r->native);
+    /* A nested read (see reentrant_reads) drops only its count; the last one unlocks the host lock. */
+    int e=!h->writer && h->readers>1 && reentrant_reads() ? 0 : pthread_rwlock_unlock(&r->native);
     if (!e) { if (h->writer) h->writer=0; else --h->readers; ++unlocks; }
     prune_locked(r,h);
     pthread_mutex_unlock(&registry_lock); return error(e);

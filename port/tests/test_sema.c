@@ -189,6 +189,25 @@ static void event_flags(void) {
     assert(!done_within(&c,20));
     assert(ef_delete(ef)==0);   /* the blocked waiter returns ESRCH */
     assert(pthread_join(tc,NULL)==0 && (uint32_t)c.r==0x80020003);
+    /* TLG_EF_HANDOFF (default): a set followed at once by a clear still satisfies the blocked
+     * waiters it matched, in FIFO order with their clear modes applied at set time. */
+    const char *handoff=getenv("TLG_EF_HANDOFF");
+    if (handoff && handoff[0]=='0') return;
+    assert(ef_create(&ef,"pulse",0x20,0,NULL)==0);
+    a=(EfTask){ef,0x2,0,0x1,2000000,99,0};                /* AND, no clear */
+    b=(EfTask){ef,0x2,0,0x2|0x20,2000000,99,0};           /* OR, CLEAR_PAT */
+    c=(EfTask){ef,0x2,0,0x2,2000000,99,0};                /* after b's clear: not satisfied */
+    assert(pthread_create(&ta,NULL,ef_waiter,&a)==0); nap_ms(30);
+    assert(pthread_create(&tb,NULL,ef_waiter,&b)==0); nap_ms(30);
+    assert(pthread_create(&tc,NULL,ef_waiter,&c)==0); nap_ms(30);
+    assert(ef_set(ef,0x3)==0 && ef_clear(ef,0)==0);
+    assert(done_within(&a,2000) && done_within(&b,2000));
+    assert(pthread_join(ta,NULL)==0 && a.r==0 && a.result==0x3);
+    assert(pthread_join(tb,NULL)==0 && b.r==0 && b.result==0x3);
+    assert(!done_within(&c,20));
+    assert(ef_set(ef,0x2)==0 && done_within(&c,2000));
+    assert(pthread_join(tc,NULL)==0 && c.r==0 && c.result==0x2);
+    assert(ef_delete(ef)==0);
 }
 int main(int argc,char **argv) {
     setup();
