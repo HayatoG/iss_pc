@@ -10,6 +10,7 @@
 #include <exception>
 #include <windows.h>
 #include <stdexcept>
+#include "assert_failure.h"
 // Ahead-of-time shader threads (vk_pipeline_cache.cpp, ISS_AOT_COMPUTE) translate shaders with no
 // game state bound: a failed assertion there drops that shader instead of ending the game.
 namespace iss {thread_local bool assert_throws=false;
@@ -32,6 +33,7 @@ static void FatalTrace(const char* what){
                          (unsigned long long)(static_cast<char*>(frames[i])-reinterpret_cast<char*>(module)));
         }
     }
+    std::fflush(stdout); // ISS_LOG_BUFFER: buffered too
     std::fflush(stderr);
 }
 static const bool terminate_hook=[]{
@@ -40,9 +42,9 @@ static const bool terminate_hook=[]{
     _set_invalid_parameter_handler([](const wchar_t*,const wchar_t*,const wchar_t*,unsigned,uintptr_t){
         FatalTrace("invalid_parameter");std::abort();});
     return true;}();}
-void assert_fail_impl(){if(iss::assert_throws)throw std::runtime_error("assertion");iss::NoteRecipe("assertion");std::fflush(stderr);std::abort();}
-[[noreturn]] void unreachable_impl(){if(iss::assert_throws)throw std::runtime_error("unreachable");iss::NoteRecipe("unreachable");std::fputs("GPU reached unreachable code\n",stderr);std::abort();}
-void assert_fail_debug_msg(const char *message){if(iss::assert_throws)throw std::runtime_error(message);std::fprintf(stderr,"GPU assertion: %s\n",message);std::abort();}
+void assert_fail_impl(){if(iss::assert_throws)throw iss::AssertFailure("assertion");iss::NoteRecipe("assertion");std::fflush(stderr);std::abort();}
+[[noreturn]] void unreachable_impl(){if(iss::assert_throws)throw iss::AssertFailure("unreachable");iss::NoteRecipe("unreachable");std::fputs("GPU reached unreachable code\n",stderr);std::abort();}
+void assert_fail_debug_msg(const char *message){if(iss::assert_throws)throw iss::AssertFailure(message);std::fprintf(stderr,"GPU assertion: %s\n",message);std::abort();}
 namespace MemoryPatcher {u64 g_eboot_address=0;}
 namespace Libraries::Kernel {struct Pthread;thread_local Pthread *g_curthread=nullptr;}
 namespace ImGui {

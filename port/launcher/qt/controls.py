@@ -11,7 +11,7 @@ from .logic import backports_table, tlg_run
 from .rowsmodel import RowsModel
 
 # ids: 'c:' launcher setting, 'm:' tlg.ini mouse key, 'i:' other tlg.ini key (rumble), 'p:' touchpad-mode setting, item ids of the table.
-MOUSE_ROWS = ('mouse_sensitivity', 'mouse_invert_y', 'mouse_smoothing', 'mouse_accel', 'mouse_deadzone')
+MOUSE_ROWS = ('mouse_sensitivity', 'mouse_sensitivity_y', 'mouse_invert_y', 'mouse_smoothing', 'mouse_accel', 'mouse_deadzone')
 PAD_KEY_LABELS = {'': 'ctl_key_default', 'Left Ctrl': 'ctl_key_lctrl', 'Mouse X1': 'ctl_key_x1',
                   'Mouse X2': 'ctl_key_x2', 'Right Ctrl|Mouse X1': 'ctl_key_rctrl_x1'}
 
@@ -87,8 +87,8 @@ class Controls(QObject):
             else:
                 value = min(max(value, slide[0]), slide[1])
                 rows.append(self._row('m:' + key, label, what, 'slider', True, changed, lo=slide[0], hi=slide[1],
-                                      step=0.05 if key == 'mouse_sensitivity' else 0.05, value=value,
-                                      valueText=f'{value:.2f}', disabled=off, decimals=2))
+                                      step=0.05, value=value,
+                                      valueText=f'{value:.2f}x' if key == 'mouse_sensitivity_y' else f'{value:.2f}', disabled=off, decimals=2))
         return rows
 
     def _touch_rows(self):

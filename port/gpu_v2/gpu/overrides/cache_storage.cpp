@@ -31,6 +31,8 @@
 #include <queue>
 #include <utility>
 
+#include "cache_blob.h"
+
 namespace {
 
 Storage::CacheWriteQueue write_queue;
@@ -162,6 +164,10 @@ void DataBase::Open() {
         if (!std::filesystem::exists(cache_path)) {
             std::filesystem::create_directories(cache_path);
         }
+        // iss: <name>.tmp files of blob writes a killed process never finished (cache_blob.h).
+        if (const auto removed = iss::cache_blob::RemoveStaleTemporaries(cache_path)) {
+            std::fprintf(stderr, "CACHE_STORAGE removed %zu unfinished blob writes\n", removed);
+        }
         if (PrefetchEnabled()) {
             Prefetch(cache_path);
         }
@@ -231,9 +237,10 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
                     LOG_ERROR(Render, "Failed to add {} to the archive", path.string().c_str());
                 }
             } else {
-                using namespace Common::FS;
-                const auto file = IOFile{path, FileAccessMode::Create};
-                file.Write(data);
+                // iss: whole or not at all (cache_blob.h); a failed write keeps the old blob.
+                if (!iss::cache_blob::WriteAtomic(path, data.data(), data.size() * sizeof(T))) {
+                    LOG_ERROR(Render, "Failed to write the cache blob {}", path.string());
+                }
             }
         }};
         return write_queue.Submit(std::move(request));
@@ -309,6 +316,25 @@ void DataBase::Load(BlobType type, const std::string& name, std::vector<u32>& da
 }
 
 void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func) {
+    ForEachNamedBlob(type, [&func](const std::string&, std::vector<u8>&& data) {
+        func(std::move(data));
+    });
+}
+
+void DataBase::Remove(BlobType type, const std::string& name) {
+    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
+        return;
+    }
+    auto request = std::packaged_task<void()>{
+        [path = cache_path / (name + "." + GetBlobFileExtension(type))] {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }};
+    write_queue.Submit(std::move(request));
+}
+
+void DataBase::ForEachNamedBlob(
+    BlobType type, const std::function<void(const std::string& name, std::vector<u8>&& data)>& func) {
     const auto& ext = GetBlobFileExtension(type);
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         const auto num_files = mz_zip_reader_get_num_files(&zip_ar);
@@ -321,14 +347,15 @@ void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u
                 mz_zip_reader_file_stat(&zip_ar, index, &stat);
                 std::vector<u8> data(stat.m_uncomp_size);
                 mz_zip_reader_extract_to_mem(&zip_ar, index, data.data(), data.size(), 0);
-                func(std::move(data));
+                func(std::filesystem::path{file_name.data()}.stem().string(), std::move(data));
             }
         }
     } else {
         for (const auto& file_name : std::filesystem::directory_iterator{cache_path}) {
             if (file_name.path().extension().string().ends_with(ext)) {
+                const auto name = file_name.path().stem().string();
                 if (std::vector<u8> data; TakePrefetched(file_name.path(), data)) {
-                    func(std::move(data));
+                    func(name, std::move(data));
                     continue;
                 }
                 using namespace Common::FS;
@@ -336,7 +363,7 @@ void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u
                 if (file.IsOpen()) {
                     std::vector<u8> data(file.GetSize());
                     file.Read(data);
-                    func(std::move(data));
+                    func(name, std::move(data));
                 }
             }
         }

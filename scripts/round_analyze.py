@@ -15,7 +15,48 @@ imprime o resumo e grava summary.json + summary.csv em --out (se dado).
 --skip SEG     descarta os primeiros SEG segundos (aquecimento), antes da janela.
 compare: tabela controle(s) vs variantes, diferenca em % sobre a media dos
 controles e o desvio entre controles (ruido); marca '~' quando a diferenca
-fica dentro do ruido.
+fica dentro do ruido. Aceita tambem o JSON do benchmark (ISS_BENCH_JSON).
+
+  python3 -I round_analyze.py bench RUN [RUN ...] [--control NOME]
+        [--noise-k 2] [--skip-ms 1000] [--csv saida.csv] [--json saida.json]
+        [--drift-pct 5] [--exclude-drift] [--cpu-split]
+
+bench (automated benchmark, scripts/bench.ps1): one row per variant, mean +-
+sample stdev of avg_fps, low1_fps, p99_ms, worst_ms, over33, over50, compiles,
+cpu_ms/f (the process's CPU time, all threads, per frame of the window, from
+GetProcessTimes: sampled by the 15.6 ms clock tick, so it swings by 3x between
+identical runs), cpu_game_ms/f (guest + command processor + GPU helper threads,
+from their cycle times: the background shader compiles and the rest left out;
+lower is better; the last columns: a game-side cost the FPS of a GPU-bound run
+hides) and the % diff vs the control variant (the first one, or --control).
+compare.json also compares each category (cpu_guest/cp/gpu_helpers/compile/
+other/cycles_ms_per_frame) and compare_runs.csv lists them per run;
+--cpu-split adds guest/cp/gpu_helpers ms/f columns at the end of the table
+(the parts of cpu_game; not in compare.csv). A RUN is
+a bench JSON (ISS_BENCH_JSON), a session folder of bench.ps1 (its NN-<variant>
+run folders, not warmup-*: each one's bench.json, else frames.csv, else
+game.log; the control defaults to variants.json's), a summary.json of 'summarize', a game log (its
+last 'Bench:' line, else its Frame stats/pacing lines) or a SHADPS4_FRAME_CSV
+file (only its benchmark window when it has the 'bench' column). Runs are
+grouped by their label (ISS_BENCH_LABEL), else by the name of their folder
+without a leading 'NN-'. '~' = the diff is within --noise-k x the control's
+stdev (likely noise); a stdev of 0 (or a single control run) gives no mark.
+Scene drift: each run's draws/frame (the Frame stats lines of its game log
+inside the benchmark window, else a frames.csv 'draws' column) is compared with
+the median of all runs; more than --drift-pct (5) off = the replay rendered
+another scene: a WARNING, and that variant's diffs (all when it is the control)
+get '!' (unreliable). --exclude-drift leaves those runs out of the table.
+Half the runs or more off = inconclusive (no flags); a variant off the control in
+every run but tight within itself changes the draw count itself (a note, no '!').
+The per-run check goes to <csv>_runs.csv and the JSON's 'drift'.
+Paired diff: after the table, each variant's per-round avg_fps diff vs the
+control (rounds from run.json, else the k-th run of each pairs with the k-th
+control run): mean, sd and 95% CI (Student t); compare.json 'paired_avg_fps'.
+Failed runs: a bench.ps1 run (a folder with run.json) whose status is not ok, or
+that has no bench summary or window (read from its whole log or CSV: loading
+screens, not the route), is left out of the table and the drift check: a
+WARNING with the reason, the JSON's 'failed_runs', the CSV's 'failed_runs' count
+and the 'failed' column of <csv>_runs.csv.
 """
 import argparse, csv, glob, json, math, os, re, statistics as st, sys
 
@@ -219,13 +260,703 @@ CMP = [("fps_mean", "FPS medio", True), ("fps_min", "FPS minimo", True),
        ("cpu_core_max", "nucleo max %", None), ("clk_sm_mean", "clk SM med MHz", True),
        ("power_mean", "potencia med W", None), ("temp_max", "temp max C", False),
        ("vram_used_max_mib", "VRAM max MiB", False), ("rss_max_mib", "RSS max MiB", False),
-       ("ram_used_max_mib", "RAM usada max MiB", False)]
+       ("ram_used_max_mib", "RAM usada max MiB", False),
+       # bench JSON (ISS_BENCH_JSON): absent in summary.json, so these rows only show for bench runs
+       ("avg_fps", "avg FPS (bench)", True), ("low1_fps", "1% low FPS (bench)", True),
+       ("p99_ms", "p99 ms (bench)", False), ("worst_ms", "worst ms (bench)", False),
+       ("over33", "frames >33 ms (bench)", False), ("over50", "frames >50 ms (bench)", False),
+       ("compiles", "compiles (bench)", False)]
 
 
 def load_run(p):
     with open(p) as f: d = json.load(f)
-    d.setdefault("name", os.path.basename(os.path.dirname(os.path.abspath(p))))
+    folder = os.path.basename(os.path.dirname(os.path.abspath(p)))
+    label = d.get("label") if is_bench(d) else None
+    if label not in (None, "", "-") and "name" not in d:
+        # bench JSON: every run of a variant has the same label, so the column also names its
+        # folder (bench.ps1's 01-A, 03-A...), unless the folder name already contains the label
+        d["name"] = folder if label in folder else f"{label} ({folder})"
+    d.setdefault("name", folder)
     return d
+
+
+# ------------------------------------------------------------------ bench (scripts/bench.ps1)
+# The game's summary when a TLG_PAD_REPLAY route ends: the 'Bench:' log line and ISS_BENCH_JSON.
+BENCH_KEYS = ("frames", "seconds", "avg_fps", "low1_fps", "p99_ms", "worst_ms",
+              "over33", "over50", "compiles", "cpu_ms_per_frame", "cpu_s", "cpu_util")
+BENCH_INT = {"frames", "over33", "over50", "compiles"}
+# metric, higher is better
+BENCH_CMP = [("avg_fps", True), ("low1_fps", True), ("p99_ms", False), ("worst_ms", False),
+             ("over33", False), ("over50", False), ("compiles", False)]
+# compared like BENCH_CMP, but shown after the drift columns (and at the end of compare.csv) so the
+# earlier columns keep their positions: metric -> (column, higher is better, decimals)
+BENCH_EXTRA = {"cpu_ms_per_frame": ("cpu_ms/f", False, 2), "cpu_game_ms_per_frame": ("cpu_game_ms/f", False, 2)}
+# The game's CPU time per thread category (gpu_v2/gpu/bench_cpu.cpp: cycle time, Windows), ms per
+# frame; cpu_game = guest + cp + gpu_helpers (the work every frame costs: the background compiles
+# and the rest left out). Compared like BENCH_EXTRA in compare.json and per run in compare_runs.csv.
+BENCH_CPU_SPLIT = ("cpu_guest_ms_per_frame", "cpu_cp_ms_per_frame", "cpu_gpu_helpers_ms_per_frame",
+                   "cpu_compile_ms_per_frame", "cpu_other_ms_per_frame", "cpu_cycles_ms_per_frame")
+BENCH_CPU_GAME = ("cpu_guest_ms_per_frame", "cpu_cp_ms_per_frame", "cpu_gpu_helpers_ms_per_frame")
+RE_BENCH = re.compile(r"Bench: (.*?)(?:\s+label=(.*?))?\s*$")
+
+
+def add_cpu_game(d):
+    """cpu_game_ms_per_frame = guest + cp + gpu_helpers, when the run has the split."""
+    parts = [d.get(k) for k in BENCH_CPU_GAME]
+    if d.get("cpu_game_ms_per_frame") is None and all(isinstance(v, (int, float)) for v in parts):
+        d["cpu_game_ms_per_frame"] = round(sum(parts), 3)
+    return d
+
+
+def is_bench(d):
+    return isinstance(d, dict) and "avg_fps" in d and "fps_mean" not in d
+
+
+def _num(key, text):
+    try: return int(text) if key in BENCH_INT else float(text)
+    except ValueError:
+        try: return float(text)
+        except ValueError: return None
+
+
+def parse_bench_line(text):
+    """The last 'Bench: frames=... label=...' line of a log (None when there is none)."""
+    found = None
+    for line in text.splitlines():
+        if "Bench: " not in line: continue
+        m = RE_BENCH.search(line)
+        if not m: continue
+        d = {}
+        for tok in m[1].split():
+            k, sep, v = tok.partition("=")
+            if sep: d[k] = _num(k, v)
+        if "avg_fps" not in d: continue
+        d["label"] = "" if m[2] in (None, "-") else m[2]   # '-': ISS_BENCH_LABEL unset
+        found = d
+    return found
+
+
+def bench_from_summary(d):
+    """summary.json (summarize) in bench keys: what the 5 s Frame stats/pacing lines can tell."""
+    return dict(frames=None, seconds=None, avg_fps=d.get("fps_mean"), low1_fps=d.get("fps_1pct_low"),
+                p99_ms=d.get("pacing_p99_mean_ms"), worst_ms=d.get("worst_frame_ms"),
+                over33=None, over50=None, compiles=d.get("shader_compiles"),
+                label=d.get("name") or "", source="summary", log=d.get("log"))
+
+
+def bench_from_frames(times_ms, skip_ms=1000.0):
+    """Bench keys from per-frame present intervals (ms), skipping the first skip_ms of them, with
+    the game's own definitions (gpu_v2/gpu/gpu_host.cpp): p99 = sorted[min(n-1, n*99//100)],
+    low1_fps = 1000 / p99, over33 = frames over 33.4 ms."""
+    t, skipped = [], 0.0
+    for x in times_ms:
+        if x is None or x <= 0: continue
+        if skipped < skip_ms: skipped += x; continue
+        t.append(x)
+    if not t:
+        return dict(frames=0, seconds=0.0, avg_fps=None, low1_fps=None, p99_ms=None,
+                    worst_ms=None, over33=0, over50=0, compiles=None)
+    srt = sorted(t)
+    secs = sum(t) / 1000.0
+    p99 = srt[min(len(srt) - 1, len(srt) * 99 // 100)]
+    return dict(frames=len(t), seconds=r(secs), avg_fps=r(len(t) / secs, 1),
+                low1_fps=r(1000.0 / p99, 1), p99_ms=r(p99, 1), worst_ms=r(srt[-1], 1),
+                over33=sum(1 for x in t if x > 33.4), over50=sum(1 for x in t if x > 50.0), compiles=None)
+
+
+def bench_window_rows(rows):
+    """The rows of the benchmark window of a SHADPS4_FRAME_CSV ('bench' column: 0 outside, 1 inside,
+    'bench_start' on the first row of the window, 'bench_end' on the first row after it): from
+    bench_start (or the first 1) up to before bench_end (or the next 0, or the end of the file: with
+    ISS_BENCH_EXIT the game may exit before the bench_end row). None when the column is absent;
+    [] when the window never opened (or opened and closed between two rows: bench_end alone)."""
+    if not rows or "bench" not in rows[0]: return None
+    out, inside = [], False
+    for x in rows:
+        mark = (x.get("bench") or "").strip()
+        if not inside:
+            if mark in ("bench_start", "1"): inside = True
+            elif mark == "bench_end": break
+            else: continue
+        elif mark in ("bench_end", "0", "bench_start"):
+            break
+        out.append(x)
+    return out
+
+
+def bench_from_csv(path, skip_ms=1000.0):
+    """SHADPS4_FRAME_CSV (renderer v2): present_ms per frame; shader_compiles summed when present.
+    Only the benchmark window when the CSV has the 'bench' column (the game's window starts at the
+    mark, before ISS_BENCH_SKIP_MS, so skip_ms still applies), else the whole file."""
+    rows = read_csv(path)
+    window = bench_window_rows(rows)
+    has_column = window is not None
+    if has_column: rows = window
+    d = bench_from_frames([fnum(x, "present_ms") for x in rows], skip_ms)
+    d["csv_window"] = "bench" if has_column else "whole_file"
+    if rows and "shader_compiles" in rows[0]:
+        acc, skipped = 0, 0.0
+        for x in rows:
+            ms = fnum(x, "present_ms") or 0.0
+            if ms <= 0: continue
+            if skipped < skip_ms: skipped += ms; continue
+            acc += int(fnum(x, "shader_compiles") or 0)
+        d["compiles"] = acc
+    d["label"] = ""
+    d["source"] = "frame_csv"
+    return d
+
+
+# ------------------------------------------------------------------ scene drift (bench)
+# The replay is time-based pad input: past ~20 s it can drift (the camera or the player ends up
+# elsewhere) and that run renders another scene. Its fingerprint: the draws/frame of the 5 s
+# Frame stats lines inside the benchmark window. A run whose mean draws/frame is more than
+# --drift-pct off the median of all the session's runs (every variant) is a drift run.
+RE_DRAWS = re.compile(r"GPU thread [0-9.]+ us/draw, (\d+) draws/frame")
+DRIFT_PCT = 5.0       # A/A aa-f20d33f: good runs within 2.8% of the median, drift runs 14-22% off
+DRIFT_MIN_RUNS = 3    # a median of 2 runs cannot tell which one drifted
+
+
+def draws_from_log(path):
+    """Draws/frame of each Frame stats line of the benchmark window ('Bench: window started', else
+    'Runtime: gameplay detected', up to 'Runtime: pad replay finished'); None for a line another
+    thread's output broke (it keeps its place in the series). None when the window never opened
+    or never ended."""
+    series, inside = [], False
+    with open(path, errors="replace") as f:
+        for line in f:
+            if "Bench: window started" in line: series, inside = [], True; continue
+            if "Runtime: gameplay detected" in line and not inside: series, inside = [], True; continue
+            if not inside: continue
+            if "Runtime: pad replay finished" in line or "Bench: frames=" in line: return series
+            if "Frame stats:" in line:
+                m = RE_DRAWS.search(line)
+                series.append(int(m[1]) if m else None)
+    # the window never ended (crash, timeout): an incomplete series says nothing about the route
+    return None
+
+
+def draws_from_csv(path, bucket_ms=5000.0):
+    """The same series from a SHADPS4_FRAME_CSV ('draws' per frame) in 5 s buckets of present_ms,
+    only for a CSV with the 'bench' column (the whole file would include the menus)."""
+    rows = read_csv(path)
+    window = bench_window_rows(rows)
+    if not window or "draws" not in window[0]: return None
+    series, acc, n, t = [], 0.0, 0, 0.0
+    for x in window:
+        ms, dr = fnum(x, "present_ms"), fnum(x, "draws")
+        if ms is None or ms <= 0 or dr is None: continue
+        acc += dr; n += 1; t += ms
+        if t >= bucket_ms: series.append(r(acc / n, 0)); acc, n, t = 0.0, 0, 0.0
+    if n and t >= bucket_ms / 2: series.append(r(acc / n, 0))   # a last bucket of half or more
+    return series
+
+
+def draws_fingerprint(d):
+    """Sets 'draws' (series, None when unknown) and 'draws_mean'/'draws_source' on a run: from its
+    game log (the run itself, or game.log next to a bench JSON / CSV), else from a CSV."""
+    path = d["path"]
+    folder = os.path.dirname(os.path.abspath(path))
+    ext = os.path.splitext(path)[1].lower()
+    logs = [d["log"]] if d.get("log") else []
+    logs += [path] if ext not in (".json", ".csv") else [os.path.join(folder, "game.log")]
+    series, src = None, None
+    for lg in logs:
+        if lg and os.path.isfile(lg):
+            series = draws_from_log(lg)
+            if series is not None and any(x is not None for x in series): src = lg; break
+    if src is None:
+        csvs = [path] if ext == ".csv" else [os.path.join(folder, "frames.csv")]
+        for c in csvs:
+            if os.path.isfile(c):
+                s = draws_from_csv(c)
+                if s: series, src = s, c; break
+    known = [x for x in (series or []) if x is not None]
+    d["draws"] = series if known else None
+    d["draws_mean"] = mean(known) if known else None
+    d["draws_source"] = src if known else None
+    return d
+
+
+def variant_draws(runs, control, drift_pct):
+    """{variant: diff % vs the control} for the variants that render another draw count by
+    themselves (culling, LOD...): 2+ runs, all more than drift_pct off the control's median on the
+    same side, and tight among themselves (max - min under drift_pct of their mean). Only when
+    the control's own runs are that tight too: a control with a drift run is no reference."""
+    tight = lambda v: 100.0 * (max(v) - min(v)) / mean(v) < drift_pct if mean(v) else False
+    ctl = [x["draws_mean"] for x in runs if x["name"] == control and x.get("draws_mean") is not None]
+    if not ctl or not tight(ctl): return {}
+    ref, out = st.median(ctl), {}
+    for g in dict.fromkeys(x["name"] for x in runs):
+        v = [x["draws_mean"] for x in runs if x["name"] == g and x.get("draws_mean") is not None]
+        if g == control or len(v) < 2 or not ref: continue
+        devs = [pct(m, ref) for m in v]
+        same_side = all(dv > drift_pct for dv in devs) or all(dv < -drift_pct for dv in devs)
+        if same_side and tight(v): out[g] = pct(mean(v), ref)
+    return out
+
+
+def check_drift(runs, drift_pct=DRIFT_PCT, control=None):
+    """Marks each run: 'drift' True/False (None: unknown, unchecked or inconclusive),
+    'drift_state' (ok, drift, unknown: no draws, unchecked: fewer than DRIFT_MIN_RUNS runs with
+    draws, inconclusive: half the runs or more off the median, which then means nothing, variant:
+    see variant_draws), 'draws_dev_pct' (its mean vs the median of the checked runs) and
+    'draws_off_pct' (share of its intervals more than 2 x drift_pct off the median of that
+    interval, over the runs that have it). The share only goes to the JSON/CSV: the 5 s lines
+    drift out of phase between runs, so in aa-f20d33f good runs had 17-41% of them off and drift
+    runs 44-47%, no usable line. Returns dict(median, state, variants: variant_draws)."""
+    prop = variant_draws(runs, control, drift_pct) if control else {}
+    checked = [x for x in runs if x.get("draws_mean") is not None and x["name"] not in prop]
+    med = st.median([x["draws_mean"] for x in checked]) if len(checked) >= DRIFT_MIN_RUNS else None
+    for x in runs:
+        x["drift"] = x["draws_dev_pct"] = x["draws_off_pct"] = None
+        if x.get("draws_mean") is None: x["drift_state"] = "unknown"; continue
+        if x["name"] in prop:
+            x["drift"], x["drift_state"] = False, "variant"   # tight within its variant: no drift run
+            continue
+        if med is None: x["drift_state"] = "unchecked"; continue
+        x["draws_dev_pct"] = pct(x["draws_mean"], med)
+        x["drift"] = abs(x["draws_dev_pct"]) > drift_pct
+        x["drift_state"] = "drift" if x["drift"] else "ok"
+        off = n = 0
+        for i, v in enumerate(x["draws"]):
+            # index-aligned: a series one line shorter or longer simply has no partner there
+            col = [y["draws"][i] for y in runs if y.get("draws") and i < len(y["draws"])
+                   and y["draws"][i] is not None]
+            if v is None or len(col) < DRIFT_MIN_RUNS: continue
+            m = st.median(col)
+            if not m: continue
+            n += 1
+            if abs(pct(v, m)) > 2 * drift_pct: off += 1
+        x["draws_off_pct"] = 100.0 * off / n if n else None
+    state = "unchecked" if med is None else "ok"
+    flagged = [x for x in checked if x["drift"]]
+    if med is not None and 2 * len(flagged) >= len(checked):
+        # the median of two scenes (4000 4000 3000 3000 -> 3500) flags every run: no verdict
+        state = "inconclusive"
+        for x in checked: x["drift"], x["drift_state"] = None, "inconclusive"
+    return dict(median=med, state=state, variants=prop)
+
+
+def load_bench(path, skip_ms=1000.0):
+    """One benchmark run in bench keys, plus 'name' (its group), 'path' and 'source'."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path, encoding="utf-8") as f: d = json.load(f)
+        if not isinstance(d, dict): raise ValueError(f"{path}: not a JSON object")
+        if is_bench(d):
+            d.setdefault("source", "bench_json")
+        elif "fps_mean" in d or "log" in d:
+            d = bench_from_summary(d)
+        else:
+            raise ValueError(f"{path}: neither a bench JSON nor a summary.json")
+    elif ext == ".csv":
+        d = bench_from_csv(path, skip_ms)
+    else:
+        with open(path, errors="replace") as f: text = f.read()
+        d = parse_bench_line(text)
+        if d is None:
+            d = bench_from_summary(parse_log(path, 0, 0, 5.0, 0))
+            d.update(label="", source="log_stats")
+        else:
+            d["source"] = "log_bench"
+    if d.get("label") == "-": d["label"] = ""   # the game's placeholder for no ISS_BENCH_LABEL
+    add_cpu_game(d)
+    folder = os.path.basename(os.path.dirname(os.path.abspath(path)))
+    d["name"] = d.get("label") or re.sub(r"^\d+-", "", folder) or folder
+    d["path"] = path
+    return d
+
+
+def run_failure(d):
+    """Why a bench.ps1 run (a folder with run.json) failed, else None: its run.json status is not
+    'ok' (crash, timeout...), or it has no bench summary or window (no bench.json, no 'Bench:'
+    line, a CSV without its 'bench' column), so only the whole log or CSV could be read: loading
+    screens and menus, not the route. A file outside such a folder (a log of an older build,
+    passed by hand) keeps that fallback."""
+    meta = os.path.join(os.path.dirname(os.path.abspath(d["path"])), "run.json")
+    if not os.path.isfile(meta): return None
+    try:
+        with open(meta, encoding="utf-8-sig") as f: m = json.load(f)
+    except (OSError, ValueError) as e: return f"unreadable run.json ({e})"
+    why = []
+    status = m.get("status") if isinstance(m, dict) else None
+    if status is not None and status != "ok": why.append(f"status '{status}'")
+    if d.get("source") == "log_stats" or (d.get("source") == "frame_csv" and d.get("csv_window") != "bench"):
+        why.append(f"no bench summary or window (read as {d['source']})")
+    return "; ".join(why) or None
+
+
+def stats_of(values):
+    v = [x for x in values if x is not None]
+    if not v: return None, None, 0
+    return mean(v), (st.stdev(v) if len(v) > 1 else None), len(v)
+
+
+def bench_table(runs, control=None, noise_k=2.0, all_runs=None):
+    """{'groups': [names, control first], 'control', 'runs': {name: n}, 'rows': [per metric]}.
+    all_runs: every run of the session (--exclude-drift passes the kept ones as runs): the
+    draws block counts its drift / unknown runs over them, as the table's drift column does."""
+    groups = []
+    for x in runs:
+        if x["name"] not in groups: groups.append(x["name"])
+    if control is None: control = groups[0] if groups else None
+    if control not in groups: raise ValueError(f"control '{control}' is not one of {groups}")
+    groups.remove(control); groups.insert(0, control)
+    out = dict(groups=groups, control=control, noise_k=noise_k,
+               runs={g: sum(1 for x in runs if x["name"] == g) for g in groups}, rows=[])
+    # a drift run (check_drift) measured another scene: its variant's diffs (all of them when it is
+    # a control run) say nothing about the change, whatever the noise test says
+    drifted = {x["name"] for x in runs if x.get("drift")}
+    unreliable = set(groups[1:]) if control in drifted else drifted - {control}
+    out["unreliable"] = [g for g in groups if g in unreliable]
+    draws = {}
+    for g in groups:
+        m, sd, n = stats_of([x.get("draws_mean") for x in runs if x["name"] == g])
+        draws[g] = dict(mean=m, sd=sd, n=n,
+                        diff_pct=pct(m, draws.get(control, {}).get("mean")) if g != control and m is not None else None,
+                        drift=sum(1 for x in (all_runs or runs) if x["name"] == g and x.get("drift")),
+                        unknown=sum(1 for x in (all_runs or runs) if x["name"] == g and x.get("draws_mean") is None),
+                        total=sum(1 for x in (all_runs or runs) if x["name"] == g))
+    out["draws"] = draws
+    for key, better in (BENCH_CMP + [(k, v[1]) for k, v in BENCH_EXTRA.items()]
+                        + [(k, False) for k in BENCH_CPU_SPLIT]):
+        cells = {}
+        for g in groups:
+            m, sd, n = stats_of([x.get(key) for x in runs if x["name"] == g])
+            cells[g] = dict(mean=m, sd=sd, n=n)
+        if all(c["n"] == 0 for c in cells.values()): continue
+        c = cells[control]
+        noise = (100.0 * c["sd"] / abs(c["mean"])) if (c["sd"] is not None and c["mean"]) else None
+        paired = paired_diffs(runs, groups, control, key)
+        for g in groups[1:]:
+            v = cells[g]
+            d = pct(v["mean"], c["mean"]) if (v["mean"] is not None and c["mean"] is not None) else None
+            v["diff_pct"] = d
+            if d is None and v["mean"] is not None and c["mean"] == 0:
+                v["diff_abs"] = v["mean"]   # control 0 (over33 often is): the absolute difference
+            # '~' (noise): with 2+ paired rounds (paired sd above 0), the paired 95% CI of the
+            # per-round diff includes 0 (the statistic of the "paired avg_fps diff" lines, so the
+            # two agree); else the unpaired test: |diff| within noise_k x the control's CV (a stdev of 0 is no noise
+            # estimate: a 0% diff is not "within the noise")
+            e = paired.get(g)
+            if d is not None and e and e["ci95"] is not None and e["sd"] and not e["dropped"]:
+                v["noise"] = e["ci95"][0] <= 0 <= e["ci95"][1]
+                v["noise_test"] = "paired"
+            else:
+                v["noise"] = bool(d is not None and noise and abs(d) <= noise_k * noise)
+                v["noise_test"] = "unpaired"
+            v["unreliable"] = g in unreliable
+            v["better"] = None if (d is None or d == 0 or v["noise"] or v["unreliable"]) else ((d > 0) == better)
+        # split: only in compare.json (the table and compare.csv show cpu_game)
+        out["rows"].append(dict(metric=key, higher_is_better=better, noise_pct=noise, groups=cells,
+                                extra=key in BENCH_EXTRA, split=key in BENCH_CPU_SPLIT))
+    return out
+
+
+# Paired avg_fps diff: bench.ps1 runs every variant once per round (A B, B A, ...), so each round
+# pairs a test run with the control run next to it, which cancels the drift between rounds
+# (temperature, background load) that the unpaired mean +-stdev keeps. Two-sided Student t, 97.5%.
+T975 = (12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160,
+        2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056,
+        2.052, 2.048, 2.045, 2.042)
+
+
+def run_round(d):
+    """The round of a bench.ps1 run (its run.json 'round'), else None (a file passed by hand)."""
+    meta = os.path.join(os.path.dirname(os.path.abspath(d["path"])), "run.json")
+    try:
+        with open(meta, encoding="utf-8-sig") as f: m = json.load(f)
+    except (OSError, ValueError): return None
+    v = m.get("round") if isinstance(m, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) and not m.get("warmup") else None
+
+
+def paired_fps(runs, groups, control):
+    """{variant: dict(n, mean, sd, ci95)} of the per-round diff 100 (test - control) / control of
+    avg_fps. Rounds from run.json when every run has one, else the k-th run of each variant (in run
+    order) pairs with the k-th control run. Fewer than 2 pairs: n only."""
+    return paired_diffs(runs, groups, control, "avg_fps")
+
+
+def paired_diffs(runs, groups, control, key):
+    """paired_fps of any metric (key); bench_table's '~' uses it, so it agrees with the CI lines."""
+    fps = [x for x in runs if x.get(key) is not None]
+    rounds = [run_round(x) for x in fps]
+    by_round = bool(fps) and all(rd is not None for rd in rounds)
+    def series(g):
+        out = {}
+        for x, rd in zip(fps, rounds):
+            if x["name"] != g: continue
+            k = rd if by_round else len(out)
+            out.setdefault(k, x[key])   # a round counted twice: its first run
+        return out
+    ctl = series(control)
+    res = {}
+    for g in groups:
+        if g == control: continue
+        v = series(g)
+        d = [100.0 * (v[k] - ctl[k]) / ctl[k] for k in sorted(v) if k in ctl and ctl[k]]
+        # rounds whose control value is 0 have no % diff and are dropped; bench_table then uses
+        # the unpaired test, so its '~' goes with the % of all the runs
+        dropped = sum(1 for k in v if k in ctl and not ctl[k])
+        e = dict(n=len(d), mean=None, sd=None, ci95=None, by_round=by_round, dropped=dropped)
+        if d: e["mean"] = mean(d)
+        if len(d) > 1:
+            e["sd"] = st.stdev(d)
+            h = (T975[len(d) - 2] if len(d) - 2 < len(T975) else 1.96) * e["sd"] / math.sqrt(len(d))
+            e["ci95"] = [e["mean"] - h, e["mean"] + h]
+        res[g] = e
+    return res
+
+
+def fmt_paired(g, control, e):
+    if not e["n"]: return f"{g} vs {control}: no paired rounds"
+    if e["ci95"] is None: return f"{g} vs {control}: {e['mean']:+.2f}% over 1 round (no CI)"
+    lo, hi = e["ci95"]
+    verdict = "excludes 0" if (lo > 0 or hi < 0) else "includes 0"
+    return (f"{g} vs {control}: {e['mean']:+.2f}% over {e['n']} rounds (paired sd {e['sd']:.2f}%), "
+            f"95% CI [{lo:+.2f}, {hi:+.2f}] ({verdict})")
+
+
+def fmt_cell(c, key):
+    if c["mean"] is None: return "-"
+    # counts: whole numbers stay whole; a mean between two counts keeps one decimal
+    nd = (BENCH_EXTRA[key][2] if key in BENCH_EXTRA else 2 if key in BENCH_CPU_SPLIT else
+          0 if key in BENCH_INT and float(c["mean"]).is_integer() else 1)
+    s = f"{c['mean']:.{nd}f}"
+    if c["sd"] is not None: s += f" +-{c['sd']:.{max(nd, 1)}f}"
+    if c.get("diff_pct") is not None:
+        s += f" ({c['diff_pct']:+.1f}%{' ~' if c['noise'] else ''}{' !' if c.get('unreliable') else ''})"
+    elif "diff_abs" in c:
+        s += f" ({c['diff_abs']:+g}{' !' if c.get('unreliable') else ''})"
+    return s
+
+
+def print_table(hdr, rows):
+    widths = [max(len(str(x)) for x in [h] + [rw[i] for rw in rows]) for i, h in enumerate(hdr)]
+    fmt = lambda rw: "  ".join(str(x).ljust(widths[i]) for i, x in enumerate(rw)).rstrip()
+    print(fmt(hdr)); print(fmt(["-" * w for w in widths]))
+    for rw in rows: print(fmt(rw))
+
+
+def run_tag(x):
+    """The run's folder (bench.ps1's 01-A...), the name the warnings use."""
+    return os.path.basename(os.path.dirname(os.path.abspath(x["path"]))) or x["path"]
+
+
+def fmt_draws(c):
+    if c["mean"] is None: return "?"
+    s = f"{c['mean']:.0f}"
+    if c["sd"] is not None: s += f" +-{c['sd']:.0f}"
+    if c.get("diff_pct") is not None: s += f" ({c['diff_pct']:+.1f}%)"
+    return s
+
+
+def drift_column(g, check, runs):
+    """The table's drift cell of variant g: drift runs / runs (over every run, excluded ones
+    too), '?N' for N runs without draws, or why there is no count."""
+    if g in check["variants"]: return "variant"
+    if check["state"] in ("unchecked", "inconclusive"): return check["state"]
+    mine = [x for x in runs if x["name"] == g]
+    unknown = sum(1 for x in mine if x["draws_mean"] is None)
+    return f"{sum(1 for x in mine if x['drift'])}/{len(mine)}" + (f" ?{unknown}" if unknown else "")
+
+
+# A session folder of bench.ps1: its measured runs, as bench.ps1 compare picks them ('NN-<variant>'
+# folders, not warmup-*; bench.json, else frames.csv, else game.log), plus its control.
+SESSION_RUN = re.compile(r"^\d+-")
+SESSION_FILES = ("bench.json", "frames.csv", "game.log")
+
+
+def expand_runs(paths):
+    """(run files, the control of the first session folder or None): a folder in paths expands
+    to its runs in name order; a file stays as it is."""
+    out, control = [], None
+    for p in paths:
+        if not os.path.isdir(p):
+            out.append(p); continue
+        found = 0
+        for name in sorted(os.listdir(p)):
+            d = os.path.join(p, name)
+            if not SESSION_RUN.match(name) or not os.path.isdir(d): continue
+            f = next((os.path.join(d, x) for x in SESSION_FILES if os.path.isfile(os.path.join(d, x))), None)
+            if f: out.append(f); found += 1
+            else: print(f"note: {d}: no bench.json, frames.csv or game.log, skipped", file=sys.stderr)
+        if not found: raise ValueError(f"{p}: a folder without run folders (NN-<variant> with a bench.json...)")
+        if control is None:
+            try:
+                with open(os.path.join(p, "variants.json"), encoding="utf-8-sig") as f: v = json.load(f)
+                control = v.get("control") if isinstance(v, dict) else None
+            except (OSError, ValueError): pass
+    return out, control
+
+
+def cmd_bench(a):
+    try: paths, session_control = expand_runs(a.runs)
+    except (OSError, ValueError) as e: print(f"error: {e}", file=sys.stderr); sys.exit(2)
+    loaded = []
+    for p in paths:
+        try: loaded.append(draws_fingerprint(load_bench(p, a.skip_ms)))
+        except (OSError, ValueError) as e: print(f"error: {e}", file=sys.stderr); sys.exit(2)
+    # a failed run (run_failure) measured no route: out of the drift check and the table
+    for x in loaded: x["failed"] = run_failure(x)
+    failed = [x for x in loaded if x["failed"]]
+    runs = [x for x in loaded if not x["failed"]]
+    for x in failed:
+        x["drift"] = x["draws_dev_pct"] = x["draws_off_pct"] = None
+        x["drift_state"] = "failed"
+    drift_pct = getattr(a, "drift_pct", DRIFT_PCT)
+    exclude = getattr(a, "exclude_drift", False)
+    control = a.control
+    if not control and session_control and any(x["name"] == session_control for x in loaded):
+        control = session_control   # a session folder: its variants.json's control
+    control = control or (loaded[0]["name"] if loaded else None)
+    if any(x["name"] == control for x in failed) and not any(x["name"] == control for x in runs):
+        print(f"error: every run of the control '{control}' failed: nothing to compare with", file=sys.stderr)
+        for x in failed: print(f"  {run_tag(x)}: {x['failed']}", file=sys.stderr)
+        sys.exit(2)
+    # drift is judged against every run of the session, before any is left out
+    check = check_drift(runs, drift_pct, control)
+    med = check["median"]
+    drifted = [x for x in runs if x["drift"]]
+    used = [x for x in runs if not x["drift"]] if exclude else runs
+    # an unknown --control falls through to bench_table's "not one of" error
+    if exclude and any(x["name"] == control for x in runs) and not any(x["name"] == control for x in used):
+        print(f"error: every run of the control '{control}' drifted: nothing to compare with", file=sys.stderr)
+        sys.exit(2)
+    try: t = bench_table(used, control, a.noise_k, all_runs=runs)
+    except ValueError as e: print(f"error: {e}", file=sys.stderr); sys.exit(2)
+    gone = [g for g in dict.fromkeys(x["name"] for x in loaded) if g not in t["groups"]]
+    why = lambda g: ", ".join(w for w, ok in (("failed", any(x["name"] == g for x in failed)),
+                                              ("drift", any(x["name"] == g for x in runs))) if ok)
+    t["excluded_variants"] = [dict(variant=g, runs=sum(1 for x in loaded if x["name"] == g), reason=why(g))
+                              for g in gone]
+    # new columns at the end: compare.csv keeps its earlier layout
+    main = [row for row in t["rows"] if not row["extra"] and not row["split"]]
+    extra = {row["metric"]: row for row in t["rows"] if row["extra"]}
+    hdr = ["variant", "runs"] + [row["metric"] for row in main] + ["draws/frame", "drift"]
+    rows = [[g + (" (control)" if g == t["control"] else ""), str(t["runs"][g])]
+            + [fmt_cell(row["groups"][g], row["metric"]) for row in main]
+            + [fmt_draws(t["draws"][g]), drift_column(g, check, runs)] for g in t["groups"]]
+    # the extra metrics: on the table when a run has them; always at the end of compare.csv
+    extra_hdr = [col for col, _, _ in BENCH_EXTRA.values()]
+    extra_cells = {g: [fmt_cell(extra[k]["groups"][g], k) if k in extra else "-" for k in BENCH_EXTRA]
+                   for g in t["groups"]}
+    shown = [i for i, k in enumerate(BENCH_EXTRA) if k in extra]
+    # --cpu-split: the parts of cpu_game (guest, cp, gpu_helpers) after them, when a run has them
+    split = {row["metric"]: row for row in t["rows"] if row["split"]}
+    split_keys = [k for k in BENCH_CPU_GAME if k in split] if getattr(a, "cpu_split", False) else []
+    split_hdr = [re.sub(r"^cpu_(.*)_ms_per_frame$", r"\1_ms/f", k) for k in split_keys]
+    print_table(hdr + [extra_hdr[i] for i in shown] + split_hdr,
+                [rw + [extra_cells[g][i] for i in shown] + [fmt_cell(split[k]["groups"][g], k) for k in split_keys]
+                 for rw, g in zip(rows, t["groups"])])
+    print(f"\nmean +-stdev per variant; % = diff vs '{t['control']}'; '~' = likely noise: the paired 95% CI "
+          f"of the per-round diff includes 0 (2+ paired rounds; else within {a.noise_k:g}x the control's "
+          "stdev when above 0)."
+          + (" One control run only: no noise estimate." if t["runs"][t["control"]] < 2 else "")
+          + (" cpu_ms/f: process CPU ms per frame (GetProcessTimes: tick-sampled, noisy); cpu_game_ms/f: "
+             "guest + command processor + GPU helper threads, cycle time, no background compiles (lower is "
+             "better)." if extra else "")
+          + (f" {', '.join(split_hdr)}: the parts of cpu_game_ms/f." if split_hdr else "")
+          + f"\ndraws/frame: mean of each run's Frame stats lines in the window; drift = runs more than "
+          f"{drift_pct:g}% off the median of all runs ('?N': N runs unknown)."
+          + (" '!' = unreliable: a drift run in this variant or the control." if t["unreliable"] else ""))
+    t["paired_avg_fps"] = paired_fps(used, t["groups"], t["control"])
+    if t["paired_avg_fps"]:
+        how = ("by round (run.json)" if all(e["by_round"] for e in t["paired_avg_fps"].values())
+               else "k-th run with the k-th control run")
+        print(f"\npaired avg_fps diff per round vs '{t['control']}' ({how}):")
+        for g, e in t["paired_avg_fps"].items(): print("  " + fmt_paired(g, t["control"], e))
+    for v in t["excluded_variants"]:
+        print(f"{v['variant']}: all {v['runs']} runs excluded ({v['reason']}), no comparison")
+    bar = "!" * 78
+    if failed:
+        left = ", ".join(f"{g} {t['runs'][g]}" for g in t["groups"])
+        print(f"\n{bar}\nWARNING: {len(failed)} of {len(loaded)} runs failed and are left out of the table "
+              f"and the drift check ({left} remain):")
+        for x in failed: print(f"  {run_tag(x)} ({x['name']}): {x['failed']}")
+        print(f"See run.json and game.log in each run's folder.\n{bar}")
+    if drifted:
+        print(f"\n{bar}\nWARNING: scene drift: {len(drifted)} of {len(runs)} runs rendered another scene "
+              f"(mean draws/frame more than {drift_pct:g}% off the median of all runs, {med:.0f}):")
+        for x in drifted:
+            print(f"  {run_tag(x)} ({x['name']}): {x['draws_mean']:.0f} draws/frame, {x['draws_dev_pct']:+.1f}% "
+                  f"vs the median")
+        if exclude:
+            left = ", ".join(f"{g} {t['runs'][g]}" for g in t["groups"])
+            print(f"Excluded (--exclude-drift): {len(used)} of {len(runs)} runs remain ({left}).")
+        elif t["unreliable"]:
+            print(f"The replay diverged: diffs of {', '.join(t['unreliable'])} are unreliable ('!'), whatever "
+                  "'~' says. Use --exclude-drift (bench.ps1: -ExcludeDrift), or re-record a shorter, simpler route.")
+        else:
+            print("The replay diverged in the control's own runs: its numbers are unreliable. Use --exclude-drift "
+                  "(bench.ps1: -ExcludeDrift), or re-record a shorter, simpler route.")
+        print(bar)
+    if check["state"] == "inconclusive":
+        n = sum(1 for x in runs if x["drift_state"] == "inconclusive")
+        print(f"\n{bar}\nWARNING: drift check inconclusive: half or more of the {n} runs are more than "
+              f"{drift_pct:g}% off their median ({med:.0f} draws/frame), so the median is no reference. "
+              "The runs rendered two or more scenes: check each run's draws/frame (compare_runs.csv) "
+              f"or re-record a shorter, simpler route.\n{bar}")
+    for g, d in check["variants"].items():
+        print(f"note: {g} renders {d:+.1f}% draws/frame vs '{control}' in every run, tightly: a property of "
+              "the variant (culling, LOD...), not replay drift. Its FPS deltas are not like-for-like.")
+    for x in runs:
+        if x["draws_mean"] is None:
+            print(f"note: {x['path']}: draws/frame unknown (no complete benchmark window with Frame stats "
+                  "lines in its log): no drift check")
+    if check["state"] == "unchecked" and any(x["draws_mean"] is not None for x in runs):
+        print(f"note: fewer than {DRIFT_MIN_RUNS} runs with draws/frame to compare: drift unchecked")
+    for x in used:
+        # only the game's own summary covers the replay window alone; a log/CSV/summary.json
+        # fallback counts the loading screens' compiles too, which says nothing about the cache
+        if x.get("compiles") and x.get("source") in ("bench_json", "log_bench"):
+            print(f"warning: {x['path']}: {x['compiles']} shader/pipeline compiles in the window (cache not warm)")
+        if x.get("frames") is not None and x["frames"] < 100:
+            print(f"warning: {x['path']}: only {x['frames']} frames")
+        if x.get("source") == "frame_csv" and x.get("csv_window") == "bench":
+            print(f"note: {x['path']}: no bench summary, read from the CSV's benchmark window")
+        elif x.get("source") not in ("bench_json", "log_bench"):
+            print(f"note: {x['path']}: no bench summary, read as {x['source']}"
+                  + (" (whole file: no 'bench' column)" if x.get("source") == "frame_csv" else ""))
+    if a.csv:
+        with open(a.csv, "w", newline="") as f:
+            w = csv.writer(f); w.writerow(hdr + ["unreliable", "failed_runs"] + extra_hdr)
+            w.writerows(rw + [str(g in t["unreliable"]).lower(), sum(1 for x in failed if x["name"] == g)]
+                        + extra_cells[g] for rw, g in zip(rows, t["groups"]))
+        # one line per run, the drift check in machine-readable form: compare_runs.csv next to it
+        base, ext = os.path.splitext(a.csv)
+        runs_csv = f"{base}_runs{ext or '.csv'}"
+        with open(runs_csv, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["run", "variant", "draws_mean", "draws_dev_pct", "draws_off_pct", "draws_samples",
+                        "drift", "drift_state", "excluded", "failed", "cpu_ms_per_frame", "cpu_game_ms_per_frame"]
+                       + list(BENCH_CPU_SPLIT))
+            for x in loaded:
+                w.writerow([run_tag(x), x["name"], r(x["draws_mean"], 1), r(x["draws_dev_pct"]),
+                            r(x["draws_off_pct"], 1), len(x["draws"] or []),
+                            "unknown" if x["drift"] is None else str(x["drift"]).lower(), x["drift_state"],
+                            str(bool(x["failed"] or (exclude and x["drift"]))).lower(), x["failed"] or ""]
+                           + [r(x.get(k), 3) for k in ("cpu_ms_per_frame", "cpu_game_ms_per_frame") + BENCH_CPU_SPLIT])
+        print(f"written: {a.csv}, {runs_csv}")
+    if a.json:
+        drift = dict(drift_pct=drift_pct, median_draws=r(med, 1), min_runs=DRIFT_MIN_RUNS, state=check["state"],
+                     variant_draws={g: r(d) for g, d in check["variants"].items()},
+                     exclude_drift=exclude, drift_runs=len(drifted), runs_used=len(used),
+                     runs=[dict(path=x["path"], run=run_tag(x), variant=x["name"], draws_source=x["draws_source"],
+                                draws=x["draws"], draws_mean=r(x["draws_mean"], 1),
+                                draws_dev_pct=r(x["draws_dev_pct"]), draws_off_pct=r(x["draws_off_pct"], 1),
+                                drift=x["drift"], drift_state=x["drift_state"],
+                                excluded=bool(x["failed"] or (exclude and x["drift"])), failed=x["failed"],
+                                cpu={k: x.get(k) for k in ("cpu_ms_per_frame", "cpu_game_ms_per_frame")
+                                     + BENCH_CPU_SPLIT if x.get(k) is not None})
+                          for x in loaded])
+        with open(a.json, "w") as f:
+            json.dump(dict(t, run_files=[x["path"] for x in loaded], kept_run_files=[x["path"] for x in used],
+                           failed_runs=[dict(run=run_tag(x), variant=x["name"], path=x["path"], reason=x["failed"])
+                                        for x in failed], drift=drift), f, indent=2)
+        print(f"written: {a.json}")
 
 
 def cmd_compare(a):
@@ -248,7 +979,7 @@ def cmd_compare(a):
             if x is None or cm is None: row.append("-"); continue
             d = pct(x, cm)
             mark = ""
-            if d is not None and noise is not None and abs(d) <= a.noise_k * noise: mark = " ~"
+            if d is not None and noise and abs(d) <= a.noise_k * noise: mark = " ~"
             elif d is not None and cm == 0 and x == 0: d = 0.0
             row.append(f"{x:g} ({d:+.1f}%){mark}" if d is not None else f"{x:g}")
         rows.append(row)
@@ -281,8 +1012,15 @@ def main():
     c = sp.add_parser("compare")
     c.add_argument("--control", nargs="+", required=True); c.add_argument("--variant", nargs="+", required=True)
     c.add_argument("--csv"); c.add_argument("--noise-k", type=float, default=2.0)
+    b = sp.add_parser("bench")
+    b.add_argument("runs", nargs="+"); b.add_argument("--control")
+    b.add_argument("--noise-k", type=float, default=2.0); b.add_argument("--skip-ms", type=float, default=1000.0)
+    b.add_argument("--csv"); b.add_argument("--json")
+    b.add_argument("--drift-pct", type=float, default=DRIFT_PCT); b.add_argument("--exclude-drift", action="store_true")
+    b.add_argument("--cpu-split", action="store_true",
+                   help="also show guest / cp / gpu_helpers ms per frame (the parts of cpu_game_ms/f)")
     a = ap.parse_args()
-    (cmd_summarize if a.cmd == "summarize" else cmd_compare)(a)
+    {"summarize": cmd_summarize, "compare": cmd_compare, "bench": cmd_bench}[a.cmd](a)
 
 
 if __name__ == "__main__":

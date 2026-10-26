@@ -137,10 +137,23 @@ void Swapchain::Create(u32 width_, u32 height_) {
     width = width_;
     height = height_;
     needs_recreation = false;
+    // iss: the semaphores are recreated with the new image count; an index from the old chain can
+    // be past them.
+    frame_index = 0;
+
+    // iss: a minimized window reports a 0x0 surface (Windows), which no swapchain can be created
+    // for. Keep none and retry on the next present, once the window is restored.
+    SetSurfaceProperties();
+    if (extent.width == 0 || extent.height == 0) {
+        if (swapchain) {
+            Destroy();
+        }
+        needs_recreation = true;
+        return;
+    }
 
     Destroy();
 
-    SetSurfaceProperties();
     // The standalone Win32 probe reproduces exclusive acquisition refusal
     // with Mailbox on this driver, while FIFO acquires successfully. Keep the
     // user's normal presentation policy outside explicit exclusive mode.
@@ -270,6 +283,10 @@ bool Swapchain::AcquireNextImage() {
         const char* p = std::getenv("ISS_PRESENT_ACQUIRE_FENCE");
         return !p || p[0] != '0';
     }();
+    if (!swapchain) {
+        needs_recreation = true; // none while the surface is 0x0 (minimized)
+        return false;
+    }
     vk::Device device = instance.GetDevice();
     if (use_fence && !acquire_fence) {
         auto [fence_result, fence] = device.createFence({});
@@ -286,6 +303,9 @@ bool Swapchain::AcquireNextImage() {
         (result == vk::Result::eSuccess || result == vk::Result::eSuboptimalKHR)) {
         const auto wait_result =
             device.waitForFences(acquire_fence, true, std::numeric_limits<u64>::max());
+        if (wait_result == vk::Result::eErrorDeviceLost) {
+            GpuCrashDiag::ReportDeviceLost(instance, "acquire fence");
+        }
         ASSERT_MSG(wait_result == vk::Result::eSuccess, "Acquire fence wait failed: {}",
                    vk::to_string(wait_result));
         const auto reset_result = device.resetFences(acquire_fence);
@@ -331,6 +351,9 @@ bool Swapchain::AcquireNextImage() {
         needs_recreation = true;
         break;
     default:
+        if (result == vk::Result::eErrorDeviceLost) {
+            GpuCrashDiag::ReportDeviceLost(instance, "acquire");
+        }
         LOG_CRITICAL(Render_Vulkan, "Swapchain acquire returned unknown result {}",
                      vk::to_string(result));
         UNREACHABLE();
@@ -341,6 +364,10 @@ bool Swapchain::AcquireNextImage() {
 }
 
 bool Swapchain::Present() {
+    if (!swapchain) {
+        needs_recreation = true;
+        return false;
+    }
     const vk::PresentInfoKHR present_info = {
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],
@@ -356,6 +383,9 @@ bool Swapchain::Present() {
         exclusive_active=false;exclusive_attempts=0;TlgSettings::Get().exclusive_status=1;
         std::fprintf(stderr,"EXCLUSIVE ownership lost during present; retry after focus returns\n");
     } else {
+        if (result == vk::Result::eErrorDeviceLost) {
+            GpuCrashDiag::ReportDeviceLost(instance, "present");
+        }
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                    vk::to_string(result));
     }

@@ -131,6 +131,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.rumble = i != 0;
     } else if (key == "mouse_sensitivity") {
         v.mouse_sensitivity = Clamp(value.empty() ? 1.0f : f, 0.05f, 10.0f);
+    } else if (key == "mouse_sensitivity_y") {
+        v.mouse_sensitivity_y = Clamp(value.empty() ? 1.0f : f, 0.25f, 4.0f);
     } else if (key == "mouse_smoothing") {
         v.mouse_smoothing = Clamp(f, 0.0f, 0.95f);
     } else if (key == "mouse_accel") {
@@ -256,6 +258,7 @@ void Load() {
         {"TLG_RCAS", "rcas"},                        {"TLG_FRAMES_AHEAD", "frames_queued"},
         {"TLG_SHOW_FPS", "show_fps"},             {"TLG_SENSOR_AIM", "sensor_aim"},
         {"TLG_MOUSE", "mouse_enabled"},           {"TLG_MOUSE_SENS", "mouse_sensitivity"},
+        {"TLG_MOUSE_SENS_Y", "mouse_sensitivity_y"},
         {"TLG_MOUSE_INVERT_Y", "mouse_invert_y"}, {"TLG_MOUSE_SMOOTHING", "mouse_smoothing"},
         {"TLG_MOUSE_ACCEL", "mouse_accel"},       {"TLG_MOUSE_DEADZONE", "mouse_deadzone"},
         {"TLG_RUMBLE", "rumble"},
@@ -408,9 +411,9 @@ void Save() {
         if (const int p = v.extra_pref[e]; p >= 0) std::fprintf(file, "%s=%d\n", kExtraKeys[e], p);
     }
     std::fprintf(file,
-                 "mouse_enabled=%d\nmouse_sensitivity=%.2f\nmouse_invert_y=%d\nmouse_smoothing=%.2f\n"
+                 "mouse_enabled=%d\nmouse_sensitivity=%.2f\nmouse_sensitivity_y=%.2f\nmouse_invert_y=%d\nmouse_smoothing=%.2f\n"
                  "mouse_accel=%.2f\nmouse_deadzone=%.2f\nrumble=%d\nkey_map=%s\n",
-                 int(v.mouse_enabled.load()), v.mouse_sensitivity.load(), int(v.mouse_invert_y.load()),
+                 int(v.mouse_enabled.load()), v.mouse_sensitivity.load(), v.mouse_sensitivity_y.load(), int(v.mouse_invert_y.load()),
                  v.mouse_smoothing.load(), v.mouse_accel.load(), v.mouse_deadzone.load(),
                  int(v.rumble.load()), v.key_map.c_str());
     // Read by run.sh at start.

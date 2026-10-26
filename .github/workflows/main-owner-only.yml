@@ -1,0 +1,25 @@
+# main only takes the owner's PRs (stable releases). A PR from anyone else that targets main is
+# moved to developer, where all work goes first. No code from the PR is checked out or run.
+name: Main is owner-only
+
+on:
+  pull_request_target:
+    types: [opened, reopened, edited]
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  retarget:
+    if: github.event.pull_request.user.login != github.repository_owner
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr edit "$PR" -R "$GITHUB_REPOSITORY" --base developer
+          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "PRs vão para a \`developer\`; a \`main\` só recebe as versões estáveis. Mudei a base desta PR para a \`developer\`.
+
+          PRs go to \`developer\`; \`main\` only takes stable releases. This PR now targets \`developer\`."

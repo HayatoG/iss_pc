@@ -476,6 +476,8 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       swapchain{instance, window}, runtime{instance, draw_scheduler},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, runtime, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
+    present_scheduler.SetSubmitLockCaller(Scheduler::SubmitLockCaller::Present);
+    flip_scheduler.SetSubmitLockCaller(Scheduler::SubmitLockCaller::Present);
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
 
@@ -705,7 +707,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     draw_scheduler.EndRendering();
     // ISS_PRESENT_STREAM=1 (OFF by default: the first try, porte-y 2026-10-18, gave a black
-    // screen; not debugged yet): with threaded recording the present commands (the
+    // screen; likely cause, fixed in Present: it submitted the wait for the frame's tick before
+    // the recording thread submitted that tick): with threaded recording the present commands (the
     // barrier and the post process pass: push descriptors and constants, no state kept) go to the
     // recording thread in order with the frame, like every other command. Taking the command
     // buffer here waited for that thread to record the whole frame first: ~14% of the command
@@ -939,10 +942,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
     if(!swapchain.SyncExclusiveState()) {free_frame();return;}
+    // No swapchain while the surface is 0x0 (minimized): Recreate retries on a later frame.
+    if (!swapchain.GetHandle()) {free_frame();return;}
 
     if (!swapchain.AcquireNextImage()) {
         if(!swapchain.NeedsRecreation() || !window.CanPresent()){free_frame();return;}
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        if (!swapchain.GetHandle()) {free_frame();return;}
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
@@ -959,6 +965,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
     // the frame's present fence and future GetRenderFrame() call will hang waiting for this frame.
     const auto reset_result = instance.GetDevice().resetFences(frame->present_done);
+    if (reset_result == vk::Result::eErrorDeviceLost) {
+        GpuCrashDiag::ReportDeviceLost(instance, "present fence reset");
+    }
     ASSERT_MSG(reset_result == vk::Result::eSuccess,
                "Unexpected error resetting present done fence: {}", vk::to_string(reset_result));
 
@@ -1174,6 +1183,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddSignal(frame->present_done);
     const u64 causal_flush_start = causal_trace ? Common::Perf::NowNs() : 0;
     const u64 trace_flush=trace_start?Common::Perf::NowNs():0;
+    // ISS_PRESENT_STREAM: the recording thread submits the frame's tick after PrepareFrame
+    // returned. Waiting for it on this queue before its signal is submitted breaks
+    // vkQueuePresentKHR (its semaphore's signal must depend only on submitted signals). Returns
+    // at once otherwise: the command processor submitted it in PrepareFrame. Never flushes.
+    if (frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()) {
+        draw_scheduler.WaitFlushedSubmitted(frame->ready_tick);
+    }
     scheduler.Flush(info);
     const u64 causal_flushed = causal_trace ? Common::Perf::NowNs() : 0;
     const u64 trace_flushed=trace_start?Common::Perf::NowNs():0;
@@ -1183,7 +1199,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // Present to swapchain.
     bool recreate_after_present=false;
     {
-        std::scoped_lock submit_lock{Scheduler::submit_mutex};
+        const auto submit_lock=Scheduler::LockSubmit(Scheduler::SubmitLockCaller::Present);
         recreate_after_present=!swapchain.Present();
     }
     // Queue drain submits take submit_mutex themselves and wait outside it.

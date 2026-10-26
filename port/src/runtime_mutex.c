@@ -7,9 +7,11 @@
 #include <pthread.h>
 #include <errno.h>
 #include <time.h>
+#include <immintrin.h>
 typedef struct { int type; } GuestAttr;
 /* owner/depth: who holds it, for the freeze report (written only while holding the mutex). */
-typedef struct { pthread_mutex_t native; void *owner; unsigned depth; char name[32]; } GuestMutex;
+/* nested_wait_logged: a condition wait at depth >1 was reported (once per mutex, see wait_cond). */
+typedef struct { pthread_mutex_t native; void *owner; unsigned depth; char name[32]; unsigned char nested_wait_logged; } GuestMutex;
 static size_t created, locks, unlocks;
 static int32_t orbis_error(int e) {
     if (!e) return 0;
@@ -88,6 +90,39 @@ static void took(GuestMutex *m) {
 static void releasing(GuestMutex *m) {
     if (m->depth && m->owner == holder() && !--m->depth) m->owner = NULL;
 }
+/* TLG_MUTEX_SPIN_US=N: a contended lock retries the trylock for up to N microseconds (pausing
+ * between tries) before it blocks in the host mutex. 0 (the default) blocks at once. */
+static uint64_t spin_ns = UINT64_MAX;   /* UINT64_MAX: not read yet */
+static size_t contended, spin_hits;     /* runtime_counters */
+static uint64_t mutex_spin_ns(void) {
+    uint64_t v = __atomic_load_n(&spin_ns, __ATOMIC_RELAXED);
+    if (v == UINT64_MAX) {
+        const char *env = getenv("TLG_MUTEX_SPIN_US");
+        long us = env ? strtol(env, NULL, 10) : 0;
+        v = us > 0 ? (uint64_t)(us > 10000 ? 10000 : us) * 1000 : 0;
+        __atomic_store_n(&spin_ns, v, __ATOMIC_RELAXED);
+        if (v) printf("Runtime: contended guest mutexes spin up to %llu us before blocking (TLG_MUTEX_SPIN_US)\n",
+                      (unsigned long long)(v / 1000));
+    }
+    return v;
+}
+static uint64_t mono_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000 + (uint64_t)t.tv_nsec;
+}
+/* Spins only while another thread holds the mutex: when the caller is the holder (a recursive or
+ * error-check relock), waiting cannot help. Returns the last trylock result. */
+static int spin_trylock(GuestMutex *m, uint64_t ns) {
+    if (__atomic_load_n(&m->owner, __ATOMIC_RELAXED) == holder()) return EBUSY;
+    uint64_t end = mono_ns() + ns;
+    int r;
+    do {
+        for (int i = 0; i < 32; ++i) _mm_pause();
+        r = pthread_mutex_trylock(&m->native);
+    } while (r == EBUSY && mono_ns() < end);
+    return r;
+}
 /* A contended lock marks the wait (the uncontended path only adds the trylock). An error-check
  * mutex the caller holds fails the trylock with EBUSY and the lock with EDEADLK, as before. */
 static int32_t lock_mutex(GuestMutex **mutex, uintptr_t frame) {
@@ -96,12 +131,20 @@ static int32_t lock_mutex(GuestMutex **mutex, uintptr_t frame) {
     GuestMutex *m = *mutex;
     int r = pthread_mutex_trylock(&m->native);
     if (r == EBUSY) {
+        uint64_t ns = mutex_spin_ns();
+        if (runtime_counters) __atomic_fetch_add(&contended, 1, __ATOMIC_RELAXED);
+        if (ns) {
+            r = spin_trylock(m, ns);
+            if (!r && runtime_counters) __atomic_fetch_add(&spin_hits, 1, __ATOMIC_RELAXED);
+        }
+    }
+    if (r == EBUSY) {
         runtime_wait_begin("mutex", m, m->name, (const void *const *)&m->owner, frame);
         r = pthread_mutex_lock(&m->native);
         runtime_wait_end();
     }
     e = orbis_error(r);
-    if (!e) { ++locks; took(m); }
+    if (!e) { if (runtime_counters) ++locks; took(m); }
     return e;
 }
 static ABI int32_t mutex_lock(GuestMutex **mutex) { return lock_mutex(mutex, RUNTIME_GUEST_FRAME()); }
@@ -109,7 +152,7 @@ static ABI int32_t mutex_trylock(GuestMutex **mutex) {
     int32_t e = ensure_mutex(mutex);
     if (e) return e;
     e = orbis_error(pthread_mutex_trylock(&(*mutex)->native));
-    if (!e) { ++locks; took(*mutex); }
+    if (!e) { if (runtime_counters) ++locks; took(*mutex); }
     return e;
 }
 static ABI int32_t mutex_unlock(GuestMutex **mutex) {
@@ -120,8 +163,10 @@ static ABI int32_t mutex_unlock(GuestMutex **mutex) {
     unsigned depth = m->depth;
     releasing(m);
     int32_t e = orbis_error(pthread_mutex_unlock(&m->native));
-    if (!e) ++unlocks;
-    else { m->owner = owner; m->depth = depth; } /* not unlocked: still held as before */
+    if (!e) { if (runtime_counters) ++unlocks; }
+    /* Not unlocked: still held as before. Only the owner's own fields were changed by releasing();
+     * a non-owner must not write back a snapshot it read without holding the mutex. */
+    else if (owner == holder()) { m->owner = owner; m->depth = depth; }
     return e;
 }
 static ABI int32_t mutex_destroy(GuestMutex **mutex) {
@@ -149,13 +194,13 @@ static ABI int32_t mutex_timedlock(GuestMutex **mutex, uint32_t usec) {
     runtime_wait_begin("mutex (timed)", m, m->name, (const void *const *)&m->owner, frame);
     e = timed_error(pthread_mutex_timedlock(&m->native, &end));
     runtime_wait_end();
-    if (!e) { ++locks; took(m); }
+    if (!e) { if (runtime_counters) ++locks; took(m); }
     return e;
 }
 /* Condition variables: opaque handles over host pthread_cond (CLOCK_REALTIME,
  * like FreeBSD's default), sharing the host mutex behind GuestMutex. */
 typedef struct { pthread_cond_t native; char name[32]; } GuestCond;
-static size_t conds, waits, wakeups;
+static size_t conds, waits, wakeups;   /* waits, wakeups (and locks, unlocks): runtime_counters */
 static ABI int32_t cond_init(GuestCond **out, void **attr, const char *name) {
     (void)attr;
     if (!out) return orbis_error(EINVAL);
@@ -186,6 +231,20 @@ static ABI int32_t cond_destroy(GuestCond **cond) {
     if (!e) { free(*cond); *cond = NULL; }
     return orbis_error(e);
 }
+/* A recursive mutex held at depth >1: the host wait releases one level only, so the signaller
+ * could never take the mutex. The extra levels are dropped before the wait (the last one is still
+ * held, so no wakeup is missed) and taken back after it. TLG_COND_RECURSIVE=0: the old single-level
+ * wait. Read once. */
+static int cond_recursive(void) {
+    static int cache = -1;
+    int v = __atomic_load_n(&cache, __ATOMIC_RELAXED);
+    if (v < 0) {
+        const char *env = getenv("TLG_COND_RECURSIVE");
+        v = !(env && env[0] == '0');
+        __atomic_store_n(&cache, v, __ATOMIC_RELAXED);
+    }
+    return v;
+}
 /* The mutex is released while waiting: its holder is cleared for the report, then restored.
  * A caller that does not hold the mutex gets EPERM at once, as from the PS4's libthr: the host
  * wait would return holding a mutex the guest never unlocks. inFAMOUS's Wwise job wait (guest
@@ -193,11 +252,21 @@ static ABI int32_t cond_destroy(GuestCond **cond) {
 static int wait_cond(GuestCond *c, GuestMutex *m, const struct timespec *end, uintptr_t frame) {
     if (!m->depth || m->owner != holder()) return EPERM;
     void *owner = m->owner;
-    unsigned depth = m->depth;
+    unsigned depth = m->depth, extra = 0;
+    if (depth > 1) {   /* only a recursive mutex nests */
+        extra = cond_recursive() ? depth - 1 : 0;
+        if (!m->nested_wait_logged) {
+            m->nested_wait_logged = 1;
+            printf("Runtime: condition wait on recursive mutex '%s' held %u deep (%s)\n", m->name, depth,
+                   extra ? "released fully" : "TLG_COND_RECURSIVE=0: one level");
+        }
+    }
     m->owner = NULL; m->depth = 0;
+    for (unsigned i = 0; i < extra; ++i) pthread_mutex_unlock(&m->native);
     runtime_wait_begin(end ? "condition variable (timed)" : "condition variable", c, c->name, NULL, frame);
     int r = end ? pthread_cond_timedwait(&c->native, &m->native, end) : pthread_cond_wait(&c->native, &m->native);
     runtime_wait_end();
+    for (unsigned i = 0; i < extra; ++i) pthread_mutex_lock(&m->native);
     m->owner = owner; m->depth = depth;
     return r;
 }
@@ -205,7 +274,7 @@ static int32_t cond_wait_at(GuestCond **cond, GuestMutex **mutex, uintptr_t fram
     int32_t e = ensure_cond(cond);
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3) return orbis_error(EINVAL);
-    ++waits;
+    if (runtime_counters) ++waits;
     return orbis_error(wait_cond(*cond, *mutex, NULL, frame));
 }
 static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) { return cond_wait_at(cond, mutex, RUNTIME_GUEST_FRAME()); }
@@ -213,7 +282,7 @@ static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, const struc
     int32_t e = ensure_cond(cond);
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3 || !end) return orbis_error(EINVAL);
-    ++waits;
+    if (runtime_counters) ++waits;
     return timed_error(wait_cond(*cond, *mutex, end, frame));
 }
 static ABI int32_t cond_timedwait(GuestCond **cond, GuestMutex **mutex, uint32_t usec) {
@@ -225,12 +294,14 @@ static ABI int32_t cond_timedwait(GuestCond **cond, GuestMutex **mutex, uint32_t
 static ABI int32_t cond_signal(GuestCond **cond) {
     int32_t e = ensure_cond(cond);
     if (e) return e;
-    ++wakeups; return orbis_error(pthread_cond_signal(&(*cond)->native));
+    if (runtime_counters) ++wakeups;
+    return orbis_error(pthread_cond_signal(&(*cond)->native));
 }
 static ABI int32_t cond_broadcast(GuestCond **cond) {
     int32_t e = ensure_cond(cond);
     if (e) return e;
-    ++wakeups; return orbis_error(pthread_cond_broadcast(&(*cond)->native));
+    if (runtime_counters) ++wakeups;
+    return orbis_error(pthread_cond_broadcast(&(*cond)->native));
 }
 /* PS4 struct timespec is {int64 sec, int64 nsec}, identical to Linux x86-64. */
 typedef struct { int64_t sec, nsec; } GuestTimespec;
@@ -300,7 +371,13 @@ uintptr_t runtime_mutex_resolve(const char *name) {
     return 0;
 }
 void runtime_mutex_report(void) {
-    printf("Runtime: mutexes created=%zu, locks=%zu, unlocks=%zu\n", created, locks, unlocks);
-    printf("Runtime: condition variables created=%zu, waits=%zu, wakeups=%zu\n", conds, waits, wakeups);
+    if (runtime_counters) {
+        printf("Runtime: mutexes created=%zu, locks=%zu, unlocks=%zu, contended=%zu, spin acquired=%zu\n",
+               created, locks, unlocks, contended, spin_hits);
+        printf("Runtime: condition variables created=%zu, waits=%zu, wakeups=%zu\n", conds, waits, wakeups);
+    } else {
+        printf("Runtime: mutexes created=%zu, locks/unlocks off (ISS_RUNTIME_COUNTERS=1 to count)\n", created);
+        printf("Runtime: condition variables created=%zu, waits/wakeups off\n", conds);
+    }
 }
 

@@ -6,6 +6,8 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <signal.h>
+#include <pthread.h>
 #include "runtime.h"
 #include "cpu_check.h"
 #include "isa_rewrite.h"
@@ -14,6 +16,8 @@
 #include "actor_hook.h"
 #include "damage_hook.h"
 #include "view_hook.h"
+#include "spin_hook.h"
+#include "havok_spin.h"
 #include "iss_camera_hook.h"
 #include "iss_mouse_aim.h"
 #include "iss_camera_pitch_hook.h"
@@ -54,6 +58,28 @@ static uintptr_t guest_code_end; /* end of the image and its stub areas (emulati
 #endif
 static void isa_report_hook(void) { isa_rewrite_report(isa_table, stdout); }
 int vulkan_smoke(void);
+/* TLG_LOG_BUFFER=1: stdout and stderr are fully buffered (log_buffer_start); the crash paths
+ * write out what is still buffered before their own report (log_flush_crash). stdout goes first:
+ * both streams share the log file, and stderr's reports usually follow stdout's progress lines. */
+static int log_buffered;
+static void log_flush(void) { fflush(stdout); fflush(stderr); }
+/* Crash and watchdog paths: never waits for a stream lock, which a thread stopped (or parked by
+ * a nested fault) in the middle of a printf may hold forever. Linux: a stream whose lock is taken
+ * is skipped (its lines are lost, the report is not). Windows: written without the lock (the
+ * other threads keep running and may race on the buffer; the report itself follows). */
+static void log_flush_crash(void) {
+#ifdef _WIN32
+    _fflush_nolock(stdout);
+    _fflush_nolock(stderr);
+#else
+    FILE *const streams[] = {stdout, stderr};
+    for (unsigned i = 0; i < 2; ++i)
+        if (!ftrylockfile(streams[i])) {
+            fflush_unlocked(streams[i]);
+            funlockfile(streams[i]);
+        }
+#endif
+}
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 static uint64_t read64(FILE *f) {
@@ -174,6 +200,8 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
 static int fatal_reported;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
+    /* The buffered lines first: a fault inside this report parks the thread above (no exit). */
+    if (log_buffered) log_flush_crash();
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     const CONTEXT *c=info->ContextRecord;
     char where[MAX_PATH+64];
@@ -355,7 +383,9 @@ static void fault(int sig, siginfo_t *info, void *context) {
         clobber_below(context);
         return;
     }
-    /* The process is terminating: dladdr/snprintf are acceptable here. */
+    /* The process is terminating: dladdr/snprintf are acceptable here. TLG_LOG_BUFFER: the
+     * buffered lines go first, before the raw writes below (no lock waits). */
+    if (log_buffered) log_flush_crash();
     ucontext_t *uc = context;
     uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
     char line[512];
@@ -499,6 +529,7 @@ static void dump_all_threads(void *context, const char *head) {
 }
 static void watchdog(int sig, siginfo_t *info, void *context) {
     (void)info;
+    if (log_buffered) log_flush_crash(); /* before the other threads are interrupted; no lock waits */
     dump_all_threads(context, "STOP: watchdog timeout; thread stacks:\n");
     _exit(128 + sig);
 }
@@ -743,6 +774,62 @@ static void install_view_tuning(Segment *segments, uint64_t count, uint64_t size
             install_jump(sites[kind][i], TLG_VIEW_SITE_LENGTH, stubs + (kind * 2 + i) * 128);
     tlg_view_attach(image);
     printf("Draw distance: ready (LOD scale, LOD bands, region LOD_ADJUST and FADE_DISTANCE, near/far clip)\n");
+}
+
+/* PAUSE in the engine's RDTSC busy-waits (src/spin_hook.h). On by default; ISS_SPIN_PAUSE=0
+ * (TLG_SPIN_PAUSE) keeps the original bytes, for A/B runs with the same build. */
+static void install_spin_pause(Segment *segments, uint64_t count, uint64_t size) {
+    const char *policy = getenv("TLG_SPIN_PAUSE");
+    if (policy && !strcmp(policy, "0")) {
+        printf("Spin wait: PAUSE off (TLG_SPIN_PAUSE=0), original busy-wait loops\n");
+        return;
+    }
+    if (!mapped(segments, count, tlg_spin_sites[0], TLG_SPIN_SITE_LENGTH) ||
+        !mapped(segments, count, tlg_spin_sites[1], TLG_SPIN_SITE_LENGTH) ||
+        !tlg_spin_signature_match(image, size)) {
+        return; /* another game or build: silent, like the other hooks of other games */
+    }
+    for (unsigned i = 0; i < 2; ++i)
+        memcpy(image + tlg_spin_sites[i], tlg_spin_paused, TLG_SPIN_SITE_LENGTH);
+    printf("Spin wait: PAUSE added to 2 RDTSC busy-wait loops (guest+0x%x, guest+0x%x)\n",
+           (unsigned)tlg_spin_sites[0], (unsigned)tlg_spin_sites[1]);
+}
+
+/* Havok hkCriticalSection spin counts (src/havok_spin.h). ISS_HAVOK_SPIN=N (TLG_HAVOK_SPIN) lowers
+ * each constant count to min(original, N) in place, all 11 sites or none; unset or "orig" keeps
+ * the original 1000-4000. */
+static void install_havok_spin(Segment *segments, uint64_t count, uint64_t size) {
+    const char *policy = getenv("TLG_HAVOK_SPIN");
+    int match = 1;
+    for (unsigned i = 0; match && i < TLG_HAVOK_SPIN_SITES; ++i)
+        if (!mapped(segments, count, tlg_havok_spin_sites[i].site, TLG_HAVOK_SPIN_SITE_LENGTH)) match = 0;
+    if (!match || !tlg_havok_spin_signature_match(image, size)) {
+        /* another game or build: silent unless the clamp was asked for */
+        if (policy && *policy) printf("Havok spin: unavailable (code signature mismatch)\n");
+        return;
+    }
+    if (!policy || !*policy || !strcmp(policy, "orig")) {
+        printf("Havok spin: original counts\n");
+        return;
+    }
+    char *end = NULL;
+    const unsigned long long limit = strtoull(policy, &end, 10);
+    if (*policy < '0' || *policy > '9' || *end || limit > UINT32_MAX) {
+        printf("Havok spin: original counts (TLG_HAVOK_SPIN=%s is not orig or a count)\n", policy);
+        return;
+    }
+    unsigned clamped = 0;
+    for (unsigned i = 0; i < TLG_HAVOK_SPIN_SITES; ++i) {
+        const TlgHavokSpinSite *s = &tlg_havok_spin_sites[i];
+        if (s->count <= limit) continue;
+        const uint32_t value = (uint32_t)limit;
+        memcpy(image + s->site + 1, &value, 4);
+        ++clamped;
+    }
+    if (!clamped)
+        printf("Havok spin: %llu >= all original counts, nothing clamped\n", limit);
+    else
+        printf("Havok spin: clamped %u sites to %llu (orig 1000-4000)\n", clamped, limit);
 }
 
 #include "iss_karma.h"
@@ -1009,7 +1096,8 @@ void runtime_restart(void) {
     /* run.py sets TLG_RESTART_COMMAND: the launch command line, started again (new patches). */
     const char *command=getenv("TLG_RESTART_COMMAND");
     puts("Runtime: restarting through run.py");
-    if (!command || !*command) { fputs("runtime_restart: TLG_RESTART_COMMAND is not set\n",stderr); _exit(1); }
+    log_flush(); /* TLG_LOG_BUFFER: before the new launch writes to the same log */
+    if (!command || !*command) { fputs("runtime_restart: TLG_RESTART_COMMAND is not set\n",stderr); log_flush(); _exit(1); }
     char *line=_strdup(command);
     /* Same output handles: a launcher reading the game's log keeps reading the new launch. */
     STARTUPINFOA startup={.cb=sizeof(startup),.dwFlags=STARTF_USESTDHANDLES,
@@ -1017,16 +1105,18 @@ void runtime_restart(void) {
                           .hStdError=GetStdHandle(STD_ERROR_HANDLE)};
     PROCESS_INFORMATION process;
     if (!line || !CreateProcessA(NULL,line,NULL,NULL,TRUE,0,NULL,NULL,&startup,&process)) {
-        fprintf(stderr,"runtime_restart: CreateProcess failed (%lu)\n",GetLastError()); _exit(1);
+        fprintf(stderr,"runtime_restart: CreateProcess failed (%lu)\n",GetLastError()); log_flush(); _exit(1);
     }
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
     /* The new launch waits for this process's GPU device to go away (run.py --after). */
     TerminateProcess(GetCurrentProcess(),0);
 #else
     puts("Runtime: restarting through run.sh");
+    log_flush(); /* TLG_LOG_BUFFER: exec drops the buffers */
     syscall(SYS_close_range, 3u, ~0u, 0u);
     execlp("bash", "bash", "run.sh", (char *)NULL);
     perror("runtime_restart: exec");
+    log_flush();
     _exit(1);
 #endif
 }
@@ -1133,6 +1223,89 @@ static void boot_step(const char *what) {
            (long)((now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000));
 }
 
+/* TLG_LOG_BUFFER=1 (ISS_LOG_BUFFER, default 0): stdout and stderr are fully buffered (64 KB each)
+ * instead of unbuffered. The launcher sends both into the log file, where an unbuffered stream
+ * costs a write system call per character on Windows (~500 us for a 300-byte line, on the thread
+ * that logs: mostly the command processor; the characters of lines written at the same time
+ * interleave). A thread writes both buffers out every 200 ms, and the exit and crash paths do it
+ * too (the fault reports, abort, invalid CRT parameters, the watchdog, the _exit and
+ * TerminateProcess calls), so a line reaches the file at most ~200 ms late and is only lost when
+ * the process is killed from outside. Lines stay whole; within one period the lines of one stream
+ * may land before older ones of the other (each flush writes stdout first, then stderr, so a
+ * stderr line can precede stdout lines written before it only within that period; interleaving
+ * them exactly would need a flush of stdout before every stderr write). Started after the memory
+ * reservation (thread stack). */
+static void (*log_previous_abort)(int);
+static void log_abort(int sig) {
+    log_flush();
+    if (log_previous_abort && log_previous_abort != SIG_DFL && log_previous_abort != SIG_IGN &&
+        log_previous_abort != SIG_ERR)
+        log_previous_abort(sig); /* the GPU library's report (renderer v2: host_hooks.cpp) */
+}
+#ifndef _WIN32
+/* SIGHUP: written out, then the default action. SIGTERM and SIGINT stay unhandled here: SDL3
+ * installs its quit handler only where the action is still SIG_DFL, and that handler is the
+ * graceful shutdown (PORT_STOP, which flushes the streams on exit). On Windows the launcher's
+ * terminate is TerminateProcess, which nothing can intercept. */
+static void log_terminate(int sig) {
+    log_flush();
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+#endif
+#ifdef _WIN32
+static _invalid_parameter_handler log_previous_invalid_parameter;
+static void __cdecl log_invalid_parameter(const wchar_t *expression, const wchar_t *function, const wchar_t *file,
+                                          unsigned line, uintptr_t reserved) {
+    log_flush();
+    if (log_previous_invalid_parameter) log_previous_invalid_parameter(expression, function, file, line, reserved);
+    else _invoke_watson(expression, function, file, line, reserved); /* what the CRT does without a handler */
+}
+#endif
+static void *log_flusher(void *unused) {
+    (void)unused;
+#ifndef _WIN32
+    pthread_setname_np(pthread_self(), "tlg:logflush");
+#endif
+    for (;;) {
+#ifdef _WIN32
+        Sleep(200);
+#else
+        struct timespec period = {0, 200000000L};
+        nanosleep(&period, NULL); /* a signal ends it early: one more flush, harmless */
+#endif
+        log_flush();
+    }
+    return NULL;
+}
+static void log_buffer_start(void) {
+    const char *mode = getenv("TLG_LOG_BUFFER");
+    if (!mode || strcmp(mode, "1")) return;
+    static char out_buffer[64 * 1024], err_buffer[64 * 1024];
+    setvbuf(stdout, out_buffer, _IOFBF, sizeof out_buffer);
+    setvbuf(stderr, err_buffer, _IOFBF, sizeof err_buffer);
+    log_buffered = 1;
+    log_previous_abort = signal(SIGABRT, log_abort);
+#ifdef _WIN32
+    log_previous_invalid_parameter = _set_invalid_parameter_handler(log_invalid_parameter);
+#else
+    const int ends[] = {SIGHUP};
+    for (unsigned i = 0; i < sizeof ends / sizeof *ends; ++i) {
+        void (*previous)(int) = signal(ends[i], log_terminate);
+        if (previous != SIG_DFL) signal(ends[i], previous); /* someone else's (or ignored): kept */
+    }
+#endif
+    pthread_attr_t attr;
+    pthread_t thread;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 256 * 1024);
+    const int started = !pthread_create(&thread, &attr, log_flusher, NULL);
+    pthread_attr_destroy(&attr);
+    if (started) pthread_detach(thread);
+    printf("Runtime: log buffered (TLG_LOG_BUFFER=1): 64 KB per stream, written out every 200 ms%s and on exit\n",
+           started ? "" : " (flush thread not started: only when full)");
+}
+
 #ifndef TLG_BUILD_COMMIT
 #define TLG_BUILD_COMMIT "unknown"
 #endif
@@ -1166,6 +1339,7 @@ int main(int argc, char **argv) {
     runtime_memory_reserve();
     runtime_thread_tcb_offset();
 #endif
+    log_buffer_start();
     int cpu_only = 0, strict_imports = 0, check_imports = 0;
     unsigned timeout_seconds = 10;
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *isa_file=NULL;
@@ -1512,6 +1686,12 @@ int main(int argc, char **argv) {
 #endif
     if (isa_table) {
         isa_table->protect_red_zone = red_zone_on;
+        isa_table->no_hits = !runtime_counters;   /* TLG_RUNTIME_COUNTERS, read by runtime_start */
+        /* TLG_EXTRQ_INLINE=1 (default 0; gpu_v2/defaults.env sets ISS_EXTRQ_INLINE=1): SSE4A sites an
+         * SSE2 sequence computes get an inline stub instead of the isa_emulate_sse4a call
+         * (docs/isa_rewrite.md). */
+        const char *extrq_inline = getenv("TLG_EXTRQ_INLINE");
+        isa_table->inline_sse4a = extrq_inline && !strcmp(extrq_inline, "1");
         IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
         if (r.unsupported_needed) {
             printf("STOP: this CPU lacks %s and %u sites use encodings the rewrite cannot emulate\n", missing, r.unsupported_needed);
@@ -1522,6 +1702,8 @@ int main(int argc, char **argv) {
                            r.rewritten, policy, r.jmp, r.relocated, r.int3, r.skipped);
         else if (isa_sets) printf("ISA: CPU lacks %s: %u sites rewritten (%u jmp, %u relocated, %u int3), %u skipped\n",
                                   missing, r.rewritten, r.jmp, r.relocated, r.int3, r.skipped);
+        if (isa_table->inline_sse4a && (isa_sets & CPU_SET_SSE4A))
+            printf("ISA: SSE4A inline stubs (TLG_EXTRQ_INLINE=1): %u sites, the others call isa_emulate_sse4a\n", r.inlined);
         if (red_zone_on) {
             const uint32_t *st = isa_table->rz_stats;   /* scripts/red_zone.py STATS_FIELDS */
             IsaRedZoneReport z = isa_red_zone_apply(isa_table, image, stubs + stub_area);
@@ -1535,6 +1717,9 @@ int main(int argc, char **argv) {
         runtime_set_report_hook(isa_report_hook);
         protect(stubs, stub_area + red_zone_area, 5);
     }
+    /* After the rewrites: a site they changed no longer matches and is left alone. */
+    install_spin_pause(segments, ns, size);
+    install_havok_spin(segments, ns, size);
     if (gpu_enabled) install_iss_native_resolution(app0, segments, ns, size);
     if (gpu_enabled) install_iss_hud_corners(app0, segments, ns, size);
     if (gpu_enabled) install_iss_hud_trace(app0, segments, ns, size);

@@ -2,6 +2,7 @@
 #include "../../../src/iss_native_resolution.h"
 #include <algorithm>
 #include "parallel.h"
+#include "minimal_logs.h"
 #include "native_item_identity.h"
 #include "repeat_census.h"
 #include "unified_memory.h"
@@ -15,6 +16,7 @@
 #include "feedback_join.h"
 #include "infamous_renderer/secondary_batch_probe.h"
 #include <unordered_set>
+#include <cerrno>
 #include <cstdio>
 #include <filesystem>
 #include <intrin.h>
@@ -161,28 +163,72 @@ void SubmitFeedbackBatch(Scheduler& scheduler) {
 thread_local u64 periodic_tick{};
 thread_local u32 periodic_draws{};
 thread_local u64 periodic_start_ns{};
-void PeriodicSubmit(Scheduler& scheduler) {
+thread_local bool periodic_held{}; ///< SubmitsHeldOcclusion counted for the pending submit.
+// The interval is clamped to [100, 100000] us; 0, empty, negative or not a number: off.
+u64 SubmitIntervalNs() {
+    static const u64 interval_ns = [] {
+        u64 us = 0;
+        const char* p = std::getenv("ISS_SUBMIT_INTERVAL_US");
+        if (p) {
+            while (*p == ' ' || *p == '\t') ++p;
+            char* end = nullptr;
+            errno = 0;
+            // Digits only: strtoull would take "-1" as ULLONG_MAX.
+            const unsigned long long v = *p >= '0' && *p <= '9' ? std::strtoull(p, &end, 10) : 0;
+            while (end && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) ++end;
+            const bool parsed = end && end != p && *end == '\0';
+            if (!parsed && *p != '\0') {
+                std::fprintf(stderr,
+                             "PORT_TUNING submit_interval_us warning: ISS_SUBMIT_INTERVAL_US=\"%s\" "
+                             "is not a number of microseconds: off\n",
+                             p);
+            }
+            if (parsed && v != 0) {
+                // strtoull saturates at ULLONG_MAX (ERANGE): clamped here, before the * 1000.
+                us = std::clamp<unsigned long long>(errno == ERANGE ? 100000ull : v, 100ull,
+                                                    100000ull);
+            }
+        }
+        std::fprintf(stderr, "PORT_TUNING submit_interval_us=%llu\n",
+                     static_cast<unsigned long long>(us));
+        return us * 1000ull;
+    }();
+    return interval_ns;
+}
+// hold (OcclusionQueries::AtSegmentLimit): an open occlusion query has used all its counter
+// pairs. A submit ends the rendering scope and so the query's segment; one more segment than
+// counter pairs and the query is emulated (all visible, no culling). The periodic submit waits
+// until the query ends or is cut anyway. Both periodic submits are held (ISS_SUBMIT_EVERY and
+// ISS_SUBMIT_INTERVAL_US); readbacks and the other submits are not. Counted once per held
+// submit (SubmitsHeldOcclusion).
+void PeriodicSubmit(Scheduler& scheduler, bool hold) {
     static const u32 every = [] {
         const char* p = std::getenv("ISS_SUBMIT_EVERY");
         return p ? static_cast<u32>(std::strtoul(p, nullptr, 10)) : 0u;
     }();
-    static const u64 interval_ns = [] {
-        const char* p = std::getenv("ISS_SUBMIT_INTERVAL_US");
-        return p ? std::strtoull(p, nullptr, 10) * 1000ull : 0ull;
-    }();
+    static const u64 interval_ns = SubmitIntervalNs();
     if (every == 0 && interval_ns == 0) return;
     const u64 tick = scheduler.CurrentTick();
     if (tick != periodic_tick) {
         periodic_tick = tick;
         periodic_draws = 0;
         periodic_start_ns = interval_ns ? Common::Perf::NowNs() : 0;
+        periodic_held = false;
     }
     const bool due = interval_ns && Common::Perf::NowNs() - periodic_start_ns >= interval_ns;
     if (!due && (every == 0 || ++periodic_draws < every)) return;
+    if (hold) [[unlikely]] {
+        if (!periodic_held) {
+            periodic_held = true;
+            Common::Perf::Add(Common::Perf::SubmitsHeldOcclusion);
+        }
+        return;
+    }
     scheduler.Flush();
     periodic_tick = scheduler.CurrentTick();
     periodic_draws = 0;
     periodic_start_ns = interval_ns ? Common::Perf::NowNs() : 0;
+    periodic_held = false;
 }
 bool WritesFeedbackRecord(const Shader::Info& stage) {
     if(!EarlyFeedbackEnabled())return false;
@@ -687,6 +733,13 @@ void OcclusionQueries::BeginSegment(const CommandRecorder& cmdbuf) {
     query_ticks[query] = scheduler.CurrentTick();
     cmdbuf.beginQuery(*pool, query, control_flags);
     segments.push_back(query);
+    // A query with more segments than counter pairs is emulated at its end dump: marked now, so
+    // that it no longer holds the periodic submits (AtSegmentLimit).
+    for (OpenQuery& q : open) {
+        if (segments.size() - q.first_segment > q.max_segments) {
+            q.incomplete = true;
+        }
+    }
     active = true;
 }
 
@@ -1353,11 +1406,8 @@ void Rasterizer::BindPipelineLazy(Scheduler& on, vk::PipelineBindPoint bind_poin
     });
 }
 
-// Linux host (gpu_host.cpp): draws recorded so far, for the scripted routes' gameplay check.
-std::atomic<u64> g_iss_total_draws{0};
 std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
                              std::span<const u32> following_commands, std::size_t native_packet_budget) {
-    g_iss_total_draws.fetch_add(1, std::memory_order_relaxed);
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::Draw};
     ObserveNativeVisualDraw();
     if (g_draw_cycles.enabled) g_draw_cycles.Mark(13);
@@ -1366,7 +1416,7 @@ std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
     const bool pass_learn = native_pass_learn != 0 && !pipelined;
     // Pause guard (pause_guard.h): in the pause every native/fast path below is off.
     const bool native_off = pass_learn || iss::pause_guard::Blocked();
-    if(!pipelined){DrainDrawPipe(5);SubmitFeedbackBatch(scheduler);PeriodicSubmit(scheduler);}
+    if(!pipelined){DrainDrawPipe(5);SubmitFeedbackBatch(scheduler);PeriodicSubmit(scheduler,occlusion.AtSegmentLimit());}
     iss::diagnostics::Scope phase_scope(iss::diagnostics::Draw);
     RENDERER_TRACE;
 
@@ -4258,7 +4308,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                         warning = {stage.pgm_hash, vsharp.GetSize(), size, 0};
                     }
                     const u64 count = ++warning.count;
-                    if (log_all || (count & (count - 1)) == 0) {
+                    // ISS_MINIMAL_LOGS: counted (BUFFER_CLAMP_LINES every 5 s) after 32 lines;
+                    // the requested size of a recurring descriptor varies, so each is "repeat 1".
+                    static iss::minimal_logs::Summary clamp_log{"BUFFER_CLAMP_LINES", nullptr, 32};
+                    if ((log_all || (count & (count - 1)) == 0) &&
+                        Common::Log::ShouldLog(Common::Log::Class::Render, Common::Log::Level::Error) &&
+                        (!iss::minimal_logs::Enabled() || clamp_log.Note(0))) {
                         LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x} (repeat {})",
                                   vsharp.GetSize(), size, stage.pgm_hash, count);
                     }
@@ -4398,6 +4453,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         ++binding.buffer;
     }
 }
+
+namespace {
+/// The gc tick + 1 at which each entry of the graphics sampler memo last touched the sampler LRU
+/// (BindTextures, command processor). The ASC recorder's memo does not touch: the texture cache
+/// is not its to call.
+u64& SamplerMemoTouchTick(std::ptrdiff_t entry) {
+    static std::array<u64, 1024> ticks{};
+    return ticks[static_cast<size_t>(entry) & 1023];
+}
+} // Anonymous namespace
 
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::BindTex};
@@ -4762,6 +4827,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             if (sampler_memo->key == sampler_key &&
                 sampler_memo->generation == texture_cache.SamplersGeneration()) {
                 vk_sampler = sampler_memo->sampler;
+                // A hit never touched the sampler LRU: once the collector may run, the samplers
+                // used most were its first victims (R4-1). Near its trigger, the first hit of
+                // each entry in a gc tick takes the cache path, which touches the sampler.
+                if (texture_cache.SamplerTouchesWanted() && !ComputeBindingsActive() &&
+                    SamplerMemoTouchTick(sampler_memo - sampler_memos.data()) !=
+                        texture_cache.GcTick() + 1) {
+                    vk_sampler = VK_NULL_HANDLE;
+                }
             }
         }
         if (!vk_sampler) {
@@ -4773,6 +4846,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                     .generation = texture_cache.SamplersGeneration(),
                     .sampler = vk_sampler,
                 };
+                if (!ComputeBindingsActive()) {
+                    SamplerMemoTouchTick(sampler_memo - sampler_memos.data()) =
+                        texture_cache.GcTick() + 1;
+                }
             }
         }
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
@@ -5517,6 +5594,21 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     return true;
 }
 
+void Rasterizer::DiscardOverwrite(VAddr addr, u64 size) {
+    const VAddr lo = Common::AlignUp(addr, VideoCore::BYTES_PER_PAGE);
+    const VAddr hi = Common::AlignDown(addr + size, VideoCore::BYTES_PER_PAGE);
+    if (lo >= hi) return;
+    // Left to the write faults: the G4 split (paused readback path), the command processor's own
+    // writes, memory not GPU mapped or without GPU data.
+    if (cp_split_enabled && liverpool->CpSplitActive()) return;
+    if (liverpool->IsCurrentCpThread()) return;
+    if (!IsMapped(lo, hi - lo) || !buffer_cache.IsRegionGpuModified(lo, hi - lo)) return;
+    BumpBindEpoch();
+    DrainDrawPipe(5);
+    buffer_cache.DiscardOverwrite(lo, hi - lo);
+    texture_cache.InvalidateMemory(lo, hi - lo);
+}
+
 void Rasterizer::BeforeGpuThreadWrite(VAddr addr, u64 size) {
     BumpBindEpoch();
     if (!size) return;
@@ -5691,9 +5783,24 @@ void Rasterizer::AscBeforeComputeWork(u32 vqid) {
 
 bool Rasterizer::AscRelease(u32 vqid, VAddr dst, u32 bytes, std::optional<u32> value, bool irq,
                             Common::UniqueFunction<void>&& write) {
+    // Without unified memory (the Windows default) the label is written when the command
+    // processor parses the release (the caller's immediate path): a compute-queue write deferred
+    // to compute_scheduler's priority operations would run after the graphics-path writes of the
+    // same ring that the command processor makes later, at parse time. A newer value of a
+    // monotonic guest fence written at parse time could then be overwritten by an older deferred
+    // one, and the guest that waits for the newer value spins forever (ISS_ASC_NATIVE_QUEUE=1 hang).
+    if (!iss::unified::enabled) return false;
     if (!compute_scheduler || !AscQueueEnabled() || vqid >= g_asc.last.size() ||
         g_asc.last[vqid] != 1)
         return false;
+    static const bool warned = [] {
+        // With unified memory the graphics-path labels are deferred too (DeferUnifiedFence), but
+        // to the graphics scheduler: the two queues' label writes of one ring are not ordered.
+        std::fprintf(stderr, "PORT_TUNING asc_native_queue=1 with unified memory: label writes of "
+                             "the compute and graphics queues are not ordered against each other\n");
+        return true;
+    }();
+    (void)warned;
     // The compute queue's writes to the unified heap reach the host before the label.
     const vk::MemoryBarrier2 barrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,

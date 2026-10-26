@@ -27,11 +27,20 @@ typedef struct {
     /* Set before isa_rewrite_apply: a JMP_RELOCATE stub runs its relocated instruction 128 bytes
      * below the guest rsp when that instruction can fault (IsaSite.mem_flags & ISA_MEM_RELOCATED_FAULTABLE). */
     int protect_red_zone;
+    /* Set before isa_rewrite_apply: the stubs do not count hits (no shared hits[] writes from
+     * every thread); the report says "off". 0, the zero-initialized default, counts. */
+    int no_hits;
+    /* Set before isa_rewrite_apply (TLG_EXTRQ_INLINE=1): SSE4A sites whose result an SSE2 sequence
+     * can compute (EXTRQ with a register control and distinct registers, EXTRQ and INSERTQ with
+     * immediates) get an inline stub instead of the isa_emulate_sse4a call. Same results (upper
+     * qword zeroed, as AMD hardware does); GPRs, flags and every other XMM/YMM bit kept. */
+    int inline_sse4a;
 } IsaTable;
 enum { ISA_MEM_RELOCATED_FAULTABLE = 2 };
 typedef struct { uint32_t groups, protected_instructions, short_relays, skipped; } IsaRedZoneReport;
-/* rewritten = jmp + relocated + int3; skipped and unsupported_needed are outside it. */
-typedef struct { uint32_t rewritten, jmp, relocated, int3, skipped, unsupported_needed; } IsaReport;
+/* rewritten = jmp + relocated + int3; skipped and unsupported_needed are outside it. inlined: the
+ * jmp/relocated SSE4A sites with an inline stub (IsaTable.inline_sse4a). */
+typedef struct { uint32_t rewritten, jmp, relocated, int3, skipped, unsupported_needed, inlined; } IsaReport;
 enum { ISA_STUB_BYTES = 256 };
 
 /* Parses a G3ISA1 file (spec 4.4). NULL and one stderr line ("ISA: <reason>") when invalid. */
@@ -61,7 +70,8 @@ IsaRedZoneReport isa_red_zone_apply(IsaTable *t, unsigned char *image, unsigned 
 /* 1 and *site (image offset of the protected instruction) when rip is inside an applied red-zone stub. */
 int isa_red_zone_site_of_stub(const IsaTable *t, uintptr_t rip, uint64_t *site);
 /* "ISA: most executed sites:" then up to 10 lines "  0x<offset> <mnemonic> <hits>" (hits > 0 only),
- * descending hits, ties by ascending offset. */
+ * descending hits, ties by ascending offset; " none" when no site was hit, " off (...)" when
+ * no_hits is set. */
 void isa_rewrite_report(const IsaTable *t, FILE *out);
 /* "movbe", "lzcnt", "tzcnt", "andn", "bextr", "blsi", "blsmsk", "blsr", "vcvtph2ps", "vcvtps2ph", "extrq",
  * "insertq", "movntss", "movntsd"; "?" otherwise. */

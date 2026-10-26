@@ -610,7 +610,7 @@ static uint32_t sample_mouse(PadData *d, bool aiming_can, const bool *k) {
     load_pad_mode();
     if (!was_captured) { m.dx=m.dy=0; was_captured=true; } /* motion from before the game read the pad */
     ++mouse_samples;
-    const MouseStickParams p={in.sensitivity,in.smoothing,in.accel,in.deadzone,in.invert_y};
+    const MouseStickParams p={in.sensitivity,in.smoothing,in.accel,in.deadzone,in.invert_y,in.vertical};
     const uint32_t raw=m.held|m.pressed;
     /* Touchpad mode: the mode key (a keyboard key or a mouse button). */
     bool key_down=false;
@@ -933,15 +933,22 @@ static void replay_sample(PadData *d) {
             }
             if (f) fclose(f);
             printf("Runtime: pad replay of %zu samples from %s\n",replay_count,path ? path : "(unset)");
+            if (!replay_count) printf("Runtime: pad replay file empty or missing (%s)\n",path ? path : "TLG_PAD_REPLAY unset");
+        }
+        /* Nothing to play: ended at once, without a benchmark window that would never close. */
+        if (!replay_count) {
+            if (replay_armed==1) puts("Runtime: pad replay finished"); /* waiters on this line stop now */
+            replay_armed=2; return;
         }
         replay_start=now_us();
         replay_next=0;
+        tlggpu_bench_mark(0); /* the route is the benchmark window (renderer v2's "Bench:" line) */
     }
     const uint32_t ms=(uint32_t)((now_us()-replay_start)/1000);
     while (replay_next<replay_count && replay[replay_next].ms<=ms) ++replay_next;
     if (!replay_next) return;
     if (replay_next==replay_count && ms>replay[replay_count-1].ms+500) {
-        if (replay_armed==1) { puts("Runtime: pad replay finished"); replay_armed=2; }
+        if (replay_armed==1) { puts("Runtime: pad replay finished"); replay_armed=2; tlggpu_bench_mark(1); }
         return;
     }
     const PadSample *s=&replay[replay_next-1];

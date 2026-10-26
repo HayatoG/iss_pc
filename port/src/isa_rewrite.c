@@ -275,6 +275,16 @@ static size_t emit_return(unsigned char *code, unsigned char *p, const unsigned 
     return (size_t)(p - code);
 }
 
+/* mov rax, hit; inc qword [rax] (13 bytes): the site's hit count. Nothing when hit is NULL
+ * (IsaTable.no_hits): the stub is 13 bytes shorter, and rax is saved before and restored after
+ * either way. */
+static void emit_hit(unsigned char **p, uint64_t *hit) {
+    if (!hit) return;
+    emit_bytes(p, (const uint8_t[]){0x48, 0xb8}, 2);                       /* mov rax, &hits[i] */
+    emit_u64(p, (uint64_t)(uintptr_t)hit);
+    emit_bytes(p, (const uint8_t[]){0x48, 0xff, 0x00}, 3);                 /* inc qword [rax] */
+}
+
 /* SSE4A stub: the operands are XMM registers, which isa_emulate's IsaRegs does not carry. It steps
  * over the red zone, saves rflags (then clears DF for the C call) and the registers the SysV ABI
  * lets isa_emulate_sse4a clobber, copies the destination and source XMM to a 32-byte buffer, calls
@@ -292,9 +302,7 @@ static size_t emit_sse4a_stub(unsigned char *code, const unsigned char *at, cons
     emit_bytes(&p, (const uint8_t[]){0x48, 0x8d, 0x64, 0x24, 0xe0}, 5);   /* lea rsp,[rsp-0x20] */
     emit_movdqu_rsp(&p, 1, s->dst, 0);
     if (s->src1 != ISA_NO_REG) emit_movdqu_rsp(&p, 1, s->src1, 16);
-    emit_bytes(&p, (const uint8_t[]){0x48, 0xb8}, 2);                      /* mov rax, &hits[i] */
-    emit_u64(&p, (uint64_t)(uintptr_t)hit);
-    emit_bytes(&p, (const uint8_t[]){0x48, 0xff, 0x00}, 3);                /* inc qword [rax] */
+    emit_hit(&p, hit);
     emit_bytes(&p, (const uint8_t[]){0x48, 0x89, 0xe5}, 3);                /* mov rbp, rsp */
     emit_bytes(&p, (const uint8_t[]){0x48, 0x83, 0xe4, 0xf0}, 4);          /* and rsp, -16 */
     emit_bytes(&p, (const uint8_t[]){0x48, 0xbf}, 2);                      /* mov rdi, site */
@@ -310,6 +318,117 @@ static size_t emit_sse4a_stub(unsigned char *code, const unsigned char *at, cons
     emit_u8(&p, 0x9d);                                                     /* popfq */
     emit_bytes(&p, (const uint8_t[]){0x48, 0x8d, 0xa4, 0x24, 0x80, 0x00, 0x00, 0x00}, 8); /* lea rsp,[rsp+0x80] */
     return emit_return(code, p, at, s, image, protect);
+}
+
+/* ---- inline SSE4A (TLG_EXTRQ_INLINE=1) ---- */
+
+/* Two 16-byte constants at the end of an inline stub's slot (the slot is 16-aligned, the legacy
+ * SSE memory operands need it); the code must end before them. */
+enum { INLINE_CONST_AT = ISA_STUB_BYTES - 32 };
+
+/* Legacy SSE xmm, xmm: <prefix> [REX] 0F <op> modrm(11 reg rm). */
+static void emit_sse_rr(unsigned char **p, uint8_t prefix, uint8_t op, int reg, int rm) {
+    emit_u8(p, prefix);
+    if (reg >= 8 || rm >= 8) emit_u8(p, (uint8_t)(0x40 | (reg >= 8) << 2 | (rm >= 8)));
+    emit_bytes(p, (const uint8_t[]){0x0f, op, (uint8_t)(0xc0 | (reg & 7) << 3 | (rm & 7))}, 3);
+}
+/* psrlq (ext 2) / psllq (ext 6) xmm, imm8: 66 [REX.B] 0F 73 /ext ib. A zero count emits nothing. */
+static void emit_shift_imm(unsigned char **p, int ext, int xmm, unsigned count) {
+    if (!count) return;
+    emit_u8(p, 0x66);
+    if (xmm >= 8) emit_u8(p, 0x41);
+    emit_bytes(p, (const uint8_t[]){0x0f, 0x73, (uint8_t)(0xc0 | ext << 3 | (xmm & 7)), (uint8_t)count}, 4);
+}
+/* 66 [REX.R] 0F <op> xmm, [rip+rel32] reading the stub constant at code offset `slot`. */
+static void emit_sse_const(unsigned char **p, unsigned char *code, uint8_t op, int xmm, size_t slot) {
+    emit_u8(p, 0x66);
+    if (xmm >= 8) emit_u8(p, 0x44);
+    emit_bytes(p, (const uint8_t[]){0x0f, op, (uint8_t)(0x05 | (xmm & 7) << 3)}, 3);
+    emit_u32(p, (uint32_t)(int32_t)((intptr_t)slot - (intptr_t)(*p + 4 - code)));
+}
+enum { SSE_PAND = 0xdb, SSE_PANDN = 0xdf, SSE_POR = 0xeb, SSE_PADDQ = 0xd4, SSE_PSRLQ = 0xd3, SSE_PSLLQ = 0xf3,
+       SSE_MOVDQA = 0x6f, SHIFT_RIGHT = 2, SHIFT_LEFT = 6 };
+
+static const uint8_t lea_rsp_below_inline[] = {0x48, 0x8d, 0xa4, 0x24, 0x70, 0xff, 0xff, 0xff};   /* lea rsp,[rsp-0x90] */
+static const uint8_t lea_rsp_above_inline[] = {0x48, 0x8d, 0xa4, 0x24, 0x90, 0x00, 0x00, 0x00};   /* lea rsp,[rsp+0x90] */
+
+/* 1 when the inline stub computes this site: EXTRQ imm, INSERTQ imm, EXTRQ xmm, xmm with distinct
+ * registers (inFAMOUS 1.07: all 96 SSE4A sites are this form). INSERTQ with a register control (a
+ * variable mask) and EXTRQ xmmN, xmmN stay on the C stub. */
+static int sse4a_inlinable(const IsaSite *s) {
+    if (s->dst >= 16) return 0;
+    if (s->kind == ISA_EXTRQ_IMM) return 1;
+    if (s->kind == ISA_INSERTQ_IMM) return s->src1 < 16;
+    if (s->kind == ISA_EXTRQ) return s->src1 < 16 && s->src1 != s->dst;   /* d >>= index would clobber the control */
+    return 0;
+}
+
+/* Inline SSE4A stub. Only shifts, logic and moves on XMM registers: rflags and the GPRs stay as
+ * they are (the hit count, when on, saves both around its inc). A scratch XMM register (the
+ * lowest one the site does not use) goes to [guest rsp - 0x90] with rsp moved below the red zone
+ * first, and comes back whole; legacy SSE leaves bits 255:128 of every YMM register alone, as
+ * EXTRQ does. The low qword gets what isa_emulate_sse4a computes, the high qword is zeroed (AMD
+ * hardware does this; the APM leaves it undefined):
+ *   EXTRQ imm   d = (d >> index) << s >> s, s = (64 - length) & 63 (length 0 = 64: s = 0)
+ *   EXTRQ xmm   the same with index = src[13:8] and s = (~src + 1) & 63 = (64 - src[5:0]) & 63,
+ *               both computed in the scratch (psrlq/psllq by register take its low qword)
+ *   INSERTQ imm d = (d & ~M) | ((src << index) & M), M = field mask << index cut at bit 63
+ * and the field cut at bit 63 when index + length > 64 follows from the shifts. Returns 0 when
+ * the code would reach the constants or the jmp back is out of range. */
+static size_t emit_sse4a_inline_stub(unsigned char *code, const unsigned char *at, const IsaSite *s, uint64_t *hit,
+                                     unsigned char *image, int protect) {
+    const int d = s->dst, src = s->src1, scratch_needed = s->kind != ISA_EXTRQ_IMM;
+    int t = 0;
+    while (t == d || t == src) t++;
+    memset(code, 0xcc, ISA_STUB_BYTES);
+    unsigned char *p = code;
+    if (scratch_needed || hit) emit_bytes(&p, lea_rsp_below_inline, sizeof lea_rsp_below_inline);
+    if (hit) {
+        emit_u8(&p, 0x9c);                                                 /* pushfq */
+        emit_u8(&p, 0x50);                                                 /* push rax */
+        emit_hit(&p, hit);
+        emit_u8(&p, 0x58);                                                 /* pop rax */
+        emit_u8(&p, 0x9d);                                                 /* popfq */
+    }
+    if (scratch_needed) emit_movdqu_rsp(&p, 1, t, 0);                     /* movdqu [rsp], scratch */
+    uint64_t c0[2] = {0, 0}, c1[2] = {0, 0};
+    const unsigned length = (unsigned)s->disp & 63, index = (unsigned)(s->disp >> 8) & 63;
+    if (s->kind == ISA_EXTRQ_IMM) {
+        const unsigned keep = (64 - length) & 63;
+        emit_shift_imm(&p, SHIFT_RIGHT, d, index);
+        emit_shift_imm(&p, SHIFT_LEFT, d, keep);
+        emit_shift_imm(&p, SHIFT_RIGHT, d, keep);
+    } else if (s->kind == ISA_EXTRQ) {
+        c0[0] = 63;
+        c1[0] = 1;
+        emit_sse_rr(&p, 0x66, SSE_MOVDQA, t, src);                         /* t = src */
+        emit_shift_imm(&p, SHIFT_RIGHT, t, 8);
+        emit_sse_const(&p, code, SSE_PAND, t, INLINE_CONST_AT);            /* t = index */
+        emit_sse_rr(&p, 0x66, SSE_PSRLQ, d, t);                            /* d >>= index */
+        emit_sse_rr(&p, 0x66, SSE_MOVDQA, t, src);
+        emit_sse_const(&p, code, SSE_PANDN, t, INLINE_CONST_AT);           /* t = 63 - length */
+        emit_sse_const(&p, code, SSE_PADDQ, t, INLINE_CONST_AT + 16);      /* t = 64 - length */
+        emit_sse_const(&p, code, SSE_PAND, t, INLINE_CONST_AT);            /* t = (64 - length) & 63 */
+        emit_sse_rr(&p, 0x66, SSE_PSLLQ, d, t);
+        emit_sse_rr(&p, 0x66, SSE_PSRLQ, d, t);
+    } else {   /* INSERTQ imm */
+        const uint64_t mask = (length == 0 ? ~0ull : (1ull << length) - 1) << index;
+        c0[0] = mask;
+        c1[0] = ~mask;
+        emit_sse_rr(&p, 0x66, SSE_MOVDQA, t, src);                         /* t = src */
+        emit_shift_imm(&p, SHIFT_LEFT, t, index);
+        emit_sse_const(&p, code, SSE_PAND, t, INLINE_CONST_AT);            /* t = (src << index) & M */
+        emit_sse_const(&p, code, SSE_PAND, d, INLINE_CONST_AT + 16);       /* d &= ~M */
+        emit_sse_rr(&p, 0x66, SSE_POR, d, t);
+    }
+    emit_sse_rr(&p, 0xf3, 0x7e, d, d);                                     /* movq d, d: high qword = 0 */
+    if (scratch_needed) emit_movdqu_rsp(&p, 0, t, 0);                     /* movdqu scratch, [rsp] */
+    if (scratch_needed || hit) emit_bytes(&p, lea_rsp_above_inline, sizeof lea_rsp_above_inline);
+    size_t size = emit_return(code, p, at, s, image, protect);
+    if (size == 0 || size > INLINE_CONST_AT) return 0;
+    memcpy(code + INLINE_CONST_AT, c0, 16);
+    memcpy(code + INLINE_CONST_AT + 16, c1, 16);
+    return ISA_STUB_BYTES;
 }
 
 /* vmovdqu [rsp+disp8], ymm (store, VEX.256.F3.0F 7F) or vmovdqu ymm, [rsp+disp8] (load, 6F): C5 {R̄ 1111 1 10}
@@ -343,9 +462,7 @@ static size_t emit_f16c_stub(unsigned char *code, const unsigned char *at, const
     emit_u8(&p, 0xfc);                                                     /* cld */
     emit_bytes(&p, (const uint8_t[]){0x48, 0x8d, 0x64, 0x24, 0xc0}, 5);   /* lea rsp,[rsp-0x40]: the buffer */
     if (s->src1 != ISA_NO_REG) emit_vmovdqu_rsp(&p, 1, s->src1, 0x20);
-    emit_bytes(&p, (const uint8_t[]){0x48, 0xb8}, 2);                      /* mov rax, &hits[i] */
-    emit_u64(&p, (uint64_t)(uintptr_t)hit);
-    emit_bytes(&p, (const uint8_t[]){0x48, 0xff, 0x00}, 3);                /* inc qword [rax] */
+    emit_hit(&p, hit);
     emit_bytes(&p, (const uint8_t[]){0x48, 0x89, 0xe5}, 3);                /* mov rbp, rsp */
     emit_bytes(&p, (const uint8_t[]){0x48, 0x83, 0xe4, 0xf0}, 4);          /* and rsp, -16 */
     emit_bytes(&p, (const uint8_t[]){0x48, 0xbf}, 2);                      /* mov rdi, site */
@@ -369,10 +486,18 @@ static size_t emit_f16c_stub(unsigned char *code, const unsigned char *at, const
 /* Writes the stub for `s` into `code` (laid out to run at `at`). Returns its size, or 0 when the
  * jmp back is out of rel32 range. */
 static size_t emit_stub(unsigned char *code, const unsigned char *at, const IsaSite *s, uint64_t *hit,
-                        unsigned char *image, int protect) {
+                        unsigned char *image, int protect, int inline_sse4a, int *inlined) {
     static const uint8_t lea_rsp_down[] = {0x48, 0x8d, 0xa4, 0x24, 0x00, 0xff, 0xff, 0xff};   /* lea rsp,[rsp-0x100] */
     static const uint8_t lea_rax_rsp_up[] = {0x48, 0x8d, 0x84, 0x24, 0x00, 0x01, 0x00, 0x00}; /* lea rax,[rsp+0x100] */
     static const uint8_t lea_rsp_up[] = {0x48, 0x8d, 0xa4, 0x24, 0x00, 0x01, 0x00, 0x00};     /* lea rsp,[rsp+0x100] */
+    *inlined = 0;
+    if (inline_sse4a && sse4a_inlinable(s) && ((uintptr_t)at & 15) == 0) {
+        size_t size = emit_sse4a_inline_stub(code, at, s, hit, image, protect);
+        if (size) {
+            *inlined = 1;
+            return size;
+        }
+    }
     if (isa_kind_is_sse4a(s->kind)) return emit_sse4a_stub(code, at, s, hit, image, protect);
     if (isa_kind_is_f16c(s->kind)) return emit_f16c_stub(code, at, s, hit, image, protect);
     unsigned char *p = code;
@@ -382,9 +507,7 @@ static size_t emit_stub(unsigned char *code, const unsigned char *at, const IsaS
     emit_bytes(&p, lea_rax_rsp_up, sizeof lea_rax_rsp_up);
     emit_mov_store(&p, 0, 8 * 4);                                   /* gpr[4] = guest rsp */
     emit_u8(&p, 0x9c);                                              /* pushfq: rsp = IsaRegs* */
-    emit_bytes(&p, (const uint8_t[]){0x48, 0xb8}, 2);               /* mov rax, &hits[i] */
-    emit_u64(&p, (uint64_t)(uintptr_t)hit);
-    emit_bytes(&p, (const uint8_t[]){0x48, 0xff, 0x00}, 3);         /* inc qword [rax] */
+    emit_hit(&p, hit);
     emit_bytes(&p, (const uint8_t[]){0x48, 0x89, 0xe5}, 3);         /* mov rbp, rsp */
     emit_bytes(&p, (const uint8_t[]){0x48, 0x83, 0xe4, 0xf0}, 4);   /* and rsp, -16 */
     emit_bytes(&p, (const uint8_t[]){0x48, 0xbf}, 2);               /* mov rdi, site */
@@ -448,7 +571,10 @@ IsaReport isa_rewrite_apply(IsaTable *t, unsigned char *image, unsigned char *st
         unsigned char code[2 * ISA_STUB_BYTES];
         int32_t rel;
         size_t size;
-        if (!rel32_to(site + JMP_BYTES, stub, &rel) || (size = emit_stub(code, stub, s, &t->hits[i], image, t->protect_red_zone)) == 0) {
+        int inlined = 0;
+        if (!rel32_to(site + JMP_BYTES, stub, &rel) ||
+            (size = emit_stub(code, stub, s, t->no_hits ? NULL : &t->hits[i], image, t->protect_red_zone,
+                              t->inline_sse4a, &inlined)) == 0) {
             fprintf(stderr, "ISA: site 0x%llx out of rel32 range\n", (unsigned long long)s->offset);
             report.skipped++;
             continue;
@@ -464,6 +590,7 @@ IsaReport isa_rewrite_apply(IsaTable *t, unsigned char *image, unsigned char *st
         if (s->mode == ISA_MODE_JMP) report.jmp++;
         else report.relocated++;
         report.rewritten++;
+        report.inlined += (uint32_t)inlined;
     }
     return report;
 }
@@ -559,7 +686,7 @@ int isa_rewrite_trap(IsaTable *t, uintptr_t address, IsaRegs *regs, void *xmm, u
     } else {
         isa_emulate(s, regs);
     }
-    t->hits[lo]++;
+    if (!t->no_hits) t->hits[lo]++;
     *next_rip = address + t->sites[lo].length;
     return 1;
 }
@@ -583,6 +710,16 @@ static int ranks_before(const IsaTable *t, uint32_t a, uint32_t b) {
 }
 
 void isa_rewrite_report(const IsaTable *t, FILE *out) {
+    if (t->no_hits) {
+        fprintf(out, "ISA: most executed sites: off (ISS_RUNTIME_COUNTERS=1 to count)\n");
+        return;
+    }
+    uint32_t hit = 0;
+    while (hit < t->count && t->hits[hit] == 0) hit++;
+    if (hit == t->count) {
+        fprintf(out, "ISA: most executed sites: none\n");
+        return;
+    }
     fprintf(out, "ISA: most executed sites:\n");
     int64_t prev = -1;   /* last printed site; each pass takes the best one ranked after it */
     for (int line = 0; line < 10; line++) {

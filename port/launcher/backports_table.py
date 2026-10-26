@@ -250,8 +250,9 @@ DIAGNOSTICS = [
         broken=True),
     # Windows default: renderer v2 with its native passes (RTX 3060 + Ryzen 5 5500 / 4600G, 2026-10-21:
     # 11-20 FPS in gameplay with the previous v2 defaults, ~40-45 FPS with native passes and
-    # gpu_v2/defaults.env's unified memory off). Linux keeps this port's renderer: native passes
-    # crash NVIDIA's Linux driver.
+    # unified memory off: the v2_unified_memory switch below, whose value replaces
+    # gpu_v2/defaults.env's ISS_UNIFIED_MEMORY=1 in launcher runs). Linux keeps this port's
+    # renderer: native passes crash NVIDIA's Linux driver.
     _ab_choice('renderer', 'TLG_RENDERER', '2' if _WINDOWS else '1',
                (('1', '1 · This port\'s renderer', '1 · Renderer deste port'),
                 ('2', '2 · Renderer v2 (experimental)', '2 · Renderer v2 (experimental)')),
@@ -314,6 +315,39 @@ DIAGNOSTICS = [
 import advanced_table  # noqa: E402
 
 ADVANCED = advanced_table.build(_make)
+
+# Rows whose variable nothing in renderer v2 (port/gpu_v2) or the shared runtime (port/src) reads:
+# they only change this port's renderer, and their names say so. tests/test_launch_env_v2.py
+# checks this list against the sources. (The launcher's own GPU accuracy / read-ahead / write
+# merge settings are marked the same way in infamous_launcher.py TEXT.)
+NO_EFFECT_V2 = frozenset([f'BP{n:02d}' for n in range(1, 13)] + [
+    'TLG_WQM', 'TLG_LDS_SMALL', 'TLG_LDS_MULTI', 'TLG_LDS_READLANE', 'TLG_LANE_DIVERGENCE', 'TLG_RFL_ALL',
+    'TLG_BLOCK1D', 'TLG_BC_TINY', 'TLG_NO_MSAA', 'TLG_ASYNC_SHADERS', 'TLG_DEFERRED_READBACK',
+    'TLG_STALE_READBACK', 'TLG_BACKGROUND_WARMUP', 'TLG_DRAIN_SLEEP', 'TLG_PIPELINE_BINARIES',
+    'TLG_OCCLUSION_MODE',
+    'TLG_FULL_BARRIERS', 'TLG_GPU_TIMESTAMP', 'TLG_GPU_TIMESTAMP_STEP_US', 'TLG_PRESENT_THREAD',
+    'TLG_VK_RECORD_THREAD', 'TLG_PREP_WORKERS', 'TLG_SUBMIT_DRAWS', 'TLG_PIPE_SPIN_US', 'TLG_PIPE_VERIFY',
+    'TLG_EAGER_READBACK', 'TLG_PARTIAL_HEIGHT_VIEWS', 'TLG_BACKING_INVALIDATE', 'TLG_FAST_READ_FAULT',
+    'TLG_READBACK_LINEAR', 'TLG_DOWNLOAD_WINDOW_KB', 'TLG_COPY_MERGE_KB', 'TLG_STAGING_KEEP_MB',
+    'TLG_STREAM_MEMORY', 'TLG_VARIANT_REUSE', 'TLG_HEAP_WARM', 'TLG_INDIRECT_CHECK', 'TLG_ASYNC_WAIT_MS',
+    'TLG_ASYNC_WAIT_FRAME_MS', 'TLG_DRIVER_CACHE_SAVE_S', 'TLG_PARALLEL_WARMUP', 'TLG_COMPUTE_ASYNC_BUILD',
+    'TLG_SQUARE_PASS', 'TLG_INTERP_INT_FIX', 'TLG_1D_NO_STORAGE', 'TLG_1D_NO_MUTABLE', 'TLG_EXPLICIT_RANGE',
+    'TLG_BARRIER_SPLIT', 'TLG_BARRIER_MERGE', 'TLG_PERF_DIAG', 'TLG_IMG_TRACE', 'TLG_BC1D_LOG',
+    'TLG_WAVE_STATS'])
+# Rows renderer v2 reads but the launcher does not pass to it (infamous_run.V2_DEFAULTS_WIN:
+# gpu_v2/defaults.env decides there); they get the same note.
+V2_DEFAULTS_WIN_IDS = frozenset(['TLG_DRAW_PIPE'])
+NO_EFFECT_V2_NOTE = (' (no effect in renderer v2)', ' (sem efeito no renderer v2)')
+
+
+def _note_no_effect_v2(items):
+    return [item._replace(name=(item.name[0] + NO_EFFECT_V2_NOTE[0], item.name[1] + NO_EFFECT_V2_NOTE[1]))
+            if item.id in NO_EFFECT_V2 | V2_DEFAULTS_WIN_IDS else item for item in items]
+
+
+BACKPORTS = _note_no_effect_v2(BACKPORTS)
+DIAGNOSTICS = _note_no_effect_v2(DIAGNOSTICS)
+ADVANCED = _note_no_effect_v2(ADVANCED)
 ITEMS = MENU + BACKPORTS + DIAGNOSTICS + ADVANCED
 PREFIX = 'ISS_'
 

@@ -57,6 +57,27 @@ static void model(uint8_t kind, uint64_t xmm[4], unsigned length, unsigned index
     isa_emulate_sse4a(&s, xmm);
 }
 
+/* An independent reference, bit by bit (AMD APM vol. 4): a field of length (0 = 64) bits at index,
+ * bits past 63 cut; the high qword zeroed as AMD hardware does. Register forms take the control
+ * from the source (EXTRQ: low qword, INSERTQ: high qword). */
+static void reference(uint8_t kind, uint64_t xmm[4], unsigned length, unsigned index) {
+    if (kind == ISA_EXTRQ || kind == ISA_INSERTQ) {
+        const uint64_t control = kind == ISA_EXTRQ ? xmm[2] : xmm[3];
+        length = control & 0xff;
+        index = control >> 8 & 0xff;
+    }
+    const unsigned bits = (length & 63) ? (length & 63) : 64;
+    index &= 63;
+    const int extract = kind == ISA_EXTRQ || kind == ISA_EXTRQ_IMM;
+    uint64_t r = extract ? 0 : xmm[0];
+    for (unsigned b = 0; b < bits && index + b < 64; b++) {
+        if (extract) r |= (xmm[0] >> (index + b) & 1) << b;
+        else r = (r & ~(1ull << (index + b))) | (xmm[2] >> b & 1) << (index + b);
+    }
+    xmm[0] = r;
+    xmm[1] = 0;
+}
+
 /* ---- the real instructions ---- */
 
 typedef void (ABI *Jit)(uint64_t *xmm);
@@ -140,7 +161,7 @@ static void compare_reg(uint8_t kind, const uint64_t in[4]) {
 }
 #endif
 
-static unsigned long long compared;
+static unsigned long long compared, reference_checked;
 
 static void test_against_cpu(void) {
 #ifdef __SSE4A__
@@ -217,6 +238,8 @@ __asm__(".text\n"
         "mov 80(%rsi), %r10\n mov 88(%rsi), %r11\n mov 96(%rsi), %r12\n mov 104(%rsi), %r13\n"
         "mov 112(%rsi), %r14\n mov 120(%rsi), %r15\n mov 48(%rsi), %rsi\n"
         "call *(%rsp)\n"
+        ".globl run_state_ret\n"
+        "run_state_ret:\n"                            /* [guest rsp] during the call */
         "pushfq\n"
         "xchg %rsi, 16(%rsp)\n"                       /* rsi = state, slot = the guest's rsi */
         "mov %rax, 0(%rsi)\n mov %rcx, 8(%rsi)\n mov %rdx, 16(%rsi)\n mov %rbx, 24(%rsi)\n"
@@ -302,31 +325,92 @@ static void random_state(State *s) {
         }
 }
 
-/* Expected state when the CPU cannot run the original: the model on dst's low 128 bits; the
- * relocated lea adds 1 to rax. */
+extern char run_state_ret[];
+
+/* The relocated instruction after a 4-byte site (run_site's `follower`): it runs from the stub, after
+ * the emulation, so it sees what the stub left in rsp, the flags and the other XMM registers. */
+enum { FOLLOW_LEA, FOLLOW_RSP_LOAD, FOLLOW_MOVD_SCRATCH, FOLLOW_SETC, FOLLOW_LEA_15, FOLLOWERS };
+/* The XMM register the inline stub spills: the lowest one the site does not use. */
+static int scratch_of(int dst, int src) {
+    int t = 0;
+    while (t == dst || t == src) t++;
+    return t;
+}
+/* Encodes the follower; returns its length. */
+static size_t encode_follower(uint8_t *out, int follower, int scratch) {
+    static const uint8_t lea[] = {0x48, 0x8d, 0x40, 0x01};                  /* lea rax, [rax+1] */
+    static const uint8_t rsp_load[] = {0x48, 0x8b, 0x04, 0x24};             /* mov rax, [rsp] */
+    static const uint8_t setc[] = {0x0f, 0x92, 0xc0};                       /* setc al */
+    static const uint8_t lea15[] = {0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x2e, 0x48, 0x8d, 0x84, 0x00,
+                                    0x01, 0x00, 0x00, 0x00};                /* lea rax, [rax+rax+1], 15 bytes */
+    switch (follower) {
+    case FOLLOW_LEA: memcpy(out, lea, sizeof lea); return sizeof lea;
+    case FOLLOW_RSP_LOAD: memcpy(out, rsp_load, sizeof rsp_load); return sizeof rsp_load;
+    case FOLLOW_MOVD_SCRATCH:                                               /* movd eax, xmm<scratch> */
+        assert(scratch < 8);
+        memcpy(out, (const uint8_t[]){0x66, 0x0f, 0x7e, (uint8_t)(0xc0 | scratch << 3)}, 4);
+        return 4;
+    case FOLLOW_SETC: memcpy(out, setc, sizeof setc); return sizeof setc;
+    default: memcpy(out, lea15, sizeof lea15); return sizeof lea15;
+    }
+}
+/* scripts/isa_rewrite.py: a faultable follower that does not use rsp runs 128 bytes below the guest
+ * rsp when red-zone protection is on. The flag is forced on every follower but the rsp one, so the
+ * wrapped path runs whatever the instruction. */
+static int follower_wrappable(int follower) { return follower != FOLLOW_RSP_LOAD; }
+
+/* Expected state when the CPU cannot run the original: the model on dst's low 128 bits, then the
+ * follower (-1: none). */
 static void expected_by_model(State *s, uint8_t kind, int dst, int src, unsigned length, unsigned index,
-                              int relocated) {
+                              int follower) {
     uint64_t xmm[4];
     memcpy(xmm, s->ymm[dst], 16);
     if (src >= 0) memcpy(xmm + 2, s->ymm[src], 16);
+    uint64_t ref[4];
+    memcpy(ref, xmm, sizeof ref);
     model(kind, xmm, length, index);
+    reference(kind, ref, length, index);
+    assert(memcmp(ref, xmm, 16) == 0);   /* the model and the bitwise reference agree */
+    reference_checked++;
     memcpy(s->ymm[dst], xmm, 16);
-    if (relocated) s->gpr[0]++;
+    uint32_t low;
+    switch (follower) {
+    case FOLLOW_LEA: s->gpr[0]++; break;
+    case FOLLOW_RSP_LOAD: s->gpr[0] = (uint64_t)(uintptr_t)run_state_ret; break;
+    case FOLLOW_MOVD_SCRATCH:
+        memcpy(&low, s->ymm[scratch_of(dst, src)], 4);
+        s->gpr[0] = low;
+        break;
+    case FOLLOW_SETC: s->gpr[0] = (s->gpr[0] & ~0xffull) | (s->rflags & 1); break;
+    case FOLLOW_LEA_15: s->gpr[0] = 2 * s->gpr[0] + 1; break;
+    default: break;
+    }
     for (int i = 0; i < 16; i++) s->red_zone[i] = 0x5a5a5a5a5a5a5a5aull;
 }
 
 static unsigned sites_run[4];   /* by mode */
+/* run_site options: inline_on sets IsaTable.inline_sse4a (TLG_EXTRQ_INLINE=1), counters_off sets
+ * no_hits (the default in game: ISS_RUNTIME_COUNTERS=0). random_control: every round gets a control
+ * word with any length and index (index + length > 64 and length 0 included). */
+static int inline_on, counters_off, random_control;
+/* follower: the relocated instruction (FOLLOW_*); protect_on sets IsaTable.protect_red_zone with
+ * ISA_MEM_RELOCATED_FAULTABLE on the wrappable followers. */
+static int follower = FOLLOW_LEA, protect_on;
+static unsigned inline_sites, followers_run[FOLLOWERS];
 
 static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned index, uint8_t mode, int rounds) {
-    static const uint8_t lea_rax[] = {0x48, 0x8d, 0x40, 0x01};   /* lea rax, [rax+1]: plain, 4 bytes */
-    uint8_t code[32];
+    uint8_t code[48], follow[16];
     size_t n = encode(code, kind, dst, src, length, index);
     const int relocated = mode == ISA_MODE_JMP_RELOCATE;
+    const int model_src = kind == ISA_EXTRQ_IMM ? -1 : src;
+    /* An int3 site runs the next instruction in place: the same follower, not relocated. */
+    const size_t follow_length = encode_follower(follow, follower, scratch_of(dst, model_src));
+    const int follows = relocated || mode == ISA_MODE_INT3;
     assert(mode == ISA_MODE_JMP ? n >= 5 : n == 4);
     size_t total = n;
-    if (relocated) {
-        memcpy(code + total, lea_rax, sizeof lea_rax);
-        total += sizeof lea_rax;
+    if (follows) {
+        memcpy(code + total, follow, follow_length);
+        total += follow_length;
     }
     code[total++] = 0xc3;
     memset(pristine, 0xcc, PAGE);
@@ -343,17 +427,35 @@ static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned i
     s.mode = mode;
     memcpy(s.original, code, n);
     if (relocated) {
-        s.relocated_length = sizeof lea_rax;
-        memcpy(s.relocated, lea_rax, sizeof lea_rax);
+        s.relocated_length = (uint8_t)follow_length;
+        memcpy(s.relocated, follow, follow_length);
+        if (protect_on && follower_wrappable(follower)) s.mem_flags |= ISA_MEM_RELOCATED_FAULTABLE;
     }
     memset(&t, 0, sizeof t);
+    t.protect_red_zone = protect_on;
     hits = 0;
     t.sites = &s;
     t.hits = &hits;
     t.count = 1;
     t.image_size = PAGE;
+    t.inline_sse4a = inline_on;
+    t.no_hits = counters_off;
     IsaReport r = isa_rewrite_apply(&t, image, stubs, CPU_SET_SSE4A);
     assert(r.rewritten == 1 && r.skipped == 0);
+    /* Inline: every jmp/relocated EXTRQ imm, INSERTQ imm and EXTRQ xmm, xmm (distinct registers). */
+    const int inlinable = inline_on && mode != ISA_MODE_INT3 &&
+                          (kind == ISA_EXTRQ_IMM || kind == ISA_INSERTQ_IMM || (kind == ISA_EXTRQ && dst != src));
+    assert(r.inlined == (uint32_t)inlinable);
+    inline_sites += r.inlined;
+    if (r.inlined && relocated && protect_on && follower_wrappable(follower)) {
+        /* The relocated follower runs wrapped: lea rsp,[rsp-0x80] ... lea rsp,[rsp+0x80] in the stub
+         * (the inline stub itself moves rsp by 0x90, another encoding). */
+        static const uint8_t below[] = {0x48, 0x8d, 0x64, 0x24, 0x80};
+        int found = 0;
+        for (size_t at = 0; at + sizeof below <= ISA_STUB_BYTES; at++) found |= !memcmp(stubs + at, below, sizeof below);
+        assert(found);
+    }
+    if (follows) followers_run[follower]++;
     trap_table = &t;
     for (int round = 0; round < rounds; round++) {
         State in, want, got;
@@ -362,15 +464,22 @@ static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned i
             /* Half the time a valid field (index + length <= 64) in the control word. */
             const unsigned l = (unsigned)(next() % 64), i = l ? (unsigned)(next() % (65 - l)) : 0;
             uint64_t control = (next() & ~0x3f3full) | l | (uint64_t)i << 8;
-            if (round & 1 && src != dst) memcpy(&in.ymm[src][kind == ISA_INSERTQ ? 8 : 0], &control, 8);
+            if (random_control) control = (next() & ~0x3f3full) | next() % 64 | (next() % 64) << 8;
+            if ((round & 1 || random_control) && src != dst)
+                memcpy(&in.ymm[src][kind == ISA_INSERTQ ? 8 : 0], &control, 8);
         }
         memcpy(&want, &in, sizeof want);
         memcpy(&got, &in, sizeof got);
 #ifdef __SSE4A__
         if (native) run_state(pristine + SITE_AT, &want);
 #endif
-        if (!native) expected_by_model(&want, kind, dst, kind == ISA_EXTRQ_IMM ? -1 : src, length, index, relocated);
+        if (!native) expected_by_model(&want, kind, dst, model_src, length, index, follows ? follower : -1);
         run_state(image + SITE_AT, &got);
+#ifdef _WIN32
+        /* Windows writes its exception frame below rsp: an int3 site cannot keep the red zone
+         * (docs/red_zone.md: int3 ISA sites are not protected). */
+        if (mode == ISA_MODE_INT3) memcpy(got.red_zone, want.red_zone, sizeof got.red_zone);
+#endif
         if (memcmp(&want, &got, sizeof want) != 0) {
             fprintf(stderr, "%s xmm%d, xmm%d (length %u, index %u) mode %u: state differs\n", isa_kind_name(kind), dst,
                     src, length, index, mode);
@@ -386,11 +495,11 @@ static void run_site(uint8_t kind, int dst, int src, unsigned length, unsigned i
         }
         if (native) {   /* the CPU agrees with the model too */
             State model_state = in;
-            expected_by_model(&model_state, kind, dst, kind == ISA_EXTRQ_IMM ? -1 : src, length, index, relocated);
+            expected_by_model(&model_state, kind, dst, model_src, length, index, follows ? follower : -1);
             assert(memcmp(&model_state, &want, sizeof want) == 0);
         }
     }
-    assert(hits == (uint64_t)rounds);
+    assert(hits == (counters_off ? 0 : (uint64_t)rounds));
     sites_run[mode]++;
 }
 
@@ -414,6 +523,108 @@ static void test_sites(void) {
     /* The site of the Windows crash (inFAMOUS 1.07, 0x8938f1): extrq xmm4, xmm7. */
     run_site(ISA_EXTRQ, 4, 7, 0, 0, ISA_MODE_INT3, 2000);
     run_site(ISA_EXTRQ, 4, 7, 0, 0, ISA_MODE_JMP_RELOCATE, 2000);
+}
+
+/* TLG_EXTRQ_INLINE=1: the inline stubs against the CPU (SSE4A host) or the model, which is itself
+ * checked against the bitwise reference on every round. Whole state compared as above: GPRs, flags,
+ * all 16 YMM registers (the scratch one included) and the red zone. */
+static void test_inline_sites(void) {
+    static const uint8_t kinds[] = {ISA_EXTRQ, ISA_INSERTQ, ISA_EXTRQ_IMM, ISA_INSERTQ_IMM};
+    inline_on = 1;
+    for (int counters = 0; counters < 2; counters++) {
+        counters_off = !counters;
+        /* Every register pair and form (the INSERTQ register form and EXTRQ xmmN, xmmN keep the C
+         * stub: run_site checks that too). */
+        for (int k = 0; k < 4; k++)
+            for (int dst = 0; dst < 16; dst++)
+                for (int src = 0; src < 16; src++) {
+                    if (kinds[k] == ISA_EXTRQ_IMM && src) continue;
+                    const unsigned length = (unsigned)(next() % 64), index = (unsigned)(next() % 64);
+                    uint8_t probe[16];
+                    const size_t n = encode(probe, kinds[k], dst, src, length, index);
+                    run_site(kinds[k], dst, src, length, index, n == 4 ? ISA_MODE_JMP_RELOCATE : ISA_MODE_JMP, 16);
+                }
+        /* Immediate forms: every length and index, including length 0 (= 64) and index + length > 64. */
+        for (unsigned length = 0; length < 64; length++)
+            for (unsigned index = 0; index < 64; index++) {
+                run_site(ISA_EXTRQ_IMM, (int)(next() % 16), 0, length, index, ISA_MODE_JMP, 4);
+                run_site(ISA_INSERTQ_IMM, (int)(next() % 16), (int)(next() % 16), length, index, ISA_MODE_JMP, 4);
+            }
+        /* EXTRQ xmm, xmm (every inFAMOUS 1.07 SSE4A site): random controls over many rounds, the
+         * game's forms (4-byte relocated and REX 5-byte) and scratch registers past xmm0. */
+        random_control = 1;
+        static const int pairs[][2] = {{4, 7}, {0, 1}, {1, 0}, {0, 15}, {12, 14}, {8, 2}, {15, 0}, {3, 10}};
+        for (size_t i = 0; i < sizeof pairs / sizeof *pairs; i++) {
+            uint8_t probe[16];
+            const size_t n = encode(probe, ISA_EXTRQ, pairs[i][0], pairs[i][1], 0, 0);
+            run_site(ISA_EXTRQ, pairs[i][0], pairs[i][1], 0, 0, n == 4 ? ISA_MODE_JMP_RELOCATE : ISA_MODE_JMP, 20000);
+        }
+        random_control = 0;
+    }
+    /* Relocated followers that see the stub's state: rsp (mov rax,[rsp]), the scratch XMM register
+     * (movd eax, xmm<t>), the flags (setc al) and a 15-byte instruction, with and without red-zone
+     * protection (wrapped 128 bytes below rsp), inline and C stubs, counters on and off. */
+    static const int follow_pairs[][2] = {{4, 7}, {0, 1}, {1, 0}, {2, 3}, {7, 6}};
+    for (int on = 0; on < 2; on++)
+        for (int counters = 0; counters < 2; counters++)
+            for (int protect = 0; protect < 2; protect++)
+                for (int f = 0; f < FOLLOWERS; f++) {
+                    inline_on = on;
+                    counters_off = !counters;
+                    protect_on = protect;
+                    follower = f;
+                    for (int k = 0; k < 2; k++)   /* EXTRQ xmm, xmm and INSERTQ xmm, xmm: 4 bytes below xmm8 */
+                        for (size_t i = 0; i < sizeof follow_pairs / sizeof *follow_pairs; i++) {
+                            random_control = 1;
+                            run_site(kinds[k], follow_pairs[i][0], follow_pairs[i][1], 0, 0, ISA_MODE_JMP_RELOCATE, 200);
+                            random_control = 0;
+                            run_site(kinds[k], follow_pairs[i][0], follow_pairs[i][1], 0, 0, ISA_MODE_JMP_RELOCATE, 50);
+                        }
+                }
+    follower = FOLLOW_LEA;
+    inline_on = counters_off = protect_on = 0;
+}
+
+/* The largest inline stub: extrq xmm12, xmm14 (REX on the SSE instructions), hits on, a 15-byte
+ * faultable follower wrapped for the red zone.
+ * It must still end before the constants (INLINE_CONST_AT) and inline. A real site with REX is 5
+ * bytes (never relocated), so the record is built by hand and only the patched image runs, against
+ * the model. */
+static void test_inline_worst_case(void) {
+    static const uint8_t lea15[15] = {0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x2e, 0x48, 0x8d, 0x84, 0x00, 0x01, 0x00, 0x00, 0x00};
+    static const uint8_t original[4] = {0x66, 0x0f, 0x79, 0xe7};   /* extrq xmm4, xmm7: any 4 bytes do */
+    memset(pristine, 0xcc, PAGE);
+    memcpy(pristine + SITE_AT, original, 4);
+    memcpy(pristine + SITE_AT + 4, lea15, 15);
+    pristine[SITE_AT + 19] = 0xc3;
+    memcpy(image, pristine, PAGE);
+    memset(stubs, 0, PAGE);
+    static IsaSite s;
+    static uint64_t hits;
+    s = sse4a_site(ISA_EXTRQ, 12, 14, 0, 0);
+    s.offset = SITE_AT;
+    s.length = 4;
+    s.mode = ISA_MODE_JMP_RELOCATE;
+    s.mem_flags = ISA_MEM_RELOCATED_FAULTABLE;
+    memcpy(s.original, original, 4);
+    s.relocated_length = 15;
+    memcpy(s.relocated, lea15, 15);
+    hits = 0;
+    IsaTable t = {.sites = &s, .hits = &hits, .count = 1, .image_size = PAGE, .protect_red_zone = 1, .inline_sse4a = 1};
+    IsaReport r = isa_rewrite_apply(&t, image, stubs, CPU_SET_SSE4A);
+    assert(r.rewritten == 1 && r.relocated == 1 && r.inlined == 1);
+    for (int round = 0; round < 2000; round++) {
+        State in, want, got;
+        random_state(&in);
+        const uint64_t control = (next() & ~0x3f3full) | next() % 64 | (next() % 64) << 8;
+        memcpy(in.ymm[14], &control, 8);
+        want = got = in;
+        expected_by_model(&want, ISA_EXTRQ, 12, 14, 0, 0, FOLLOW_LEA_15);
+        run_state(image + SITE_AT, &got);
+        assert(memcmp(&want, &got, sizeof want) == 0);
+    }
+    assert(hits == 2000);
+    inline_sites++;
 }
 
 static void test_table_records(void) {
@@ -464,8 +675,14 @@ int main(void) {
     test_against_cpu();
     test_table_records();
     test_sites();
-    printf("isa-sse4a-test ok (%s: %llu operand sets against the CPU; sites: %u jmp, %u relocated, %u int3)\n",
+    test_inline_sites();
+    test_inline_worst_case();
+    printf("isa-sse4a-test ok (%s: %llu operand sets against the CPU; sites: %u jmp, %u relocated, %u int3; "
+           "%u inline stubs; followers: %u lea, %u rsp load, %u movd scratch, %u setc, %u 15-byte; "
+           "%llu model results checked against the bitwise reference)\n",
            native ? "SSE4A host, CPU as oracle" : "no SSE4A, recorded AMD results and model", compared,
-           sites_run[ISA_MODE_JMP], sites_run[ISA_MODE_JMP_RELOCATE], sites_run[ISA_MODE_INT3]);
+           sites_run[ISA_MODE_JMP], sites_run[ISA_MODE_JMP_RELOCATE], sites_run[ISA_MODE_INT3], inline_sites,
+           followers_run[FOLLOW_LEA], followers_run[FOLLOW_RSP_LOAD], followers_run[FOLLOW_MOVD_SCRATCH],
+           followers_run[FOLLOW_SETC], followers_run[FOLLOW_LEA_15], reference_checked);
     return 0;
 }

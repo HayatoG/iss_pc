@@ -370,7 +370,7 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
                 vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eShaderRead);
     }
 
-    dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+    dst->ClearFlags(VideoCore::ImageFlagBits::Dirty);
 }
 
 void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
@@ -497,8 +497,8 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
     cmdbuf.copyImage(src->GetImage(), vk::ImageLayout::eTransferSrcOptimal, dst->GetImage(),
                      vk::ImageLayout::eTransferDstOptimal, regions);
 
-    dst->flags |= (src->flags & VideoCore::ImageFlagBits::GpuModified);
-    dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+    dst->ChangeFlags(src->LoadFlags() & VideoCore::ImageFlagBits::GpuModified,
+                     VideoCore::ImageFlagBits::Dirty);
 }
 
 void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
@@ -558,8 +558,8 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
     cmdbuf.copyBufferToImage(buffer->Handle(), dst->GetImage(),
                              vk::ImageLayout::eTransferDstOptimal, buffer_copy);
 
-    dst->flags |= (src->flags & VideoCore::ImageFlagBits::GpuModified);
-    dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+    dst->ChangeFlags(src->LoadFlags() & VideoCore::ImageFlagBits::GpuModified,
+                     VideoCore::ImageFlagBits::Dirty);
 }
 
 void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32 slice) {
@@ -611,8 +611,8 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
     cmdbuf.copyImage(src->GetImage(), vk::ImageLayout::eTransferSrcOptimal, dst->GetImage(),
                      vk::ImageLayout::eTransferDstOptimal, image_copy);
 
-    dst->flags |= (src->flags & VideoCore::ImageFlagBits::GpuModified);
-    dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+    dst->ChangeFlags(src->LoadFlags() & VideoCore::ImageFlagBits::GpuModified,
+                     VideoCore::ImageFlagBits::Dirty);
 }
 
 void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
@@ -688,8 +688,7 @@ void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
     cmdbuf.copyImage(src->GetImage(), vk::ImageLayout::eTransferSrcOptimal, dst->GetImage(),
                      vk::ImageLayout::eTransferDstOptimal, region);
 
-    dst->flags |= VideoCore::ImageFlagBits::GpuModified;
-    dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+    dst->ChangeFlags(VideoCore::ImageFlagBits::GpuModified, VideoCore::ImageFlagBits::Dirty);
 }
 
 void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
@@ -755,8 +754,7 @@ void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                             vk::ImageLayout::eTransferDstOptimal, region);
     }
 
-    dst->flags |= VideoCore::ImageFlagBits::GpuModified;
-    dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+    dst->ChangeFlags(VideoCore::ImageFlagBits::GpuModified, VideoCore::ImageFlagBits::Dirty);
 }
 
 void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
@@ -782,8 +780,7 @@ void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRang
     cmdbuf.clearColorImage(dst->GetImage(), vk::ImageLayout::eTransferDstOptimal, clear_value.color,
                            vk_range);
 
-    dst->flags |= VideoCore::ImageFlagBits::GpuModified;
-    dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+    dst->ChangeFlags(VideoCore::ImageFlagBits::GpuModified, VideoCore::ImageFlagBits::Dirty);
 }
 
 void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool copy_backing) {

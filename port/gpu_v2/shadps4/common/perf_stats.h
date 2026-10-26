@@ -276,6 +276,44 @@ enum Counter : u32 {
     CrossWaitsCompute,
     CrossQueueFlushes,
     CrossQueueFirstTouches,
+    // Submit gate (the submission lock sceGnmSubmitDone sets until the command processor is
+    // idle): guest waits that found it set, by site (graphics submits, asynchronous compute
+    // DingDongs, SubmitDone), and their time; waits for the driver's submit mutex held by another
+    // guest thread, and their time; command processor idle periods ended by a submission, and
+    // their time (from the GpuIdle signal to the submission).
+    SubmitGateWaitsGfx,
+    SubmitGateWaitsAsc,
+    SubmitGateWaitsDone,
+    SubmitGateWaitNsGfx,
+    SubmitGateWaitNsAsc,
+    SubmitGateWaitNsDone,
+    SubmitLockContentions,
+    SubmitLockWaitNs,
+    IdleAdmitGaps,
+    IdleAdmitGapNs,
+    // Vulkan::Scheduler::submit_mutex (global, all queues) found held by another thread, and the
+    // time waited, by caller class: the command processor (on_submit, direct and unthreaded
+    // submissions), the recording thread (its submissions) and the present thread (the present
+    // scheduler's submission and vkQueuePresentKHR). Uncontended acquisitions are not timed.
+    SubmitMutexContentionsCp,
+    SubmitMutexContentionsRecorder,
+    SubmitMutexContentionsPresent,
+    SubmitMutexWaitNsCp,
+    SubmitMutexWaitNsRecorder,
+    SubmitMutexWaitNsPresent,
+    // Command processor waits on a flip label (video out, liverpool.cpp WaitRegMem) and their
+    // time (ISS_VO_WAIT); waits on a label or semaphore not yet written (WaitRegMem and
+    // MemSemaphore, graphics and compute), counted when the first test fails, and the time until
+    // it passed (the queue yields meanwhile; the time can overlap between queues).
+    VoWaits,
+    VoWaitNs,
+    CpLabelStalls,
+    CpLabelStallNs,
+    // Overlapping images freed by TextureCache::ResolveOverlap as not used for a while
+    // (ISS_OVERLAP_AGE); periodic submits held while an open occlusion query had used all its
+    // counter pairs (vk_rasterizer.cpp PeriodicSubmit).
+    OverlapFrees,
+    SubmitsHeldOcclusion,
     CounterCount,
 };
 
@@ -576,6 +614,13 @@ inline std::atomic<u64>& GuestFrameCounter() {
     return counter;
 }
 
+/// Benchmark window (tlggpu_bench_mark, gpu_host.cpp): bit 0 set inside it, the upper bits count
+/// its starts and ends. The frame CSV's bench column marks it.
+inline std::atomic<u32>& BenchWindowState() {
+    static std::atomic<u32> state{0};
+    return state;
+}
+
 inline std::atomic<u32>& GpuThreadCpu() {
     static std::atomic<u32> cpu{~0U};
     return cpu;
@@ -671,6 +716,20 @@ inline constexpr FrameCsvField FrameCsvDetails[] = {
     {"gpu_completed_work_ms", GpuProfileBusyNs, true},
     {"gpu_completed_submissions", GpuProfileSessions, false},
     {"gpu_completed_readback_ms", GpuProfileReadbackNs, true},
+    {"submit_mutex_wait_cp_ms", SubmitMutexWaitNsCp, true},
+    {"submit_mutex_wait_recorder_ms", SubmitMutexWaitNsRecorder, true},
+    {"submit_mutex_wait_present_ms", SubmitMutexWaitNsPresent, true},
+    // Command processor sleeps on a flip label (ISS_VO_WAIT) and on other label waits.
+    {"vo_waits", VoWaits, false},
+    {"vo_wait_ms", VoWaitNs, true},
+    {"cp_label_stalls", CpLabelStalls, false},
+    {"cp_label_stall_ms", CpLabelStallNs, true},
+    // Texture cache overlap frees; occlusion queries emulated (all visible), segments of the
+    // counted ones, periodic submits held for an open query.
+    {"overlap_frees", OverlapFrees, false},
+    {"occlusion_emulated", OcclusionEmulated, false},
+    {"occlusion_segments", OcclusionSegments, false},
+    {"submits_held_occlusion", SubmitsHeldOcclusion, false},
 };
 
 inline void CaptureFrameCsv(float draws_per_frame, float dispatches_per_frame) {
@@ -681,6 +740,7 @@ inline void CaptureFrameCsv(float draws_per_frame, float dispatches_per_frame) {
         std::array<u64, 18> previous{};
         std::array<u64, std::size(FrameCsvDetails)> detail_previous{};
         u64 last_flush{};
+        u32 bench_state{};
         Capture() {
             if (const char* path = std::getenv("SHADPS4_FRAME_CSV"); path && *path) {
                 file = std::fopen(path, "wb");
@@ -692,7 +752,7 @@ inline void CaptureFrameCsv(float draws_per_frame, float dispatches_per_frame) {
                     for (const auto& field : FrameCsvDetails) {
                         std::fprintf(file, ",%s", field.name);
                     }
-                    std::fputs(",gpu_profile_enabled\n", file);
+                    std::fputs(",gpu_profile_enabled,bench\n", file);
                 }
             }
         }
@@ -748,8 +808,14 @@ inline void CaptureFrameCsv(float draws_per_frame, float dispatches_per_frame) {
         capture.detail_previous[i] = total;
     }
     if (capture.last != 0) {
-        std::fprintf(capture.file, ",%u\n",
-                     GetTuning().gpu_profile.load(std::memory_order_relaxed) != 0 ? 1u : 0u);
+        // bench: 0 outside the benchmark window, 1 inside; bench_start on its first row and
+        // bench_end on the first row after it.
+        const u32 bench = BenchWindowState().load(std::memory_order_relaxed);
+        const char* mark = bench != capture.bench_state ? ((bench & 1) ? "bench_start" : "bench_end")
+                                                        : ((bench & 1) ? "1" : "0");
+        capture.bench_state = bench;
+        std::fprintf(capture.file, ",%u,%s\n",
+                     GetTuning().gpu_profile.load(std::memory_order_relaxed) != 0 ? 1u : 0u, mark);
     }
     // Bounded live visibility without flushing for each frame.
     if (now - capture.last_flush >= 1'000'000'000ULL) {
@@ -842,6 +908,13 @@ inline void OnFlip(float draws_per_frame, float dispatches_per_frame) {
     const auto pct = [window_ns](u64 ns) {
         return 100.0 * static_cast<double>(ns) / static_cast<double>(window_ns);
     };
+    const double window_frames = r.frames ? static_cast<double>(r.frames) : 1.0;
+    const auto per_frame = [window_frames](u64 n) {
+        return static_cast<double>(n) / window_frames;
+    };
+    const auto per_frame_ms = [window_frames](u64 ns) {
+        return static_cast<double>(ns) / 1e6 / window_frames;
+    };
     LOG_INFO(Debug,
              "Perf: {:.1f} fps | frame avg {:.1f} ms max {:.1f} ms | >33ms {} >50ms {} | gpu "
              "thread work {:.0f}% spin {:.0f}% (cpu {}) | shaders {} ({:.0f} ms) pipelines {} "
@@ -876,7 +949,10 @@ inline void OnFlip(float draws_per_frame, float dispatches_per_frame) {
              "{:.0f}% submissions {} ({:.2f} ms avg, in flight {:.1f} avg) with readbacks {} "
              "({:.2f} ms avg) compute {} ({:.1f} ms) | relaxed readbacks {} (pages refreshed {} "
              "left {}) | asc queue dispatches {} fallbacks {} submits {} waits gfx {} compute {} "
-             "flushes {} first touches {} | draws/frame {:.0f} dispatches/frame {:.0f}",
+             "flushes {} first touches {} | draws/frame {:.0f} dispatches/frame {:.0f} | "
+             "per frame: recorder sync {:.3f} ms ({:.2f}) submit mutex waits cp {:.3f} ms "
+             "({:.2f}) recorder {:.3f} ms ({:.2f}) present {:.3f} ms ({:.2f}) | "
+             "vo waits {} ({:.2f} ms/frame) | cp label stalls {} ({:.2f} ms/frame)",
              static_cast<double>(r.frames) / seconds,
              r.frames ? r.frame_ms_sum / static_cast<double>(r.frames) : 0.0, r.frame_ms_max,
              r.frames_over_33, r.frames_over_50, pct(t[GpuBusyNs]), pct(t[GpuSpinNs]),
@@ -943,7 +1019,14 @@ inline void OnFlip(float draws_per_frame, float dispatches_per_frame) {
              t[ReadbackRelaxedRefreshes], t[ReadbackRelaxedSkips], t[AscQueueDispatches],
              t[AscQueueFallbacks], t[ComputeQueueSubmits], t[CrossWaitsGraphics],
              t[CrossWaitsCompute], t[CrossQueueFlushes], t[CrossQueueFirstTouches],
-             draws_per_frame, dispatches_per_frame);
+             draws_per_frame, dispatches_per_frame, per_frame_ms(t[RecorderSyncNs]),
+             per_frame(t[RecorderSyncs]), per_frame_ms(t[SubmitMutexWaitNsCp]),
+             per_frame(t[SubmitMutexContentionsCp]), per_frame_ms(t[SubmitMutexWaitNsRecorder]),
+             per_frame(t[SubmitMutexContentionsRecorder]),
+             per_frame_ms(t[SubmitMutexWaitNsPresent]),
+             per_frame(t[SubmitMutexContentionsPresent]), t[VoWaits],
+             r.frames ? ms(t[VoWaitNs]) / static_cast<double>(r.frames) : 0.0, t[CpLabelStalls],
+             r.frames ? ms(t[CpLabelStallNs]) / static_cast<double>(r.frames) : 0.0);
 
     const u64 last_flip = r.last_flip;
     const u64 flip_index = r.flip_index;

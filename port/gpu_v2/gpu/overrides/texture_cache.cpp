@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <bit>
 #include <algorithm>
 #include <filesystem>
 #include <thread>
@@ -12,6 +13,7 @@
 #include "vram_stats.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -39,6 +41,34 @@ namespace VideoCore {
 
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
+
+/// ResolveOverlap frees an overlapping image no longer used (it gives way to the new one). The
+/// age was 32 scheduler ticks (upstream): ~2.5 frames at ~13 submits a frame, but under one frame
+/// with ISS_SUBMIT_INTERVAL_US (30-45 a frame), which could free an alias still in use.
+/// ISS_OVERLAP_AGE=N (default 4): not used for N guest frames (garbage collector ticks, 1-128).
+/// ISS_OVERLAP_AGE=ticks: the old 32 scheduler ticks (A/B).
+static constexpr u64 OverlapAgeTicks = 0;
+static u64 OverlapAgeFrames() {
+    static const u64 frames = [] {
+        u64 n = 4;
+        if (const char* p = std::getenv("ISS_OVERLAP_AGE"); p && *p) {
+            if (std::strcmp(p, "ticks") == 0) {
+                n = OverlapAgeTicks;
+            } else if (*p >= '0' && *p <= '9') {
+                n = std::clamp<u64>(std::strtoull(p, nullptr, 10), 1, 128);
+            }
+        }
+        if (n == OverlapAgeTicks) {
+            std::fprintf(stderr, "PORT_TUNING overlap_age=ticks:%llu\n",
+                         static_cast<unsigned long long>(NumFramesBeforeRemoval));
+        } else {
+            std::fprintf(stderr, "PORT_TUNING overlap_age=frames:%llu\n",
+                         static_cast<unsigned long long>(n));
+        }
+        return n;
+    }();
+    return frames;
+}
 
 void TextureCache::AssertNoAscTextureAccessSlow() const {
     if (liverpool && liverpool->CpSplitActive() && liverpool->IsCurrentCpThread()) {
@@ -351,11 +381,39 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
 
 void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
     if (image.hash == 0) {
+        // GPU modified pages are read protected: hashing them here (a guest write fault, the
+        // texture mutex held) faults again, and that readback waits for the command processor,
+        // which may be waiting for this mutex (the freeze of 2026-10-22, R4-7). Such an image
+        // is marked CPU dirty instead, without a hash: its next binding uploads it on the
+        // command processor (ObtainBufferForImage takes the GPU's data for those pages).
+        // Still open, narrowed: the command processor can make a page GPU modified (and read
+        // protect it) between this check and the hash below; that hash then faults as before.
+        // Closing it needs a non faulting read of the backing (HashSparseMemory), not done.
+        // The hash stays 0 after this fast-out, so a later maybe-dirty of the image checks
+        // again (and takes it again while its pages are GPU modified): a full upload each time.
+        // Not restored at the refresh on purpose: that is what the old path did too (the full
+        // size hash set below never matched RefreshImage's 64 pixel hash, so it uploaded), and
+        // hashing there would read the GPU modified pages on the command processor (readback
+        // faults) for every such image.
+        if (buffer_cache.IsRegionGpuModified(image.info.guest_address, image.info.guest_size)) {
+            static std::atomic<u64> skipped{};
+            const u64 n = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (std::has_single_bit(n)) {
+                std::fprintf(stderr,
+                             "TEXTURE_MAYBE_DIRTY_GPU_PAGES n=%llu image 0x%llx+0x%llx: no hash, "
+                             "CPU dirty\n",
+                             (unsigned long long)n, (unsigned long long)image.info.guest_address,
+                             (unsigned long long)image.info.guest_size);
+            }
+            image.SetFlags(ImageFlagBits::CpuDirty);
+            UntrackImage(image_id);
+            return;
+        }
         // Initialize hash
         const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
         image.hash = XXH3_64bits(addr, image.info.guest_size);
     }
-    image.flags |= ImageFlagBits::MaybeCpuDirty;
+    image.SetFlags(ImageFlagBits::MaybeCpuDirty);
     UntrackImage(image_id);
 }
 
@@ -395,7 +453,7 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
         if (image.Overlaps(addr, size)) {
             // Modified region overlaps image, so the image was definitely accessed by this fault.
             // Untrack the image, so that the range is unprotected and the guest can write freely.
-            image.flags |= ImageFlagBits::CpuDirty;
+            image.SetFlags(ImageFlagBits::CpuDirty);
             UntrackImage(image_id);
         } else if (pages_end < image_end) {
             // This page access may or may not modify the image.
@@ -471,7 +529,7 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
             return;
         }
         // Ensure image is reuploaded when accessed again.
-        image.flags |= ImageFlagBits::GpuDirty;
+        image.SetFlags(ImageFlagBits::GpuDirty);
         BumpImageGeneration(image_id);
     });
 }
@@ -543,7 +601,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         // Inherit image usage
         auto& new_image = slot_images[new_image_id];
         new_image.usage = cache_image.usage;
-        new_image.flags &= ~ImageFlagBits::Dirty;
+        new_image.ClearFlags(ImageFlagBits::Dirty);
         // When creating a depth buffer through overlap resolution don't clear it on first use.
         new_image.info.meta_info.htile_clear_mask = 0;
         runtime.CopyColorAndDepth(&cache_image, &new_image);
@@ -563,8 +621,21 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                                                            ImageId merged_image_id) {
     AssertNoAscTextureAccess();
     auto& cache_image = slot_images[cache_image_id];
-    const bool safe_to_delete =
-        scheduler.CurrentTick() - cache_image.tick_accessed_last > NumFramesBeforeRemoval;
+    const bool safe_to_delete = [&] {
+        const u64 age_frames = OverlapAgeFrames();
+        if (age_frames == OverlapAgeTicks) {
+            return scheduler.CurrentTick() - cache_image.tick_accessed_last >
+                   NumFramesBeforeRemoval;
+        }
+        // Not used since the garbage collector tick age_frames frames ago (gc_scheduler_ticks:
+        // the scheduler tick at each one). Unknown (early frames): kept.
+        if (gc_tick < age_frames || age_frames >= gc_scheduler_ticks.size()) {
+            return false;
+        }
+        const u64 used_since =
+            gc_scheduler_ticks[(gc_tick - age_frames) % gc_scheduler_ticks.size()];
+        return used_since != 0 && cache_image.tick_accessed_last < used_since;
+    }();
 
     // Equal address
     if (image_info.guest_address == cache_image.info.guest_address) {
@@ -574,6 +645,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             lhs_block_size != rhs_block_size) {
             // Very likely this kind of overlap is caused by allocation from a pool.
             if (safe_to_delete) {
+                Common::Perf::Add(Common::Perf::OverlapFrees);
                 FreeImage(cache_image_id);
             }
             return {merged_image_id, -1, -1};
@@ -622,6 +694,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         // Likely the address is reused for a image with a different tiling mode.
         if (image_info.tile_mode != cache_image.info.tile_mode) {
             if (safe_to_delete) {
+                Common::Perf::Add(Common::Perf::OverlapFrees);
                 FreeImage(cache_image_id);
             }
             return {merged_image_id, -1, -1};
@@ -755,6 +828,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
         // Image isn't a subresource but a chance overlap.
         if (safe_to_delete) {
+            Common::Perf::Add(Common::Perf::OverlapFrees);
             FreeImage(cache_image_id);
         }
 
@@ -820,8 +894,7 @@ ImageId TextureCache::ShrinkImage(const ImageInfo& info, ImageId image_id) {
 
     // The content of the common region moves to the new image (the padding is dropped).
     runtime.CopyImage(&src_image, &new_image);
-    new_image.flags |= ImageFlagBits::GpuModified;
-    new_image.flags &= ~ImageFlagBits::CpuDirty;
+    new_image.ChangeFlags(ImageFlagBits::GpuModified, ImageFlagBits::CpuDirty);
 
     if (src_image.binding.is_bound || src_image.binding.is_target) {
         src_image.binding.needs_rebind = 1u;
@@ -1207,7 +1280,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     AssertNoAscTextureAccess();
     Image& image = slot_images[image_id];
     if (desc.type == BindingType::Storage) {
-        image.flags |= ImageFlagBits::GpuModified;
+        image.SetFlags(ImageFlagBits::GpuModified);
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
@@ -1221,7 +1294,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     AssertNoAscTextureAccess();
     Image& image = slot_images[image_id];
-    image.flags |= ImageFlagBits::GpuModified;
+    image.SetFlags(ImageFlagBits::GpuModified);
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
@@ -1250,7 +1323,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
 ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
     AssertNoAscTextureAccess();
     Image& image = slot_images[image_id];
-    image.flags |= ImageFlagBits::GpuModified;
+    image.SetFlags(ImageFlagBits::GpuModified);
     image.usage.depth_target = 1u;
     UpdateImage(image_id);
 
@@ -1347,7 +1420,7 @@ void TextureCache::RefreshImage(Image& image) {
         const u32 size = s_w * s_h * (image.info.num_bits / 8);
         const u64 hash = XXH3_64bits(addr, size);
         if (image.hash == hash) {
-            image.flags &= ~ImageFlagBits::MaybeCpuDirty;
+            image.ClearFlags(ImageFlagBits::MaybeCpuDirty);
             return;
         }
         image.hash = hash;
@@ -1394,7 +1467,7 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     if (image_copies.empty()) {
-        image.flags &= ~ImageFlagBits::Dirty;
+        image.ClearFlags(ImageFlagBits::Dirty);
         return;
     }
 
@@ -1465,7 +1538,7 @@ void TextureCache::RegisterImage(ImageId image_id) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     BumpGeneration();
-    image.flags |= ImageFlagBits::Registered;
+    image.SetFlags(ImageFlagBits::Registered);
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
     image_bytes += Common::AlignUp(image.info.guest_size, 1024);
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
@@ -1491,7 +1564,7 @@ void TextureCache::UnregisterImage(ImageId image_id) {
     ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
                "Trying to unregister an already unregistered image");
     BumpGeneration();
-    image.flags &= ~ImageFlagBits::Registered;
+    image.ClearFlags(ImageFlagBits::Registered);
     iss::blackbox::Event(iss::blackbox::Image, "imagem -%u uid %llu em %llx %ux%u %s",
                          image_id.index, (unsigned long long)image.image_uid,
                          (unsigned long long)image.info.guest_address, image.info.size.width,
@@ -1751,7 +1824,8 @@ void TextureCache::GarbageCollectImages() {
             if (used_since != 0 && True(recent.flags & ImageFlagBits::Registered) &&
                 recent.tick_accessed_last >= used_since) {
                 spared.fetch_add(1, std::memory_order_relaxed);
-                TouchImage(recent);
+                // The lock is held: moved to the LRU's end now, not queued (TouchImage).
+                lru_cache.Touch(recent.lru_id, gc_tick);
                 return false;
             }
         }
@@ -1803,6 +1877,8 @@ void TextureCache::GarbageCollectImages() {
 
 void TextureCache::GarbageCollectSamplers() {
     total_used_samplers = samplers.size();
+    sampler_touches_wanted.store(total_used_samplers * 2 >= trigger_gc_samplers,
+                                 std::memory_order_relaxed);
     if (total_used_samplers < trigger_gc_samplers) {
         return;
     }
@@ -1824,11 +1900,23 @@ void TextureCache::GarbageCollectSamplers() {
             return true;
         }
         --num_deletions;
-        const size_t lru_id = samplers.at(hash).lru_id;
-        samplers.erase(hash);
+        const auto it = samplers.find(hash);
+        ASSERT(it != samplers.end());
+        const size_t lru_id = it->second.lru_id;
+        // The handle may be in command buffers being recorded or not yet executed, and in
+        // descriptors native passes pool jobs are writing (R4-1): it is destroyed only once the
+        // GPU passed the current tick and the jobs started before now finished, as images are
+        // (DeleteImage).
+        Sampler dead{std::move(it.value())};
+        samplers.erase(it);
         sampler_lru_cache.Free(lru_id);
         // Handles remembered outside the cache (Rasterizer sampler memo) are stale.
         samplers_generation.fetch_add(1, std::memory_order_release);
+        const u64 recording_ticket = iss::native_passes::RecordingTicket();
+        scheduler.DeferOperation([dead = std::move(dead), recording_ticket]() mutable {
+            iss::native_passes::WaitRecordingBefore(recording_ticket);
+            [[maybe_unused]] const Sampler destroyed{std::move(dead)};
+        });
         return false;
     };
 
@@ -1849,13 +1937,111 @@ void TextureCache::RunGarbageCollector() {
     };
     gc_scheduler_ticks[gc_tick % gc_scheduler_ticks.size()] = scheduler.CurrentTick();
 
+    if (!pending_lru_touches.empty() ||
+        off_cp_touches_pending.load(std::memory_order_acquire)) {
+        std::scoped_lock lk{mutex};
+        ApplyPendingTouchesLocked();
+    }
     GarbageCollectImages();
     GarbageCollectSamplers();
     if (texture_lookup_memo_enabled && texture_lookup_stats_enabled &&
         gc_tick != 0 && gc_tick % 1800 == 0) ReportLookupMemo();
 }
 
-void TextureCache::TouchImage(const Image& image) {
+bool TextureCache::DeferLruTouchesSetting() {
+    // ISS_TEX_DEFER_LRU_TOUCH (default on): the command processor's touches without the lock
+    // (UpdateImage's clean path, GetImage) moved items in the LRU list while a guest thread
+    // unlinked others from it under the lock (UnmapMemory -> FreeImage -> lru_cache.Free): a
+    // corrupted list made the collector meet freed images (R3-B3). They are queued and applied
+    // under the lock before each collection, the only reader of the LRU order. 0: touched at
+    // once, as before.
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_TEX_DEFER_LRU_TOUCH");
+        return !p || p[0] != '0';
+    }();
+    return enabled;
+}
+
+void TextureCache::ApplyPendingTouchesLocked() {
+    // A queued id freed since (unmap, collector) is skipped by Touch (not alive); one reused by
+    // an image registered since has its insertion tick, which is not older: Touch returns.
+    for (const size_t id : pending_lru_touches) {
+        lru_cache.Touch(id, gc_tick);
+    }
+    pending_lru_touches.clear();
+    if (off_cp_touches_pending.exchange(false, std::memory_order_acq_rel)) {
+        std::scoped_lock lk{off_cp_touch_mutex};
+        for (const size_t id : off_cp_touches) {
+            lru_cache.Touch(id, gc_tick);
+        }
+        off_cp_touches.clear();
+    }
+}
+
+} // namespace VideoCore
+#include <cstring>
+#include <string>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+#include "common/thread.h"
+namespace VideoCore {
+
+void TextureCache::NoteOffCpTouch(const std::source_location& where) {
+    // Known caller: sceVideoOutRegisterBuffers (a guest thread) -> RegisterVideoOutSurface ->
+    // FindImage + GetImage, once per display buffer at startup. The first touches are logged
+    // with the thread, the caller and the return addresses (module+offset, for the linker map;
+    // a guest frame has no module), then the count at each power of two.
+    static std::atomic<u64> off_cp{};
+    const u64 n = off_cp.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n > 8) {
+        if (std::has_single_bit(n)) {
+            std::fprintf(stderr, "TEXTURE_TOUCH_OFF_CP n=%llu (queued)\n", (unsigned long long)n);
+        }
+        return;
+    }
+    const std::string thread = Common::GetCurrentThreadName();
+    std::fprintf(stderr, "TEXTURE_TOUCH_OFF_CP n=%llu thread=%s caller=%s line %u (queued)\n",
+                 (unsigned long long)n, thread.c_str(), where.function_name(), where.line());
+#ifdef _WIN32
+    void* frames[12];
+    const USHORT count = RtlCaptureStackBackTrace(2, 12, frames, nullptr);
+    for (USHORT i = 0; i < count; ++i) {
+        HMODULE module = nullptr;
+        char name[MAX_PATH] = "?";
+        u64 offset = reinterpret_cast<u64>(frames[i]);
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<LPCSTR>(frames[i]), &module)) {
+            GetModuleFileNameA(module, name, MAX_PATH);
+            offset -= reinterpret_cast<u64>(module);
+        }
+        const char* base = std::strrchr(name, '\\');
+        std::fprintf(stderr, "TEXTURE_TOUCH_OFF_CP n=%llu frame %u %s+0x%llx\n",
+                     (unsigned long long)n, unsigned(i), base ? base + 1 : name,
+                     (unsigned long long)offset);
+    }
+#endif
+    std::fflush(stderr);
+}
+
+void TextureCache::TouchImage(const Image& image, const std::source_location& where) {
+    if (defer_lru_touches && liverpool && !liverpool->IsCurrentCpThread()) [[unlikely]] {
+        // lru_touched and pending_lru_touches belong to the command processor: a touch from
+        // elsewhere goes to a side queue, applied under the lock before the next collection.
+        NoteOffCpTouch(where);
+        {
+            std::scoped_lock lk{off_cp_touch_mutex};
+            if (off_cp_touches.size() < 4096) {
+                off_cp_touches.push_back(image.lru_id);
+            }
+        }
+        off_cp_touches_pending.store(true, std::memory_order_release);
+        return;
+    }
     const size_t id = image.lru_id;
     if (id < lru_touched.size()) {
         if (lru_touched[id] == gc_tick + 1) {
@@ -1866,6 +2052,10 @@ void TextureCache::TouchImage(const Image& image) {
         lru_touched.resize(std::max<size_t>(id + 1, lru_touched.size() * 2 + 64));
     }
     lru_touched[id] = gc_tick + 1;
+    if (defer_lru_touches) {
+        pending_lru_touches.push_back(id);
+        return;
+    }
     lru_cache.Touch(id, gc_tick);
 }
 
@@ -1885,6 +2075,28 @@ u64 ThisThread() {
     return std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFFFF;
 }
 } // Anonymous namespace
+
+void TextureCache::NoteFreeThread(const std::source_location& where) {
+    // Where FreeImage runs (R3-B3): guest threads free images through UnmapMemory, under the
+    // lock, while the command processor binds images without it.
+    static std::atomic<u64> on_cp{}, off_cp{};
+    static const bool assert_on_cp = [] {
+        const char* p = std::getenv("ISS_ASSERT_FREE_ON_CP");
+        return p && p[0] == '1';
+    }();
+    if (!liverpool || liverpool->IsCurrentCpThread()) {
+        on_cp.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const u64 n = off_cp.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (std::has_single_bit(n)) {
+        std::fprintf(stderr, "TEXTURE_FREE_OFF_CP n=%llu (on cp %llu): %s line %u thread %llx\n",
+                     (unsigned long long)n,
+                     (unsigned long long)on_cp.load(std::memory_order_relaxed),
+                     where.function_name(), where.line(), (unsigned long long)ThisThread());
+    }
+    ASSERT_MSG(!assert_on_cp, "FreeImage outside the command processor (TEXTURE_FREE_OFF_CP)");
+}
 
 void TextureCache::NoteFree(ImageId image_id, const std::source_location& where) {
     const auto& image = slot_images[image_id];

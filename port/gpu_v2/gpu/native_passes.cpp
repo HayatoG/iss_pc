@@ -24,7 +24,16 @@
 #define ISS_SYSV __attribute__((sysv_abi))
 #endif
 
-namespace Vulkan { extern std::atomic<std::uint64_t> g_iss_total_draws; } // scripted-route gameplay detection
+#ifdef _WIN32
+bool IssCommandProcessorCpuSets(std::vector<ULONG>& out); // bridge.cpp, ISS_CP_CPU
+#endif
+// liverpool.cpp: the command processor serves the guest commands queued for it (a no-op on any
+// other thread). ISS_NATIVE_WAIT_PUMP, below.
+void IssCpServeCommands();
+// bridge.cpp: a non-faulting write through the host backing, invalidating only the SRT write
+// watches of the pages written (false without a backing).
+bool IssWriteBackingRange(void* address, const void* data, std::uint64_t size);
+
 namespace iss::native_passes {
 namespace {
 using u8 = std::uint8_t;
@@ -72,6 +81,10 @@ struct Stats {
     std::array<std::atomic<u64>, 258> unknown_opcodes{}; // 256: not type 3, 257: past the cursor
     // Command processor.
     std::atomic<u64> claimed{}, executed{}, executed_draws{}, rejected{}, learned{};
+    // Claims of a registered segment whose token was not in its NOP (overwritten: a readback of
+    // a GPU-modified command buffer page, or a reused command buffer), and token writes done with
+    // a plain store (no host backing).
+    std::atomic<u64> token_misses{}, token_plain_stores{};
     // Compute (ISS_NATIVE_COMPUTE): dispatches seen and recorded, segments, learn requests,
     // dispatches without gnmdriver's trailing NOP, and what closed compute segments (opcode).
     std::atomic<u64> dispatches{}, dispatches_recorded{}, cs_segments{}, cs_learn_posted{},
@@ -81,6 +94,24 @@ struct Stats {
     std::array<std::atomic<u64>, 257> cs_close_opcodes{};
 };
 Stats stats;
+// Writes a segment token (TokenMagic, generation, tag) into the payload of a command buffer NOP
+// through the host backing of the guest memory: no fault. A plain store into a command buffer
+// page the GPU modified (labels or query results the command processor wrote into data embedded
+// in it) faults into a readback, which waits for the command processor, which may be waiting for
+// this pool thread: a deadlock. A readback overwriting the page later just loses the token (Claim
+// misses it: stats.token_misses, the segment takes the full path). Only the SRT write watches of
+// the token's page are invalidated (as the fault of a plain store would). Plain store only
+// without a backing (stats.token_plain_stores).
+void WriteToken(const u32* at, u32 generation, u32 token) {
+    const u32 words[3]{TokenMagic, generation, token};
+    auto* dest = const_cast<u32*>(at);
+    if (!IssWriteBackingRange(dest, words, sizeof(words))) {
+        stats.token_plain_stores.fetch_add(1, std::memory_order_relaxed);
+        dest[0] = words[0];
+        dest[1] = words[1];
+        dest[2] = words[2];
+    }
+}
 // Learn request divergence by tracked word (command processor only).
 std::array<u64, TrackedWords_> divergence{};
 u64 divergence_samples{};
@@ -606,7 +637,7 @@ thread_local Lane* thread_lane = nullptr;
 
 u64 ISS_SYSV DrawIndexHook(CommandBuffer* dcb, u32 count, u64 index_address, u32 flags) {
     if ((stats.draws.fetch_add(1, std::memory_order_relaxed) & 0x3FFFF) == 0x3FFFF &&
-        callbacks_set.load(std::memory_order_acquire) && cb.report)
+        callbacks_set.load(std::memory_order_acquire) && cb.report && ReportTimeDue(Reporter::Passes))
         cb.report();
     if (!callbacks_set.load(std::memory_order_acquire) ||
         !(dcb->begin <= dcb->cursor && dcb->cursor <= dcb->end)) {
@@ -722,9 +753,7 @@ u64 ISS_SYSV DrawIndexHook(CommandBuffer* dcb, u32 count, u64 index_address, u32
     }
     if (token_for && dcb->cursor == packet + DrawDwords && ((packet[6] >> 8) & 0xFF) == 0x10 &&
         ((packet[6] >> 16) & 0x3FFF) == 2) {
-        packet[7] = TokenMagic;
-        packet[8] = token_for->generation;
-        packet[9] = token_for->token;
+        WriteToken(packet + 7, token_for->generation, token_for->token);
     }
     if (l->begin == dcb->begin && dcb->cursor >= packet) l->scanned = dcb->cursor;
     return result;
@@ -783,6 +812,8 @@ struct SubmitState {
     std::deque<ScanItem> scans;
     // Statistics.
     std::atomic<u64> submits{}, scan_us{}, dcbs_recorded{}, jobs_done{}, cp_waits{}, cp_wait_us{};
+    // The pool: time recording (all threads), work_cv wait returns, and those that found no job.
+    std::atomic<u64> pool_busy_us{}, pool_wakes{}, pool_idle_wakes{};
 };
 SubmitState submit;
 
@@ -889,10 +920,7 @@ const u32* RecordDispatch(Lane& l, const u32* packet, const u32* next, const u32
         if (seg.draw_packets.size() >= MaxComputeDispatches) CloseCompute(l, CloseFull, 0x15);
     }
     if (token_for && has_nop) {
-        auto* w = const_cast<u32*>(next);
-        w[1] = TokenMagic;
-        w[2] = token_for->generation;
-        w[3] = token_for->token;
+        WriteToken(next + 1, token_for->generation, token_for->token);
     }
     return after;
 }
@@ -1032,10 +1060,7 @@ void RecordCommandBuffer(Lane& l, const u32* begin, const u32* end, const std::v
             if (seg.draw_packets.size() >= MaxSegmentDraws) CloseSegment(l, CloseFull);
         }
         if (token_for && has_nop) {
-            auto* w = const_cast<u32*>(next);
-            w[1] = TokenMagic;
-            w[2] = token_for->generation;
-            w[3] = token_for->token;
+            WriteToken(next + 1, token_for->generation, token_for->token);
         }
         plain_from = after;
         p = after;
@@ -1049,22 +1074,121 @@ std::atomic<u64> job_sequence{};
 std::array<std::atomic<u64>, MaxPoolThreads> running_jobs{};
 std::atomic<u32> pool_slots{};
 
+u64 NowUs();
+
+// ISS_NATIVE_PASSES_CPU=off|ecore|pcore: the CPU sets each pool thread restricts itself to (once,
+// at its start). ecore: every efficiency class below the highest (class 0 on a 2-class CPU, both
+// lower classes on a 3-class one); pcore: the highest class. Both leave out the command
+// processor's core (ISS_CP_CPU, IssCommandProcessorCpuSets in bridge.cpp, whichever thread
+// starts first). off (default), a non-hybrid CPU or Linux: unchanged.
+enum class PoolCpu { Off, ECore, PCore };
+PoolCpu PoolCpuMode() {
+    static const PoolCpu mode = [] {
+        const char* p = std::getenv("ISS_NATIVE_PASSES_CPU");
+        if (p && std::strcmp(p, "ecore") == 0) return PoolCpu::ECore;
+        if (p && std::strcmp(p, "pcore") == 0) return PoolCpu::PCore;
+        return PoolCpu::Off;
+    }();
+    return mode;
+}
+
+void RestrictPoolThread() {
+    const PoolCpu mode = PoolCpuMode();
+    if (mode == PoolCpu::Off) return;
+    static std::atomic<bool> logged{};
+    const bool log = !logged.exchange(true); // one line, from the first pool thread
+    const char* name = mode == PoolCpu::ECore ? "ecore" : "pcore";
+#ifdef _WIN32
+    ULONG length = 0;
+    GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
+    std::vector<char> buffer(length);
+    if (!length || !GetSystemCpuSetInformation(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()),
+                                               length, &length, GetCurrentProcess(), 0)) {
+        if (log) std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: no CPU set information\n", name);
+        return;
+    }
+    std::vector<std::pair<ULONG, unsigned>> sets; // id, efficiency class
+    unsigned low = ~0u, high = 0;
+    for (size_t offset = 0; offset < length;) {
+        const auto* info = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + offset);
+        if (!info->Size) break;
+        if (info->Type == CpuSetInformation) {
+            const unsigned efficiency = info->CpuSet.EfficiencyClass;
+            sets.emplace_back(info->CpuSet.Id, efficiency);
+            low = std::min(low, efficiency);
+            high = std::max(high, efficiency);
+        }
+        offset += info->Size;
+    }
+    if (sets.empty() || low == high) {
+        if (log) std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: not a hybrid CPU\n", name);
+        return;
+    }
+    // The command processor's core: a thread's selected sets override the process default that
+    // keeps other threads off it, so it is left out here.
+    std::vector<ULONG> cp_sets;
+    const bool cp_pinned = IssCommandProcessorCpuSets(cp_sets);
+    const auto wanted = [&](unsigned efficiency) {
+        return mode == PoolCpu::ECore ? efficiency < high : efficiency == high;
+    };
+    std::vector<ULONG> ids;
+    size_t excluded = 0;
+    for (const auto& [id, efficiency] : sets) {
+        if (!wanted(efficiency)) continue;
+        if (std::find(cp_sets.begin(), cp_sets.end(), id) != cp_sets.end()) {
+            ++excluded;
+            continue;
+        }
+        ids.push_back(id);
+    }
+    char classes[16];
+    if (mode == PoolCpu::ECore && high - 1 > low)
+        std::snprintf(classes, sizeof(classes), "%u-%u", low, high - 1);
+    else if (mode == PoolCpu::ECore)
+        std::snprintf(classes, sizeof(classes), "%u", low);
+    else
+        std::snprintf(classes, sizeof(classes), "%u", high);
+    if (ids.empty()) {
+        if (log)
+            std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: no CPU set of class %s\n", name, classes);
+        return;
+    }
+    const BOOL ok = SetThreadSelectedCpuSets(GetCurrentThread(), ids.data(), ULONG(ids.size()));
+    // Nothing excluded: the command processor is not pinned, or (ecore) its core is not of
+    // these classes.
+    const char* why = excluded ? "" : !cp_pinned ? " (cp not pinned)" : " (cp core not in these classes)";
+    if (log)
+        std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s class=%s sets=%zu excluded=%zu(cp core)%s thread=%d\n",
+                     name, classes, ids.size(), excluded, why, int(ok));
+#else
+    if (log) std::fprintf(stderr, "NATIVE_PASSES_POOL cpu=%s not applied: CPU sets are Windows-only\n", name);
+#endif
+}
+
 void PoolThread() {
     SetThreadDescription(GetCurrentThread(), L"ISS:NativePassesPool");
+    RestrictPoolThread();
     auto lane = NewJobLane();
     const u32 slot = pool_slots.fetch_add(1) % MaxPoolThreads;
     for (;;) {
         Job job;
         {
             std::unique_lock lock{submit.pool_mutex};
-            submit.work_cv.wait(lock, [] { return !submit.jobs.empty(); });
+            // work_cv.wait(lock, [] { return !submit.jobs.empty(); }) spelled out, to count wakeups.
+            while (submit.jobs.empty()) {
+                submit.work_cv.wait(lock);
+                submit.pool_wakes.fetch_add(1, std::memory_order_relaxed);
+                if (submit.jobs.empty()) submit.pool_idle_wakes.fetch_add(1, std::memory_order_relaxed);
+            }
             job = std::move(submit.jobs.front());
             submit.jobs.pop_front();
         }
         // seq_cst: the job's image generation reads come after this store, and a free's ticket
         // read after its bump sees it (see WaitRecordingBefore).
         running_jobs[slot].store(job_sequence.fetch_add(1) + 1);
+        const u64 busy_t0 = NowUs();
         RecordCommandBuffer(*lane, job.begin, job.end, job.start);
+        submit.pool_busy_us.fetch_add(NowUs() - busy_t0, std::memory_order_relaxed);
         running_jobs[slot].store(0, std::memory_order_release);
         submit.jobs_done.fetch_add(1, std::memory_order_relaxed);
         if (job.work->job_done) job.work->job_done[job.index].store(1, std::memory_order_release);
@@ -1093,10 +1217,15 @@ void WaitRecordingBefore(u64 ticket) {
 
 namespace {
 u64 NowUs() {
-    LARGE_INTEGER t, f;
-    QueryPerformanceCounter(&t);
-    QueryPerformanceFrequency(&f);
-    return u64(t.QuadPart * 1000000 / f.QuadPart);
+    static const u64 f = [] {
+        LARGE_INTEGER q;
+        QueryPerformanceFrequency(&q);
+        return u64(q.QuadPart);
+    }();
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    const u64 t = u64(q.QuadPart);
+    return (t / f) * 1000000 + (t % f) * 1000000 / f; // t * 1000000 overflows after ~10 days at 10 MHz
 }
 
 // The scissor setters of the eboot's DrawCommandBuffer (setScreenScissor 0x626890, called by the
@@ -1226,7 +1355,10 @@ Segment* Claim(const u32* packet) {
         Segment* s = slot.segment.load(std::memory_order_acquire);
         if (!s) return nullptr;
         const u32* const t = TokenWords(packet);
-        if (t[0] != TokenMagic || t[1] != s->generation || t[2] != s->token) return nullptr;
+        if (t[0] != TokenMagic || t[1] != s->generation || t[2] != s->token) {
+            stats.token_misses.fetch_add(1, std::memory_order_relaxed);
+            return nullptr;
+        }
         u32 expected = Ready;
         if (!s->state.compare_exchange_strong(expected, Claimed)) return nullptr;
         if (s->first_draw != packet || t[1] != s->generation) {
@@ -1248,7 +1380,6 @@ void Finish(Segment& s, bool executed, u64 tick) {
     if (executed) {
         stats.executed.fetch_add(1, std::memory_order_relaxed);
         stats.executed_draws.fetch_add(s.draw_packets.size(), std::memory_order_relaxed);
-        Vulkan::g_iss_total_draws.fetch_add(s.draw_packets.size(), std::memory_order_relaxed);
         s.executed_tick.store(tick, std::memory_order_relaxed);
         s.state.store(Done, std::memory_order_release);
     } else {
@@ -1299,12 +1430,36 @@ bool JobWait() {
     }();
     return enabled;
 }
+// ISS_NATIVE_WAIT_PUMP=1 (default 0: untimed waits): the command processor waiting for the pool
+// wakes every 1 ms (not sub-ms: libc++ on Win32 truncates that to a busy poll) and serves the
+// guest commands queued for it, the pool lock released. A pool or scan thread faulting on a
+// GPU-modified command buffer page waits for such a command (a readback): without it, both wait
+// for each other. The waits are at a packet boundary, where the command processor's loop serves
+// the commands anyway (ProcessCommands before WaitRecordedAt).
+bool WaitPump() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_NATIVE_WAIT_PUMP");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
+void WaitDone(std::unique_lock<std::mutex>& lock, const auto& done) {
+    if (!WaitPump()) {
+        submit.done_cv.wait(lock, done);
+        return;
+    }
+    while (!submit.done_cv.wait_for(lock, std::chrono::milliseconds(1), done)) {
+        lock.unlock();
+        IssCpServeCommands();
+        lock.lock();
+    }
+}
 // Waits (pool lock held) until job k of the command processor's command buffer is recorded.
 void WaitJob(std::unique_lock<std::mutex>& lock, DcbWork& work, u32 k) {
     const auto done = [&] { return work.job_done[k].load(std::memory_order_acquire) != 0; };
     if (done()) return;
     const u64 t0 = NowUs();
-    submit.done_cv.wait(lock, done);
+    WaitDone(lock, done);
     submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
     submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
 }
@@ -1331,7 +1486,7 @@ void WaitRecorded(const u32* dcb) {
         // others as the command processor reaches them (WaitRecordedAt).
         if (!scanned()) {
             const u64 t0 = NowUs();
-            submit.done_cv.wait(lock, scanned);
+            WaitDone(lock, scanned);
             submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
             submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
         }
@@ -1349,7 +1504,7 @@ void WaitRecorded(const u32* dcb) {
     }
     if (done()) return;
     const u64 t0 = NowUs();
-    submit.done_cv.wait(lock, done);
+    WaitDone(lock, done);
     submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
     submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
 }
@@ -1459,19 +1614,35 @@ void ScanCommandBuffer(const u32* begin, const u32* end, const std::shared_ptr<D
     work->jobs_left.store(n, std::memory_order_relaxed);
 }
 
-void StartPool() {
-    if (!submit.threads.empty()) return;
+u32 PoolSize() {
     static const u32 n = [] {
         const char* p = std::getenv("ISS_NATIVE_PASSES_THREADS");
         return p ? u32(std::max(1, std::atoi(p))) : 6u;
     }();
+    return n;
+}
+
+void StartPool() {
+    if (!submit.threads.empty()) return;
+    const u32 n = PoolSize();
     for (u32 i = 0; i < n; ++i) submit.threads.emplace_back(PoolThread);
+}
+
+// ISS_NATIVE_PASSES_WAKE=all|one: QueueJobs wakes every pool thread (all, default) or one per
+// job queued, at most the pool's size (one).
+bool WakeOne() {
+    static const bool one = [] {
+        const char* p = std::getenv("ISS_NATIVE_PASSES_WAKE");
+        return p && std::strcmp(p, "one") == 0;
+    }();
+    return one;
 }
 
 // Hands the jobs of scanned command buffers to the pool. first: ahead of the queued ones (a
 // compute queue's submission: its submitting thread waits for them).
 void QueueJobs(std::vector<Job>& jobs, const std::vector<std::shared_ptr<DcbWork>>& works,
                bool first = false) {
+    const size_t added = jobs.size();
     {
         std::scoped_lock pool_lock{submit.pool_mutex};
         if (first)
@@ -1481,7 +1652,15 @@ void QueueJobs(std::vector<Job>& jobs, const std::vector<std::shared_ptr<DcbWork
         for (const auto& work : works) work->scanned.store(true, std::memory_order_release);
     }
     jobs.clear();
-    submit.work_cv.notify_all();
+    if (WakeOne()) {
+        // No job is left with every thread asleep: a thread not waiting now checks the queue
+        // under pool_mutex before it waits, and each thread woken here pops jobs until the
+        // queue is empty.
+        const size_t wakes = std::min<size_t>(added, PoolSize());
+        for (size_t i = 0; i < wakes; ++i) submit.work_cv.notify_one();
+    } else {
+        submit.work_cv.notify_all();
+    }
     submit.done_cv.notify_all();
 }
 
@@ -1786,17 +1965,53 @@ bool AscRecorded(const u32* ring) {
     return false;
 }
 
+namespace {
+u64 StatsIntervalUs() {
+    static const u64 us = [] {
+        const char* p = std::getenv("ISS_NATIVE_STATS_INTERVAL_MS");
+        const u64 ms = p ? std::strtoull(p, nullptr, 10) : 0;
+        if (ms) std::fprintf(stderr, "PORT_TUNING native_stats_interval_ms=%llu\n", (unsigned long long)ms);
+        return ms * 1000;
+    }();
+    return us;
+}
+std::array<std::atomic<u64>, size_t(Reporter::Count)> report_us{};
+} // namespace
+
+bool ReportTimeDue(Reporter reporter) {
+    const u64 interval = StatsIntervalUs();
+    if (!interval) return true;
+    const u64 now = NowUs();
+    auto& last = report_us[size_t(reporter)];
+    u64 previous = last.load(std::memory_order_relaxed);
+    // The first call reports at once, as the count's first one does.
+    if (previous && now - previous < interval) return false;
+    return last.compare_exchange_strong(previous, now, std::memory_order_relaxed);
+}
+
+bool ReportDue(Reporter reporter, u64& count) {
+    if (!StatsIntervalUs()) return (++count & 1023) == 1;
+    ++count;
+    return ReportTimeDue(reporter);
+}
+
 void Report() {
     auto& s = stats;
     if (const u64 n = submit.submits.load(std::memory_order_relaxed))
         std::fprintf(stderr,
                      "NATIVE_PASSES_SUBMIT submits=%llu dcbs=%llu jobs=%llu scan_us/submit=%llu "
-                     "cp_waits=%llu cp_wait_us/submit=%llu\n",
+                     "cp_waits=%llu cp_wait_us/submit=%llu pool_busy_us=%llu pool_busy_us/job=%llu "
+                     "pool_wakes=%llu pool_idle_wakes=%llu wake=%s\n",
                      (unsigned long long)n, (unsigned long long)submit.dcbs_recorded.load(),
                      (unsigned long long)submit.jobs_done.load(),
                      (unsigned long long)(submit.scan_us.load() / n),
                      (unsigned long long)submit.cp_waits.load(),
-                     (unsigned long long)(submit.cp_wait_us.load() / n));
+                     (unsigned long long)(submit.cp_wait_us.load() / n),
+                     // The pool's totals: every job, gfx and ISS_NATIVE_ASC (jobs= counts both).
+                     (unsigned long long)submit.pool_busy_us.load(),
+                     (unsigned long long)(submit.pool_busy_us.load() / std::max<u64>(1, submit.jobs_done.load())),
+                     (unsigned long long)submit.pool_wakes.load(),
+                     (unsigned long long)submit.pool_idle_wakes.load(), WakeOne() ? "one" : "all");
     if (const u64 n = asc_stats.submits.load(std::memory_order_relaxed))
         std::fprintf(stderr,
                      "NATIVE_ASC submits=%llu ibs=%llu dispatches=%llu jobs=%llu scan_us/submit=%.1f "
@@ -1864,7 +2079,8 @@ void Report() {
     std::fprintf(stderr,
                  "NATIVE_PASSES draws=%llu recorded=%llu segments=%llu learn_posted=%llu "
                  "unknown_state=%llu not_ready=%llu abandoned=%llu no_slot=%llu | cp claimed=%llu "
-                 "executed=%llu executed_draws=%llu rejected=%llu learned=%llu close[%s ] "
+                 "executed=%llu executed_draws=%llu rejected=%llu learned=%llu token_misses=%llu "
+                 "token_plain_stores=%llu close[%s ] "
                  "boundaries[%s ]\n",
                  (unsigned long long)s.draws.load(), (unsigned long long)s.recorded.load(),
                  (unsigned long long)s.segments.load(), (unsigned long long)s.learn_posted.load(),
@@ -1872,7 +2088,8 @@ void Report() {
                  (unsigned long long)s.abandoned.load(), (unsigned long long)s.no_slot.load(),
                  (unsigned long long)s.claimed.load(), (unsigned long long)s.executed.load(),
                  (unsigned long long)s.executed_draws.load(), (unsigned long long)s.rejected.load(),
-                 (unsigned long long)s.learned.load(), closes.c_str(), opcodes.c_str());
+                 (unsigned long long)s.learned.load(), (unsigned long long)s.token_misses.load(),
+                 (unsigned long long)s.token_plain_stores.load(), closes.c_str(), opcodes.c_str());
     if (const u64 n = s.dispatches.load(std::memory_order_relaxed)) {
         std::vector<std::pair<u64, u32>> cs_top;
         for (u32 i = 0; i < 257; ++i)

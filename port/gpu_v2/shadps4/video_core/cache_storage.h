@@ -44,6 +44,11 @@ public:
     void Load(BlobType type, const std::string& name, std::vector<u32>& data);
 
     void ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func);
+    /// iss: as ForEachBlob, with each blob's name (the one Save and Remove take).
+    void ForEachNamedBlob(BlobType type,
+                          const std::function<void(const std::string& name, std::vector<u8>&& data)>& func);
+    /// iss: deletes a blob (queued after the writes already accepted). Not in an archived cache.
+    void Remove(BlobType type, const std::string& name);
 
 private:
     std::jthread io_worker{};

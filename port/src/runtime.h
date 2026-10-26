@@ -27,6 +27,10 @@ void runtime_restart(void);
 #define ABI __attribute__((sysv_abi))
 typedef void (ABI *GuestCallback)(void);
 void runtime_start(uint64_t capabilities);
+/* Hot-path counters (ISS_RUNTIME_COUNTERS=1 -> TLG_RUNTIME_COUNTERS, default 0): the libc memory
+ * calls, the mutex and condition variable counts and the ISA stub hits. Off, the exit report says
+ * "off" for them. Set once by runtime_start, before the guest threads start. */
+extern int runtime_counters;
 uintptr_t runtime_resolve(const char *name, int is_data);
 void runtime_report(void);
 /* Called at the end of runtime_report (the loader adds its own counters). */
@@ -53,6 +57,7 @@ void runtime_thread_attach_main(void);
 int32_t *runtime_errno(void);
 uintptr_t runtime_sema_resolve(const char *name);
 void runtime_sema_report(void);
+void runtime_event_flag_report(void); /* runtime_tlg.c; counts with runtime_counters */
 unsigned runtime_sema_waiters(uint32_t id);
 uintptr_t runtime_time_resolve(const char *name);
 void runtime_content_configure(const uint32_t values[5]);
@@ -181,6 +186,8 @@ typedef struct RuntimeThreadInfo {
 } RuntimeThreadInfo;
 /* Guest threads and host wait slots; returns how many were written (at most max). */
 size_t runtime_thread_snapshot(RuntimeThreadInfo *out, size_t max);
+/* OS thread ids of the live guest threads (and attached host threads); at most max. */
+size_t runtime_guest_thread_ids(uint64_t *out, size_t max);
 /* One line: "waiting on mutex 'name' 0x... for 1234 ms, held by 'Main'" ("running" without a
  * wait). threads/count resolve owners to names. */
 void runtime_freeze_describe_wait(char *out, size_t size, const RuntimeWait *wait, uint64_t now_ms,

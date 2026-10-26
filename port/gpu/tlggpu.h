@@ -81,6 +81,10 @@ typedef struct { uint64_t submitted, shown, presented, vblanks, faults_in_progre
 void tlggpu_frame_counters(TlgGpuFrameCounters *out);
 /* Draws recorded so far (gameplay detection for scripted routes, src/runtime_pad.c). */
 uint64_t tlggpu_total_draws(void);
+/* Benchmark window of a scripted route (src/runtime_pad.c, any thread): phase 0 when a pad replay
+ * starts, 1 when it finishes. Renderer v2 times the frames between them and prints one
+ * "Bench:" line (ISS_BENCH_JSON, ISS_BENCH_EXIT, ISS_BENCH_SKIP_MS, ISS_BENCH_LABEL). */
+void tlggpu_bench_mark(int phase);
 /* The game opened a file (guest path): feeds the region trace (TLG_REGION_TRACE=1, gpu/shim/tlg_region.h). */
 void tlggpu_note_open(const char *guest_path);
 /* The mouse, gathered by the window thread while the game has it (SDL relative mode: the window
@@ -101,6 +105,7 @@ typedef struct {
     int32_t rumble;             /* controller vibration on (tlg.ini rumble, TLG_RUMBLE) */
     float sensitivity, smoothing, accel, deadzone;
     char key_map[512];
+    float vertical; /* mouse_sensitivity_y: y's sensitivity over x's; 0 (zeroed struct) = 1 */
 } TlgGpuInputSettings;
 void tlggpu_input_settings(TlgGpuInputSettings *settings);
 /* Touchpad mode of the mouse (runtime_pad.c): while active, a small touchpad with the virtual

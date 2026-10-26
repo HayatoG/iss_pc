@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 import zipfile
 
+from . import cacerts
 from .releases import RELEASE_PREFIX, TIMEOUT, UpdateError, user_agent
 
 # packaging/{linux,windows}/package.sh: dist/$PORT_SLUG-<platform>-x86_64.<ext>, one top folder
@@ -73,7 +74,7 @@ class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def https_opener():
-    return urllib.request.build_opener(_HttpsOnlyRedirects).open
+    return urllib.request.build_opener(_HttpsOnlyRedirects, cacerts.https_handler()).open
 
 
 def _open(url, version, opener, timeout):
@@ -96,8 +97,12 @@ def _open(url, version, opener, timeout):
             raise error.reason from error
         if isinstance(error.reason, (socket.timeout, TimeoutError)):
             raise UpdateError('timeout') from error
+        if cacerts.is_cert_error(error):
+            raise UpdateError('tls', str(error.reason)) from error
         raise UpdateError('offline', str(error.reason)) from error
     except OSError as error:
+        if cacerts.is_cert_error(error):
+            raise UpdateError('tls', str(error)) from error
         raise UpdateError('offline', str(error)) from error
     final = getattr(response, 'geturl', lambda: url)() or url
     if not str(final).lower().startswith('https://'):

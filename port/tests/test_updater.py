@@ -331,7 +331,7 @@ class StringsTests(unittest.TestCase):
     def test_every_error_kind_has_a_message(self):
         strings = json.loads((ROOT / 'launcher' / 'qt' / 'i18n' / 'strings.json').read_text(encoding='utf-8'))
         for kind in ('noasset', 'insecure', 'size', 'checksum', 'space', 'write', 'archive', 'cancel', 'launch',
-                     'offline', 'timeout', 'limit', 'http', 'bad'):
+                     'offline', 'tls', 'timeout', 'limit', 'http', 'bad'):
             self.assertIn('upd_err_' + kind, strings)
         text = (ROOT / 'launcher' / 'qt' / 'updates.py').read_text(encoding='utf-8')
         for key in set(__import__('re').findall(r"'(upd_\w+)'", text)) - {'upd_err_'}:

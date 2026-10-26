@@ -113,6 +113,19 @@ public:
         return static_cast<u32>(open.size());
     }
 
+    /// A counted open query has a segment per counter pair, the last one active: a submit now
+    /// (which ends the rendering scope, so the segment) would leave it uncounted (emulated).
+    /// A query past its pairs is marked incomplete (BeginSegment) and never holds.
+    [[nodiscard]] bool AtSegmentLimit() const noexcept {
+        if (open.empty() || !active) [[likely]] {
+            return false;
+        }
+        const u32 num_segments = static_cast<u32>(segments.size());
+        return std::any_of(open.begin(), open.end(), [num_segments](const OpenQuery& q) {
+            return !q.incomplete && num_segments - q.first_segment == q.max_segments;
+        });
+    }
+
     [[nodiscard]] vk::QueryPool Pool() const noexcept {
         return *pool;
     }
@@ -537,6 +550,10 @@ public:
     void DumpAfter(const Pipeline* pipeline);
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// ISS_READBACK_DISCARD: a guest thread is about to write every byte of [addr, addr + size)
+    /// (memcpy, memset, file reads): the GPU data of the whole pages inside is dropped instead
+    /// of read back by their write faults. The partly written pages at the ends fault as usual.
+    void DiscardOverwrite(VAddr addr, u64 size);
     /// The command processor wrote guest memory directly (see BufferCache::OnGpuThreadWrite).
     void BeforeGpuThreadWrite(VAddr addr, u64 size);
     void OnGpuThreadWrite(VAddr addr, u64 size);

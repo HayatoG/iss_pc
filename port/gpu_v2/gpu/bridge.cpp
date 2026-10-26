@@ -25,6 +25,8 @@ namespace iss::native_gbuffer { int InstallCensus(std::uint64_t base); }
 namespace iss { extern std::atomic<unsigned> g_preload_entries, g_preload_total; extern std::atomic<int> g_preload_phase; }
 #include <atomic>
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <cstdlib>
 #include <chrono>
 #include <condition_variable>
@@ -50,6 +52,7 @@ namespace iss { extern std::atomic<unsigned> g_preload_entries, g_preload_total;
 #include <boost/asio/executor_work_guard.hpp>
 #include <xxhash.h>
 #include "common/elf_info.h"
+#include "common/memory_patcher.h"
 #include "common/thread.h"
 #include "common/path_util.h"
 #include "common/perf_stats.h"
@@ -73,6 +76,8 @@ namespace Vulkan{class Presenter;}
 extern std::unique_ptr<Vulkan::Presenter> presenter; // gnmdriver.cpp
 // The process ends (window closed, ISS_STOP_FILE): the host's exit report first (gpu_host.cpp).
 [[noreturn]] void IssHostExit();
+// A benchmark window ended with ISS_BENCH_EXIT=1 (gpu_host.cpp, any thread): stops as ISS_STOP_FILE.
+bool IssHostStopRequested();
 extern "C" void iss_gpu_install_image(uint64_t image_base);
 
 Frontend::WindowSDL *g_window=nullptr;
@@ -109,7 +114,11 @@ bool thread_priority_enabled(){static const bool on=[]{const char *p=std::getenv
 void raise_gpu_threads(){}
 #else
 void raise_gpu_threads(){
-    static const wchar_t *names[]={L"shadPS4:GpuCommandProcessor",L"shadPS4:GpuCommandRecorder",L"shadPS4:PresentThread",L"shadPS4:GpuUploadWorker",L"iss:DrawStageB"};
+    // ISS_PENDING_OPS_PRIO=1 (default 0): also the thread that writes the deferred labels, EOPs
+    // and interrupts the guest waits on once the GPU reaches their tick (vk_scheduler.cpp).
+    static const bool pending_ops=[]{const char *p=std::getenv("ISS_PENDING_OPS_PRIO");return p&&p[0]=='1';}();
+    static const wchar_t *names[]={L"shadPS4:GpuCommandProcessor",L"shadPS4:GpuCommandRecorder",L"shadPS4:PresentThread",L"shadPS4:GpuUploadWorker",L"iss:DrawStageB",
+                                   pending_ops?L"shadPS4:GpuSchedPriorityPendingOpsRunner":nullptr};
     const DWORD pid=GetCurrentProcessId();
     HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);if(snap==INVALID_HANDLE_VALUE)return;
     THREADENTRY32 te{};te.dwSize=sizeof(te);
@@ -118,7 +127,7 @@ void raise_gpu_threads(){
         HANDLE t=OpenThread(THREAD_SET_LIMITED_INFORMATION|THREAD_QUERY_LIMITED_INFORMATION,FALSE,te.th32ThreadID);if(!t)continue;
         PWSTR desc=nullptr;
         if(SUCCEEDED(GetThreadDescription(t,&desc))&&desc){
-            for(const wchar_t *n:names)if(!wcscmp(desc,n)&&GetThreadPriority(t)<THREAD_PRIORITY_ABOVE_NORMAL){
+            for(const wchar_t *n:names)if(n&&!wcscmp(desc,n)&&GetThreadPriority(t)<THREAD_PRIORITY_ABOVE_NORMAL){
                 if(SetThreadPriority(t,THREAD_PRIORITY_ABOVE_NORMAL))std::fprintf(stderr,"PORT_TUNING thread_priority %ls=above_normal\n",desc);
             }
             LocalFree(desc);
@@ -126,6 +135,37 @@ void raise_gpu_threads(){
         CloseHandle(t);
     }
     CloseHandle(snap);
+}
+// ISS_HIGH_QOS (default 1; 0 skips it): Windows 11 may run a process or thread it judges to be
+// in the background with EcoQoS (on E-cores, at low clocks). This opts the process and the command
+// processor out of execution-speed throttling. Best effort: the calls are looked up at run time.
+bool high_qos_enabled() {
+    static const bool on = [] { const char* p = std::getenv("ISS_HIGH_QOS"); return !p || p[0] != '0'; }();
+    return on;
+}
+struct IssPowerThrottlingState { ULONG Version, ControlMask, StateMask; };
+constexpr ULONG kPowerThrottlingVersion = 1, kPowerThrottlingExecutionSpeed = 0x1;
+constexpr int kProcessPowerThrottling = 4, kThreadPowerThrottling = 3;
+using SetInformationFn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+// thread=false: the process; thread=true: the calling thread.
+void iss_set_high_qos(bool thread) {
+    if (!high_qos_enabled()) {
+        if (!thread) std::fprintf(stderr, "PORT_TUNING high_qos=0 (ISS_HIGH_QOS=0)\n");
+        return;
+    }
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    const auto set = kernel ? reinterpret_cast<SetInformationFn>(reinterpret_cast<void*>(GetProcAddress(
+                                  kernel, thread ? "SetThreadInformation" : "SetProcessInformation")))
+                            : nullptr;
+    if (!set) {
+        std::fprintf(stderr, "PORT_TUNING high_qos %s unavailable\n", thread ? "thread" : "process");
+        return;
+    }
+    IssPowerThrottlingState state{kPowerThrottlingVersion, kPowerThrottlingExecutionSpeed, 0};
+    const BOOL ok = thread ? set(GetCurrentThread(), kThreadPowerThrottling, &state, sizeof(state))
+                           : set(GetCurrentProcess(), kProcessPowerThrottling, &state, sizeof(state));
+    std::fprintf(stderr, "PORT_TUNING high_qos=1 %s ok=%d%s\n", thread ? "thread=command_processor" : "process",
+                 ok ? 1 : 0, ok ? "" : " (EcoQoS opt-out refused)");
 }
 #endif
 }
@@ -241,6 +281,22 @@ bool MemoryManager::TryWriteBacking(void *address,const void *data,u64 size){
     else std::memcpy(dest,data,size);
     return true;
 }
+} // namespace Core
+// native_passes.cpp segment tokens: a non-faulting write of a few bytes through the host backing
+// (TryWriteBacking would invalidate every active SRT write watch under the global direct write
+// gate, once per segment start). Written first, then only the watches of the pages written are
+// invalidated: a watch armed before the invalidation is dropped by it, one armed after it reads
+// the new bytes. False without a backing (nothing written).
+bool IssWriteBackingRange(void* address,const void* data,u64 size){
+    const auto guest=reinterpret_cast<uintptr_t>(address);
+    auto* dest=host.backing(guest,size);
+    if(!dest)return false;
+    std::memcpy(dest,data,size);
+    if(auto* rasterizer=Core::Memory::Instance()->GetRasterizer())
+        rasterizer->InvalidateSrtWriteWatches(static_cast<VAddr>(guest),size);
+    return true;
+}
+namespace Core {
 bool MemoryManager::TryWriteBackingIf(void* address,const void* data,u64 size,
                                       u64 expected_native_epoch,
                                       const std::function<bool()>& predicate){
@@ -382,10 +438,82 @@ extern "C" void IssPreciseSleepUs(unsigned us){
     else SwitchToThread();
 #endif
 }
+// An idle wait that sleeps, for one waiting thread (ISS_UPLOAD_IDLE=sleep, the upload worker in
+// buffer_cache.cpp): IssIdleWaitFor returns after us microseconds on a high resolution timer, or
+// once IssIdleWaitWake is called (a wake while nobody waits ends the next wait at once). Windows
+// only (IssIdleWaitCreate returns null elsewhere): libc++ there rounds a timed condition variable
+// wait down to whole milliseconds, so a 1 ms wait returns at once and its caller spins; the POSIX
+// timed waits sleep.
+#ifdef _WIN32
+namespace {struct IssIdleWait{HANDLE event,timer;};}
+#endif
+extern "C" void* IssIdleWaitCreate(){
+#ifndef _WIN32
+    return nullptr;
+#else
+    HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+    if(!timer)return nullptr;
+    HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr); // auto-reset: no wake is lost
+    if(!event){CloseHandle(timer);return nullptr;}
+    return new IssIdleWait{event,timer};
+#endif
+}
+extern "C" void IssIdleWaitWake(void* wait){
+#ifdef _WIN32
+    SetEvent(static_cast<IssIdleWait*>(wait)->event);
+#else
+    (void)wait;
+#endif
+}
+extern "C" void IssIdleWaitFor(void* wait,unsigned us){
+#ifdef _WIN32
+    auto* w=static_cast<IssIdleWait*>(wait);
+    LARGE_INTEGER due;due.QuadPart=-static_cast<LONGLONG>(us)*10;
+    const HANDLE handles[2]={w->event,w->timer};
+    if(SetWaitableTimer(w->timer,&due,0,nullptr,nullptr,FALSE))WaitForMultipleObjects(2,handles,FALSE,INFINITE);
+    else WaitForSingleObject(w->event,1);
+#else
+    (void)wait;(void)us;
+#endif
+}
+extern "C" void IssIdleWaitDestroy(void* wait){
+#ifdef _WIN32
+    if(auto* w=static_cast<IssIdleWait*>(wait)){CloseHandle(w->event);CloseHandle(w->timer);delete w;}
+#else
+    (void)wait;
+#endif
+}
+// The present thread's vblank clock (ISS_VBLANK_TIMER=hr|hrspin, videoout_driver.cpp): sleeps
+// ns on a per-thread timer created once, high resolution when Windows has it (a plain one, about
+// 15.6 ms granular, otherwise). Returns 1 when that timer is high resolution; ns<=0 only creates it.
+extern "C" int IssVblankSleepNs(long long ns){
+#ifndef _WIN32
+    if(ns>0){timespec ts{static_cast<time_t>(ns/1000000000),static_cast<long>(ns%1000000000)};
+        while(nanosleep(&ts,&ts)!=0&&errno==EINTR){}}
+    return 1;
+#else
+    thread_local int highres=1;
+    thread_local HANDLE timer=[]{
+        HANDLE t=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+        if(!t){highres=0;t=CreateWaitableTimerW(nullptr,TRUE,nullptr);}
+        return t;
+    }();
+    if(ns<=0)return highres;
+    if(!timer){SwitchToThread();return highres;}
+    LARGE_INTEGER due;due.QuadPart=-static_cast<LONGLONG>(ns/100);
+    if(due.QuadPart==0)due.QuadPart=-1;
+    if(SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE))WaitForSingleObject(timer,INFINITE);
+    else SwitchToThread();
+    return highres;
+#endif
+}
 // The renderer's hooks in the game's code and the checked readback sites: once the image is
 // loaded and relocated, before the guest threads start.
 extern "C" void iss_gpu_install_image(uint64_t image_base){
     host.image_base=image_base;
+    // The eboot's base for the renderer's guest-code lookups: relaxed readback sites
+    // (BufferCache::IsRelaxedSite) and the fault-burst attribution (page_manager.cpp).
+    MemoryPatcher::g_eboot_address=image_base;
     // The executing image (as native/engine_draw.cpp patches it), not a backing view.
     if(iss::native_shadow::Enabled())
         iss::native_shadow::Install(host.image_base,reinterpret_cast<const unsigned char*>(host.image_base+0x43D590));
@@ -461,6 +589,9 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
     Common::Perf::GetTuning().async_uploads=upload_worker;
     std::fprintf(stderr,"PORT_TUNING async_uploads=%d async_pipelines=0\n",upload_worker);
     if(const char *p=std::getenv("ISS_GPU_PROFILE");p&&(p[0]=='1'||p[0]=='2'))Common::Perf::GetTuning().gpu_profile=p[0]-'0';
+    // ISS_PERF_LOG=1 (or ISS_TUNING=perf_log=1): the "Perf:" counter reports in the log every
+    // second (Common::Perf::OnFlip). Nothing else sets it on renderer v2.
+    if(const char *p=std::getenv("ISS_PERF_LOG");p&&p[0]=='1'){Common::Perf::GetTuning().perf_log=true;std::fprintf(stderr,"PORT_TUNING perf_log=1\n");}
     {const char *p=std::getenv("ISS_COMPUTE_PHASES");iss::phase::g_enabled=p&&p[0]=='1';
      std::fprintf(stderr,"PORT_TUNING compute_phases=%d\n",iss::phase::Enabled()?1:0);}
     // ISS_TIMER_1MS=1 (off by default, the user's choice): 1 ms timer resolution for this
@@ -481,6 +612,7 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
         const BOOL ok=SetPriorityClass(GetCurrentProcess(),ABOVE_NORMAL_PRIORITY_CLASS);
         std::fprintf(stderr,"PORT_TUNING process_priority=above_normal ok=%d\n",ok?1:0);
     }
+    iss_set_high_qos(false);
 #endif
     // ISS_TUNING="name=value,...": existing renderer toggles for A/B tests, applied last.
     if(const char *p=std::getenv("ISS_TUNING")){
@@ -505,6 +637,9 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
             else if(name=="asc_yield_packets")set(tuning.asc_yield_packets,value);
             else if(name=="recorder_spin_us")set(tuning.recorder_spin_us,value);
             else if(name=="tiered_compute_pipelines")set(tuning.tiered_compute_pipelines,value);
+            else if(name=="max_gpu_lag_frames")set(tuning.max_gpu_lag_frames,value);
+            else if(name=="gpu_sync_frame_end")set(tuning.gpu_sync_frame_end,value);
+            else if(name=="perf_log")tuning.perf_log=std::strtoull(value.c_str(),nullptr,0)!=0;
             // relaxed_site=<eboot offset> (repeatable, up to 8): reads of GPU written memory from
             // that 256 byte block of the game's code do not wait for the GPU (readback_relaxed_sites).
             else if(name=="relaxed_site"){const u32 n=tuning.num_relaxed_sites.load();if(n<Common::Perf::Tuning::MaxRelaxedSites){tuning.relaxed_sites[n]=std::strtoull(value.c_str(),nullptr,0)&~0xFFull;tuning.num_relaxed_sites.store(n+1);}}
@@ -594,7 +729,8 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
                         std::string title=std::string(host.title)+" - "+status;
                         if(title!=shown){SDL_SetWindowTitle(g_window->GetSDLWindow(),title.c_str());shown=title;}
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    // Not sleep_for: without a raised timer period it lasts a ~15.6 ms tick.
+                    IssPreciseSleepUs(5000);
                 }
                 init.join();
                 SDL_SetWindowTitle(g_window->GetSDLWindow(),host.title);
@@ -610,8 +746,9 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
             for(;;){
                 bool stop=!g_window->PollEvents();auto now=std::chrono::steady_clock::now();
                 if(stop_path&&now-last_stop_check>std::chrono::milliseconds(100)){std::error_code ec;stop|=std::filesystem::exists(stop_path,ec);last_stop_check=now;}
+                stop|=IssHostStopRequested();
                 if(stop){
-                    if(renderer&&checkpoints)renderer->GetPipelineCache().CheckpointDriverCache();
+                    if(renderer&&checkpoints)renderer->GetPipelineCache().CheckpointDriverCache(true);
                     // Our atomic checkpoint replaces the old destructor-only snapshot.
                     Storage::DataBase::Instance().SetBeforeClose({});Storage::DataBase::Instance().Close();
                     std::fputs("PORT_STOP cache writes drained; closing all guest threads and audio\n",stderr);std::fflush(nullptr);
@@ -621,40 +758,153 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
                 // Off the window thread: a changed driver cache takes ~120 ms to write.
                 if(checkpoints&&renderer&&now-last_checkpoint>std::chrono::seconds(30)){
                     std::thread([renderer]{renderer->GetPipelineCache().CheckpointDriverCache();}).detach();last_checkpoint=now;}
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                // Not sleep_for: SDL3 sets no timer period, so a 2 ms sleep_for (Sleep(2)) lasts
+                // a ~15.6 ms tick and input is pumped at ~64 Hz. The high resolution timer sleeps
+                // ~2 ms.
+                IssPreciseSleepUs(2000);
             }
         }catch(const std::exception& e){std::fprintf(stderr,"GPU initialization failed: %s\n",e.what());{std::scoped_lock guard{ready_mutex};ready=-1;}ready_cv.notify_all();}
     });window_thread.detach();
     std::unique_lock guard{ready_mutex};ready_cv.wait(guard,[]{return ready!=0;});return ready==1?0:-1;
 }
 
-// ISS_CP_CPU=L: the command processor thread limits the frame rate while several guest threads
-// spin on rdtsc waiting for it. The physical core of logical processor L is taken out of the
-// process default CPU sets (no other thread of the process runs there, its SMT sibling stays
-// idle) and the command processor is given logical processor L alone.
 uint64_t IssImageBase() { return host.image_base; }
+
+// ISS_CP_CPU: the command processor thread limits the frame rate while several guest threads
+// spin on rdtsc waiting for it, so it gets a physical core of its own.
+//   auto           Windows: the last physical core of the fastest class (the last P-core of a
+//                  hybrid CPU such as the i7-13700H: LP 10/11), never core 0. On a non-hybrid CPU
+//                  the last core sharing the L3 of LP 0 (LP 14/15 of an 8-core/16-thread CPU, the
+//                  V-cache CCD of a 7950X3D), or the last core overall if the cache query fails.
+//                  With fewer than 4 physical cores nothing is pinned.
+//                  Linux: on a hybrid Intel CPU (/sys/devices/cpu_core/cpus lists the P-cores'
+//                  logical processors) the first logical processor of the last P-core;
+//                  otherwise the same as 14.
+//   <L>            the physical core of logical processor L (a number: the original behaviour).
+//   empty, off, none, -1   no pinning.
+//   anything else  a warning, then auto.
+// Pinned: the core is taken out of the process default CPU sets (no other thread of the process
+// runs there, its SMT sibling stays idle) and the command processor gets one logical processor
+// of it alone (L, or the core's first one for auto). Only processor group 0 is used.
+namespace {
+enum class CpMode { Off, Auto, Manual };
+struct CpChoice { CpMode mode; long lp; };
+CpChoice cp_mode(const char* value) {
+    if (!value) return {CpMode::Off, -1};
+    std::string v = value;
+    const auto space = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+    while (!v.empty() && space(v.back())) v.pop_back();
+    size_t first = 0;
+    while (first < v.size() && space(v[first])) first++;
+    v.erase(0, first);
+    for (auto& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (v.empty() || v == "off" || v == "none" || v == "-1") return {CpMode::Off, -1};
+    if (v == "auto") return {CpMode::Auto, -1};
+    errno = 0;
+    char* end = nullptr;
+    const long lp = std::strtol(v.c_str(), &end, 10);
+    if (std::isdigit(static_cast<unsigned char>(v[0])) && end && *end == '\0' && errno == 0 && lp >= 0 && lp < 4096) {
+        return {CpMode::Manual, lp};
+    }
+    std::fprintf(stderr, "PORT_TUNING cp_cpu warning: unrecognised ISS_CP_CPU=\"%s\": using auto\n", v.c_str());
+    return {CpMode::Auto, -1};
+}
+} // namespace
 
 #ifndef _WIN32
 // Linux: the command processor thread alone on logical processor L (the other threads keep
 // their affinity: CPU sets have no Linux equivalent that excludes a core from a process).
+// `auto`: the last P-core of a hybrid Intel CPU, else the old default 14 (or the last logical
+// processor).
+namespace {
+// The highest logical processor of a sysfs CPU list ("0-11", "0-5,12-15", "3"), -1 if none.
+long last_in_cpu_list(const char* path) {
+    FILE* file = std::fopen(path, "r");
+    if (!file) return -1;
+    char text[512]{};
+    const bool read = std::fgets(text, sizeof(text), file) != nullptr;
+    std::fclose(file);
+    if (!read) return -1;
+    long last = -1;
+    for (const char* p = text; *p;) {
+        if (!std::isdigit(static_cast<unsigned char>(*p))) {
+            ++p;
+            continue;
+        }
+        char* end = nullptr;
+        const long value = std::strtol(p, &end, 10);
+        last = std::max(last, value);
+        p = end;
+    }
+    return last;
+}
+// The first logical processor of a sysfs CPU list, -1 if none.
+long first_in_cpu_list(const char* path) {
+    FILE* file = std::fopen(path, "r");
+    if (!file) return -1;
+    long first = -1;
+    if (std::fscanf(file, "%ld", &first) != 1) first = -1;
+    std::fclose(file);
+    return first;
+}
+// Hybrid Intel CPU: the first logical processor of the last P-core (as Windows' auto picks it:
+// LP 10 of an i7-13700H), -1 when the kernel lists no P-cores.
+long last_p_core_lp() {
+    const long last = last_in_cpu_list("/sys/devices/cpu_core/cpus");
+    if (last < 0) return -1;
+    char siblings[128];
+    std::snprintf(siblings, sizeof(siblings),
+                  "/sys/devices/system/cpu/cpu%ld/topology/thread_siblings_list", last);
+    const long first = first_in_cpu_list(siblings);
+    return first >= 0 && first <= last ? first : last;
+}
+} // namespace
 void IssPinCommandProcessor() {
-    const char* value = std::getenv("ISS_CP_CPU");
-    if (!value || !*value) return;
-    long wanted = std::strtol(value, nullptr, 10);
+    const CpChoice choice = cp_mode(std::getenv("ISS_CP_CPU"));
+    if (choice.mode == CpMode::Off) return;
+    const long p_core = choice.mode == CpMode::Auto ? last_p_core_lp() : -1;
+    long wanted = choice.mode == CpMode::Auto ? (p_core >= 0 ? p_core : 14) : choice.lp;
     const long count = sysconf(_SC_NPROCESSORS_ONLN);
     if (count > 0 && wanted >= count) wanted = count - 1; // fewer logical processors than asked
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(static_cast<int>(wanted), &set);
     const int ok = pthread_setaffinity_np(pthread_self(), sizeof(set), &set) == 0;
-    std::fprintf(stderr, "PORT_TUNING cp_cpu=%ld thread=%d\n", wanted, ok);
+    std::fprintf(stderr, "PORT_TUNING cp_cpu=%ld mode=%s thread=%d\n", wanted,
+                 choice.mode == CpMode::Auto ? (p_core >= 0 ? "auto(linux: last p-core)"
+                                                            : "auto(linux: 14)")
+                                             : "manual",
+                 ok);
 }
 #else
 
-void IssPinCommandProcessor() {
+
+static const char* cp_mode_name(CpMode mode) {
+    return mode == CpMode::Auto ? "auto" : mode == CpMode::Manual ? "manual" : "off";
+}
+
+namespace {
+// The command processor's placement (ISS_CP_CPU), chosen once for the process: the topology and
+// the choice are logged here. pinned: the core it gets (core_ids: every CPU set of that core;
+// id: the one of them the command processor thread runs on); not pinned: nothing else is set.
+struct CpSelection {
+    bool pinned{};
+    CpMode mode{CpMode::Off};
+    long wanted{-1};
+    ULONG id{};
+    unsigned logical{}, core{}, efficiency{};
+    bool hybrid{};
+    const char* scope{""};
+    std::vector<ULONG> others;   // every CPU set but the core's: the process default
+    std::vector<ULONG> core_ids; // the core's CPU sets
+    std::string siblings;        // the core's logical processors, "10/11"
+};
+
+CpSelection SelectCommandProcessorCpu() {
+    CpSelection sel;
     const char* value = std::getenv("ISS_CP_CPU");
-    if (!value || !*value) return;
-    const long wanted = std::strtol(value, nullptr, 10);
+    const CpChoice choice = cp_mode(value);
+    const CpMode mode = choice.mode;
     ULONG length = 0;
     GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
     std::vector<char> buffer(length);
@@ -662,43 +912,186 @@ void IssPinCommandProcessor() {
             reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()), length, &length,
             GetCurrentProcess(), 0)) {
         std::fprintf(stderr, "PORT_TUNING cp_cpu failed: no CPU set information\n");
-        return;
+        return sel;
     }
-    struct Set { ULONG id; unsigned core; unsigned logical; unsigned group; };
+    struct Set { ULONG id; unsigned core; unsigned logical; unsigned group; unsigned efficiency; };
     std::vector<Set> sets;
     for (size_t offset = 0; offset < length;) {
         const auto* info = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + offset);
         if (info->Type == CpuSetInformation) {
             sets.push_back({info->CpuSet.Id, info->CpuSet.CoreIndex,
-                            info->CpuSet.LogicalProcessorIndex, info->CpuSet.Group});
+                            info->CpuSet.LogicalProcessorIndex, info->CpuSet.Group,
+                            info->CpuSet.EfficiencyClass});
         }
         offset += info->Size;
     }
-    const Set* mine = nullptr;
+    // Physical cores: the logical processors with the same (Group, CoreIndex), SMT siblings.
+    struct Core { unsigned group, core, efficiency; std::vector<const Set*> lps; };
+    std::vector<Core> cores;
     for (const auto& set : sets) {
-        if (set.group == 0 && set.logical == wanted) mine = &set;
-    }
-    // A CPU with fewer logical processors than asked (ISS_CP_CPU=14 on a 6-core/12-thread CPU):
-    // the last one of group 0, so the command processor still gets a core of its own.
-    if (!mine) {
-        for (const auto& set : sets) {
-            if (set.group == 0 && (!mine || set.logical > mine->logical)) mine = &set;
+        auto it = std::find_if(cores.begin(), cores.end(),
+                               [&](const Core& c) { return c.group == set.group && c.core == set.core; });
+        if (it == cores.end()) {
+            cores.push_back({set.group, set.core, set.efficiency, {}});
+            it = cores.end() - 1;
         }
-        if (mine) std::fprintf(stderr, "PORT_TUNING cp_cpu %ld not found: using %u\n", wanted, unsigned(mine->logical));
+        it->lps.push_back(&set);
     }
-    if (!mine) {
-        std::fprintf(stderr, "PORT_TUNING cp_cpu failed: logical processor %ld not found\n", wanted);
-        return;
+    for (auto& core : cores) {
+        std::sort(core.lps.begin(), core.lps.end(), [](const Set* a, const Set* b) { return a->logical < b->logical; });
     }
-    std::vector<ULONG> others;
+    std::map<unsigned, std::pair<unsigned, unsigned>> classes; // efficiency class -> cores, LPs
+    for (const auto& core : cores) {
+        auto& entry = classes[core.efficiency];
+        entry.first++;
+        entry.second += static_cast<unsigned>(core.lps.size());
+    }
+    const bool hybrid = classes.size() > 1;
+    const unsigned top_class = classes.empty() ? 0 : classes.rbegin()->first;
+    {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            std::string text;
+            for (auto it = classes.rbegin(); it != classes.rend(); ++it) {
+                char item[96];
+                const char* name = !hybrid ? "all" : it->first == top_class ? "P" : "E";
+                std::snprintf(item, sizeof(item), "%s%s %uc/%ut class %u", text.empty() ? "" : ", ", name,
+                              it->second.first, it->second.second, it->first);
+                text += item;
+            }
+            std::fprintf(stderr, "PLACEMENT topology: %zu LPs/%zu cores, hybrid=%d, %s\n", sets.size(),
+                         cores.size(), hybrid ? 1 : 0, text.c_str());
+        }
+    }
+    if (mode == CpMode::Off) {
+        std::fprintf(stderr, "PORT_TUNING cp_cpu=%s mode=off hybrid=%d\n", value && *value ? value : "(empty)",
+                     hybrid ? 1 : 0);
+        return sel;
+    }
+    const Set* mine = nullptr;
+    long wanted = -1;
+    const char* scope = "";
+    if (mode == CpMode::Auto) {
+        size_t group0_cores = 0;
+        for (const auto& core : cores) group0_cores += core.group == 0;
+        if (group0_cores < 4) { // a 2- or 3-core CPU keeps every core for the game's threads
+            std::fprintf(stderr, "PORT_TUNING cp_cpu=auto mode=auto not pinned: %zu physical cores in group 0 "
+                         "(fewer than 4)\n", group0_cores);
+            return sel;
+        }
+        // Non-hybrid: the group 0 logical processors sharing the L3 of LP 0 (one CCD of a
+        // dual-CCD Ryzen, where the game's threads run), 0 if unknown.
+        KAFFINITY l3_mask = 0;
+        if (!hybrid) {
+            DWORD cache_length = 0;
+            GetLogicalProcessorInformationEx(RelationCache, nullptr, &cache_length);
+            std::vector<char> cache(cache_length);
+            if (cache_length && GetLogicalProcessorInformationEx(
+                    RelationCache, reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(cache.data()),
+                    &cache_length)) {
+                for (DWORD offset = 0; offset < cache_length && !l3_mask;) {
+                    const auto* info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(cache.data() + offset);
+                    if (!info->Size) break;
+                    if (info->Relationship == RelationCache && info->Cache.Level == 3) {
+                        const WORD groups = info->Cache.GroupCount ? info->Cache.GroupCount : 1;
+                        for (WORD g = 0; g < groups; g++) {
+                            const GROUP_AFFINITY& mask = info->Cache.GroupMasks[g];
+                            if (mask.Group == 0 && (mask.Mask & 1)) l3_mask = mask.Mask;
+                        }
+                    }
+                    offset += info->Size;
+                }
+            }
+            if (!l3_mask) std::fprintf(stderr, "PORT_TUNING cp_cpu=auto: no L3 information, using the last core\n");
+        }
+        // The last core of group 0 in the fastest class (by its first logical processor), not
+        // core 0, and on a non-hybrid CPU with every logical processor in the L3 of LP 0.
+        const auto in_l3 = [&](const Core& core) {
+            if (!l3_mask) return true;
+            for (const Set* lp : core.lps) {
+                if (lp->logical >= 64 || !(l3_mask & (KAFFINITY(1) << lp->logical))) return false;
+            }
+            return true;
+        };
+        const Core* pick = nullptr;
+        for (const auto& core : cores) {
+            if (core.group != 0 || core.efficiency != top_class || core.lps.front()->logical == 0) continue;
+            if (!in_l3(core)) continue;
+            if (!pick || core.lps.front()->logical > pick->lps.front()->logical) pick = &core;
+        }
+        if (!pick) {
+            std::fprintf(stderr, "PORT_TUNING cp_cpu=auto mode=auto failed: no core besides core 0; not pinned\n");
+            return sel;
+        }
+        if (l3_mask) scope = " scope=l3(lp0)";
+        mine = pick->lps.front();
+        wanted = mine->logical;
+    } else {
+        wanted = choice.lp;
+        for (const auto& set : sets) {
+            if (set.group == 0 && set.logical == wanted) mine = &set;
+        }
+        // A CPU with fewer logical processors than asked (ISS_CP_CPU=14 on a 6-core/12-thread CPU):
+        // the last one of group 0, so the command processor still gets a core of its own.
+        if (!mine) {
+            for (const auto& set : sets) {
+                if (set.group == 0 && (!mine || set.logical > mine->logical)) mine = &set;
+            }
+            if (mine) std::fprintf(stderr, "PORT_TUNING cp_cpu %ld not found: using %u\n", wanted, unsigned(mine->logical));
+        }
+        if (!mine) {
+            std::fprintf(stderr, "PORT_TUNING cp_cpu failed: logical processor %ld not found\n", wanted);
+            return sel;
+        }
+    }
+    sel.pinned = true;
+    sel.mode = mode;
+    sel.wanted = wanted;
+    sel.id = mine->id;
+    sel.logical = unsigned(mine->logical);
+    sel.core = unsigned(mine->core);
+    sel.efficiency = unsigned(mine->efficiency);
+    sel.hybrid = hybrid;
+    sel.scope = scope;
     for (const auto& set : sets) {
-        if (set.group != mine->group || set.core != mine->core) others.push_back(set.id);
+        if (set.group != mine->group || set.core != mine->core) {
+            sel.others.push_back(set.id);
+        } else {
+            sel.core_ids.push_back(set.id);
+            sel.siblings += (sel.siblings.empty() ? "" : "/") + std::to_string(set.logical);
+        }
     }
-    const BOOL process_ok = !others.empty() &&
-        SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(), static_cast<ULONG>(others.size()));
-    const ULONG id = mine->id;
+    return sel;
+}
+
+const CpSelection& CommandProcessorCpu() {
+    static const CpSelection selection = SelectCommandProcessorCpu(); // thread-safe, once
+    return selection;
+}
+} // namespace
+
+// The CPU sets of the command processor's core (ISS_CP_CPU), whichever thread asks first; false
+// (out empty) when it is not pinned. native_passes.cpp keeps its pool off them.
+bool IssCommandProcessorCpuSets(std::vector<ULONG>& out) {
+    const CpSelection& sel = CommandProcessorCpu();
+    out = sel.pinned ? sel.core_ids : std::vector<ULONG>{};
+    return !out.empty();
+}
+
+void IssPinCommandProcessor() {
+    iss_set_high_qos(true);
+    const CpSelection& sel = CommandProcessorCpu();
+    if (!sel.pinned) return;
+    const BOOL process_ok = !sel.others.empty() &&
+        SetProcessDefaultCpuSets(GetCurrentProcess(), sel.others.data(), static_cast<ULONG>(sel.others.size()));
+    const ULONG id = sel.id;
     const BOOL thread_ok = SetThreadSelectedCpuSets(GetCurrentThread(), &id, 1);
-    std::fprintf(stderr, "PORT_TUNING cp_cpu=%ld core=%u process_default=%d(%zu sets) thread=%d\n",
-                 wanted, unsigned(mine->core), int(process_ok), others.size(), int(thread_ok));
+    std::fprintf(stderr,
+                 "PORT_TUNING cp_cpu=%s mode=%s lp=%u core=%u lps=%s class=%u hybrid=%d%s "
+                 "process_default=%d(%zu sets) thread=%d\n",
+                 sel.mode == CpMode::Auto ? "auto" : std::to_string(sel.wanted).c_str(), cp_mode_name(sel.mode),
+                 sel.logical, sel.core, sel.siblings.c_str(), sel.efficiency,
+                 sel.hybrid ? 1 : 0, sel.scope, int(process_ok), sel.others.size(), int(thread_ok));
 }
 #endif

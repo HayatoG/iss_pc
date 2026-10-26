@@ -355,6 +355,7 @@ extern "C" int tlggpu_init(const TlgGpuConfig* config) {
         runtime_report();
         std::fflush(stdout);
         TlgPerf::Stop(); // _Exit bypasses atexit; finish diagnostics on normal window close.
+        std::fflush(stderr); // TLG_LOG_BUFFER: buffered
         std::_Exit(0);
     });
     g_window_thread.detach();
@@ -431,6 +432,11 @@ extern "C" void tlggpu_frame_counters(TlgGpuFrameCounters* out) {
 
 extern "C" uint64_t tlggpu_total_draws(void) {
     return TlgStats::draws.load(std::memory_order_relaxed);
+}
+
+extern "C" void tlggpu_bench_mark(int) {
+    // The benchmark window is timed by renderer v2 (gpu_v2/gpu/gpu_host.cpp); here the
+    // "Frame stats" lines (TLG_FRAME_STATS) cover the route.
 }
 
 extern "C" unsigned tlggpu_symbol_count(void) {
@@ -510,6 +516,7 @@ extern "C" void tlggpu_input_settings(TlgGpuInputSettings* out) {
     out->invert_y = s.mouse_invert_y ? 1 : 0;
     out->rumble = s.rumble ? 1 : 0;
     out->sensitivity = s.mouse_sensitivity;
+    out->vertical = s.mouse_sensitivity_y;
     out->smoothing = s.mouse_smoothing;
     out->accel = s.mouse_accel;
     out->deadzone = s.mouse_deadzone;

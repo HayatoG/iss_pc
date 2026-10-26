@@ -307,6 +307,10 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
 
+    /// ISS_READBACK_DISCARD: a guest thread is about to overwrite the whole pages of the range
+    /// (page aligned): their GPU data is dropped instead of read back first.
+    void DiscardOverwrite(VAddr device_addr, u64 size);
+
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     /// guest_rip: the faulting instruction of a guest read (readback_relaxed_sites), 0 if none.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false,
@@ -388,6 +392,10 @@ public:
     };
     /// Read-only C preflight. Returns empty while a required bind is still pending.
     [[nodiscard]] PublishedArena PeekPublishedArena(VAddr device_addr, u32 size) const;
+    /// Diagnosis only (ISS_NATIVE_PASSES_MISS_DETAIL): why PeekPublishedArena finds no arena for
+    /// the range (checked again, as it does).
+    enum class PublishedArenaMiss : u8 { Found, Invalid, NotResident, NoArena, SparsePending };
+    [[nodiscard]] PublishedArenaMiss PeekPublishedArenaMiss(VAddr device_addr, u32 size) const;
     /// iss: makes a guest range resident in the arena and current (command processor thread,
     /// not split): the native paths only find ranges already resident, and the small ones the
     /// command processor streams never became resident once the 2.5 GB binding stopped making

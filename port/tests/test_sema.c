@@ -116,8 +116,113 @@ static void cancellation(void) {
     assert(pthread_join(second,NULL)==0 && (uint32_t)b.result==0x8002000d);
     assert((uint32_t)poll_sem(id,1)==0x80020003);
 }
+/* Event flags (runtime_tlg.c): AND/OR, CLEAR_PAT/CLEAR_ALL, timeouts, multi-waiter, cancel, delete.
+ * test_sema.py also runs this with TLG_EF_WAKE_WAITERS and TLG_EF_SRW. */
+typedef int32_t (ABI *EfCreate)(void **,const char *,uint32_t,uint64_t,const void *);
+typedef int32_t (ABI *EfBits)(void *,uint64_t);
+typedef int32_t (ABI *EfWait)(void *,uint64_t,uint32_t,uint64_t *,uint32_t *);
+typedef int32_t (ABI *EfPoll)(void *,uint64_t,uint32_t,uint64_t *);
+typedef int32_t (ABI *EfCancel)(void *,uint64_t,int32_t *);
+typedef int32_t (ABI *EfDelete)(void *);
+static EfWait ef_wait_fn;
+typedef struct { void *ef; uint64_t pattern,result; uint32_t mode,timeout; int32_t r; volatile int done; } EfTask;
+static void *ef_waiter(void *p) {
+    EfTask *t=p;
+    t->r=ef_wait_fn(t->ef,t->pattern,t->mode,&t->result,&t->timeout);
+    __atomic_store_n(&t->done,1,__ATOMIC_RELEASE);
+    return NULL;
+}
+static void nap_ms(long ms) { const struct timespec n={0,ms*1000000}; nanosleep(&n,NULL); }
+static int done_within(EfTask *t,int ms) {
+    for (int i=0;i<ms;++i) { if (__atomic_load_n(&t->done,__ATOMIC_ACQUIRE)) return 1; nap_ms(1); }
+    return __atomic_load_n(&t->done,__ATOMIC_ACQUIRE);
+}
+static void event_flags(void) {
+    EfCreate ef_create=GET(EfCreate,"BpFoboUJoZU#libkernel");
+    EfBits ef_set=GET(EfBits,"IOnSvHzqu6A#libkernel"), ef_clear=GET(EfBits,"7uhBFWRAS60#libkernel");
+    EfPoll ef_poll=GET(EfPoll,"9lvj5DjHZiA#libkernel");
+    EfCancel ef_cancel=GET(EfCancel,"PZku4ZrXJqg#libkernel");
+    EfDelete ef_delete=GET(EfDelete,"8mql9OcQnd4#libkernel");
+    ef_wait_fn=GET(EfWait,"JTvBflhYazQ#libkernel");
+    assert(ef_create && ef_set && ef_clear && ef_poll && ef_cancel && ef_delete && ef_wait_fn);
+    void *ef=NULL; uint64_t bits=0;
+    assert(ef_create(&ef,"single",0x1,0,NULL)==0 && ef);
+    /* AND wait with CLEAR_PAT: one bit does not wake it, both do and are cleared. */
+    EfTask a={ef,0x3,0,0x1|0x20,5000000,99,0}; pthread_t ta,tb;
+    assert(pthread_create(&ta,NULL,ef_waiter,&a)==0);
+    nap_ms(30);
+    assert(ef_set(ef,0x1)==0);
+    assert(!done_within(&a,30));
+    assert(ef_set(ef,0x6)==0);
+    assert(done_within(&a,2000));
+    assert(pthread_join(ta,NULL)==0 && a.r==0 && a.result==0x7 && a.timeout>0 && a.timeout<=5000000);
+    assert((uint32_t)ef_poll(ef,0x3,0x2,&bits)==0x80020010 && bits==0x4);   /* 0x3 cleared */
+    /* Timeout: zero remaining, ETIMEDOUT, bits reported. */
+    uint64_t res=0; uint32_t timeout=2000;
+    assert((uint32_t)ef_wait_fn(ef,0x8,0x2,&res,&timeout)==0x8002003c && timeout==0 && res==0x4);
+    /* Single-waiter flag: a second waiter is refused. */
+    a=(EfTask){ef,0x10,0,0x2,5000000,99,0};
+    assert(pthread_create(&ta,NULL,ef_waiter,&a)==0); nap_ms(30);
+    timeout=1000;
+    assert((uint32_t)ef_wait_fn(ef,0x10,0x2,&res,&timeout)==0x80020001);
+    int32_t n=-1;
+    assert(ef_cancel(ef,0x40,&n)==0 && n==1);
+    assert(pthread_join(ta,NULL)==0 && (uint32_t)a.r==0x80020055 && a.result==0x40);
+    assert(ef_clear(ef,0)==0 && (uint32_t)ef_poll(ef,0x40,0x2,&bits)==0x80020010 && bits==0);
+    assert(ef_delete(ef)==0);
+    /* Multi-waiter flag: OR + CLEAR_ALL wakes exactly one per set; an unrelated waiter keeps waiting. */
+    assert(ef_create(&ef,"multi",0x20,0,NULL)==0);
+    a=(EfTask){ef,0x1,0,0x2|0x10,5000000,99,0};
+    EfTask b={ef,0x1,0,0x2|0x10,5000000,99,0}, c={ef,0x100,0,0x1,5000000,99,0};
+    pthread_t tc;
+    assert(pthread_create(&ta,NULL,ef_waiter,&a)==0);
+    assert(pthread_create(&tb,NULL,ef_waiter,&b)==0);
+    assert(pthread_create(&tc,NULL,ef_waiter,&c)==0);
+    nap_ms(50);
+    assert(ef_set(ef,0x1)==0);
+    nap_ms(50);
+    assert(__atomic_load_n(&a.done,__ATOMIC_ACQUIRE)+__atomic_load_n(&b.done,__ATOMIC_ACQUIRE)==1 && !c.done);
+    assert(ef_set(ef,0x1)==0);
+    assert(done_within(&a,2000) && done_within(&b,2000));
+    assert(pthread_join(ta,NULL)==0 && pthread_join(tb,NULL)==0 && a.r==0 && b.r==0);
+    assert((uint32_t)ef_poll(ef,0x1,0x2,&bits)==0x80020010 && bits==0);
+    assert(!done_within(&c,20));
+    assert(ef_delete(ef)==0);   /* the blocked waiter returns ESRCH */
+    assert(pthread_join(tc,NULL)==0 && (uint32_t)c.r==0x80020003);
+    /* TLG_EF_HANDOFF (default): a set followed at once by a clear still satisfies the blocked
+     * waiters it matched, in FIFO order with their clear modes applied at set time. */
+    const char *handoff=getenv("TLG_EF_HANDOFF");
+    if (handoff && handoff[0]=='0') return;
+    assert(ef_create(&ef,"pulse",0x20,0,NULL)==0);
+    a=(EfTask){ef,0x2,0,0x1,2000000,99,0};                /* AND, no clear */
+    b=(EfTask){ef,0x2,0,0x2|0x20,2000000,99,0};           /* OR, CLEAR_PAT */
+    c=(EfTask){ef,0x2,0,0x2,2000000,99,0};                /* after b's clear: not satisfied */
+    assert(pthread_create(&ta,NULL,ef_waiter,&a)==0); nap_ms(30);
+    assert(pthread_create(&tb,NULL,ef_waiter,&b)==0); nap_ms(30);
+    assert(pthread_create(&tc,NULL,ef_waiter,&c)==0); nap_ms(30);
+    assert(ef_set(ef,0x3)==0 && ef_clear(ef,0)==0);
+    assert(done_within(&a,2000) && done_within(&b,2000));
+    assert(pthread_join(ta,NULL)==0 && a.r==0 && a.result==0x3);
+    assert(pthread_join(tb,NULL)==0 && b.r==0 && b.result==0x3);
+    assert(!done_within(&c,20));
+    assert(ef_set(ef,0x2)==0 && done_within(&c,2000));
+    assert(pthread_join(tc,NULL)==0 && c.r==0 && c.result==0x2);
+    /* A cancel followed at once by a matching set: the cancelled waiter (still listed until it
+     * retakes the lock) gets ECANCELED and takes no handoff, so the set's bits stay. */
+    for (int i=0;i<20;++i) {
+        assert(ef_clear(ef,0)==0);
+        a=(EfTask){ef,0x1,0,0x2|0x10,2000000,99,0};           /* OR, CLEAR_ALL */
+        assert(pthread_create(&ta,NULL,ef_waiter,&a)==0); nap_ms(20);
+        int32_t waiting=-1;
+        assert(ef_cancel(ef,0,&waiting)==0 && waiting==1 && ef_set(ef,0x1)==0);
+        assert(pthread_join(ta,NULL)==0 && (uint32_t)a.r==0x80020055 && a.result<=0x1);
+        assert(ef_poll(ef,0x1,0x2,&bits)==0 && bits==0x1);
+    }
+    assert(ef_delete(ef)==0);
+}
 int main(int argc,char **argv) {
     setup();
+    if (argc>1 && !strcmp(argv[1],"--event-flags")) { event_flags(); puts("PASS: event flag contracts"); return 0; }
     if (argc>1 && !strcmp(argv[1],"--priority")) {
         /* Priority semaphores block and are woken in FIFO order. */
         uint32_t id; assert(create(&id,"priority",2,0,1,NULL)==0);

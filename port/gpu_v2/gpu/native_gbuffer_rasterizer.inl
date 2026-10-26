@@ -299,7 +299,7 @@ u32 Rasterizer::NativeGbufferExecute(const iss::native_gbuffer::Batch& b,
     // As Draw does before each draw.
     DrainDrawPipe(5);
     SubmitFeedbackBatch(scheduler);
-    PeriodicSubmit(scheduler);
+    PeriodicSubmit(scheduler, occlusion.AtSegmentLimit());
     scheduler.PopPendingOperations();
 
     static u64 verify_counter{};

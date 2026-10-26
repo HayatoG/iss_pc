@@ -641,8 +641,11 @@ void ControlsTab() {
                  TL("The game window takes the mouse while it has focus. Esc releases it; a click in the window takes it back.",
                     "A janela do jogo prende o mouse enquanto tem o foco. Esc solta; um clique na janela prende de novo."));
         ImGui::BeginDisabled(!s.mouse_enabled);
-        FloatRow(TL("Sensitivity", "Sensibilidade"), s.mouse_sensitivity, 0.1f, 5.0f, "%.2f",
+        FloatRow(TL("Sensitivity", "Sensibilidade"), s.mouse_sensitivity, 0.1f, 10.0f, "%.2f",
                  TL("How far the camera turns for the same mouse movement.", "Quanto a câmera gira para o mesmo movimento do mouse."));
+        FloatRow(TL("Vertical sensitivity", "Sensibilidade vertical"), s.mouse_sensitivity_y, 0.25f, 4.0f, "%.2fx",
+                 TL("Up/down speed relative to left/right. Raise it if looking up and down feels slower.",
+                    "Velocidade para cima/baixo em relação à dos lados. Aumente se olhar para cima e para baixo parecer mais lento."));
         CheckRow(TL("Invert Y axis", "Inverter eixo Y"), s.mouse_invert_y,
                  TL("Moving the mouse forward looks down.", "Empurrar o mouse para frente olha para baixo."));
         const bool direct_mouse=runtime_mouse_aim_installed()!=0;

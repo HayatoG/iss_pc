@@ -769,7 +769,7 @@ u32 Rasterizer::NativeShadowExecute(const iss::native_shadow::Batch& b) {
     // As Draw does before each draw.
     DrainDrawPipe(5);
     SubmitFeedbackBatch(scheduler);
-    PeriodicSubmit(scheduler);
+    PeriodicSubmit(scheduler, occlusion.AtSegmentLimit());
     scheduler.PopPendingOperations();
 
     // Resolution of every draw, as the translated path resolves it, before any recording.
