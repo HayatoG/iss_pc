@@ -13,6 +13,7 @@
 #include "vram_stats.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -40,6 +41,34 @@ namespace VideoCore {
 
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
+
+/// ResolveOverlap frees an overlapping image no longer used (it gives way to the new one). The
+/// age was 32 scheduler ticks (upstream): ~2.5 frames at ~13 submits a frame, but under one frame
+/// with ISS_SUBMIT_INTERVAL_US (30-45 a frame), which could free an alias still in use.
+/// ISS_OVERLAP_AGE=N (default 4): not used for N guest frames (garbage collector ticks, 1-128).
+/// ISS_OVERLAP_AGE=ticks: the old 32 scheduler ticks (A/B).
+static constexpr u64 OverlapAgeTicks = 0;
+static u64 OverlapAgeFrames() {
+    static const u64 frames = [] {
+        u64 n = 4;
+        if (const char* p = std::getenv("ISS_OVERLAP_AGE"); p && *p) {
+            if (std::strcmp(p, "ticks") == 0) {
+                n = OverlapAgeTicks;
+            } else if (*p >= '0' && *p <= '9') {
+                n = std::clamp<u64>(std::strtoull(p, nullptr, 10), 1, 128);
+            }
+        }
+        if (n == OverlapAgeTicks) {
+            std::fprintf(stderr, "PORT_TUNING overlap_age=ticks:%llu\n",
+                         static_cast<unsigned long long>(NumFramesBeforeRemoval));
+        } else {
+            std::fprintf(stderr, "PORT_TUNING overlap_age=frames:%llu\n",
+                         static_cast<unsigned long long>(n));
+        }
+        return n;
+    }();
+    return frames;
+}
 
 void TextureCache::AssertNoAscTextureAccessSlow() const {
     if (liverpool && liverpool->CpSplitActive() && liverpool->IsCurrentCpThread()) {
@@ -592,8 +621,21 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                                                            ImageId merged_image_id) {
     AssertNoAscTextureAccess();
     auto& cache_image = slot_images[cache_image_id];
-    const bool safe_to_delete =
-        scheduler.CurrentTick() - cache_image.tick_accessed_last > NumFramesBeforeRemoval;
+    const bool safe_to_delete = [&] {
+        const u64 age_frames = OverlapAgeFrames();
+        if (age_frames == OverlapAgeTicks) {
+            return scheduler.CurrentTick() - cache_image.tick_accessed_last >
+                   NumFramesBeforeRemoval;
+        }
+        // Not used since the garbage collector tick age_frames frames ago (gc_scheduler_ticks:
+        // the scheduler tick at each one). Unknown (early frames): kept.
+        if (gc_tick < age_frames || age_frames >= gc_scheduler_ticks.size()) {
+            return false;
+        }
+        const u64 used_since =
+            gc_scheduler_ticks[(gc_tick - age_frames) % gc_scheduler_ticks.size()];
+        return used_since != 0 && cache_image.tick_accessed_last < used_since;
+    }();
 
     // Equal address
     if (image_info.guest_address == cache_image.info.guest_address) {
@@ -603,6 +645,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             lhs_block_size != rhs_block_size) {
             // Very likely this kind of overlap is caused by allocation from a pool.
             if (safe_to_delete) {
+                Common::Perf::Add(Common::Perf::OverlapFrees);
                 FreeImage(cache_image_id);
             }
             return {merged_image_id, -1, -1};
@@ -651,6 +694,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
         // Likely the address is reused for a image with a different tiling mode.
         if (image_info.tile_mode != cache_image.info.tile_mode) {
             if (safe_to_delete) {
+                Common::Perf::Add(Common::Perf::OverlapFrees);
                 FreeImage(cache_image_id);
             }
             return {merged_image_id, -1, -1};
@@ -784,6 +828,7 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
         // Image isn't a subresource but a chance overlap.
         if (safe_to_delete) {
+            Common::Perf::Add(Common::Perf::OverlapFrees);
             FreeImage(cache_image_id);
         }
 
