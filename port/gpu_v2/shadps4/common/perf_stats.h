@@ -309,6 +309,11 @@ enum Counter : u32 {
     VoWaitNs,
     CpLabelStalls,
     CpLabelStallNs,
+    // Overlapping images freed by TextureCache::ResolveOverlap as not used for a while
+    // (ISS_OVERLAP_AGE); periodic submits held while an open occlusion query had used all its
+    // counter pairs (vk_rasterizer.cpp PeriodicSubmit).
+    OverlapFrees,
+    SubmitsHeldOcclusion,
     CounterCount,
 };
 
@@ -719,6 +724,12 @@ inline constexpr FrameCsvField FrameCsvDetails[] = {
     {"vo_wait_ms", VoWaitNs, true},
     {"cp_label_stalls", CpLabelStalls, false},
     {"cp_label_stall_ms", CpLabelStallNs, true},
+    // Texture cache overlap frees; occlusion queries emulated (all visible), segments of the
+    // counted ones, periodic submits held for an open query.
+    {"overlap_frees", OverlapFrees, false},
+    {"occlusion_emulated", OcclusionEmulated, false},
+    {"occlusion_segments", OcclusionSegments, false},
+    {"submits_held_occlusion", SubmitsHeldOcclusion, false},
 };
 
 inline void CaptureFrameCsv(float draws_per_frame, float dispatches_per_frame) {
