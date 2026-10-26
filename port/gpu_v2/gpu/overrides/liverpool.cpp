@@ -3409,6 +3409,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             std::memory_order_relaxed) != 0;
                     bool satisfied = false;
                     if (VoWaitEvent()) {
+                        // Pending commands end the wait only when ProcessCommands below can
+                        // serve them: it returns at once on a compute lane under ISS_CP_SPLIT
+                        // (qid != GfxQueueId), where counting them would spin hot until the
+                        // graphics lane drains them. Then only the label or the timeout ends it.
+                        const bool serves_commands =
+                            !(CpSplitActive() && thread_context.owner == this &&
+                              thread_context.qid != GfxQueueId);
                         cp_in_vo_wait.store(true, std::memory_order_relaxed);
                         // Pairs with the fence in WakeVoWait (store buffering: one side sees
                         // the other's write).
@@ -3417,7 +3424,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                             vo_port->WaitVoLabelFor(
                                 [&] {
                                     satisfied = wait_reg_mem->Test(regs.reg_array);
-                                    return satisfied || num_commands.load() != 0 ||
+                                    return satisfied ||
+                                           (serves_commands && num_commands.load() != 0) ||
                                            (yield_to_compute &&
                                             asc_submits.load(std::memory_order_relaxed) != 0);
                                 },

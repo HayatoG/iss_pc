@@ -281,6 +281,22 @@ bool MemoryManager::TryWriteBacking(void *address,const void *data,u64 size){
     else std::memcpy(dest,data,size);
     return true;
 }
+} // namespace Core
+// native_passes.cpp segment tokens: a non-faulting write of a few bytes through the host backing
+// (TryWriteBacking would invalidate every active SRT write watch under the global direct write
+// gate, once per segment start). Written first, then only the watches of the pages written are
+// invalidated: a watch armed before the invalidation is dropped by it, one armed after it reads
+// the new bytes. False without a backing (nothing written).
+bool IssWriteBackingRange(void* address,const void* data,u64 size){
+    const auto guest=reinterpret_cast<uintptr_t>(address);
+    auto* dest=host.backing(guest,size);
+    if(!dest)return false;
+    std::memcpy(dest,data,size);
+    if(auto* rasterizer=Core::Memory::Instance()->GetRasterizer())
+        rasterizer->InvalidateSrtWriteWatches(static_cast<VAddr>(guest),size);
+    return true;
+}
+namespace Core {
 bool MemoryManager::TryWriteBackingIf(void* address,const void* data,u64 size,
                                       u64 expected_native_epoch,
                                       const std::function<bool()>& predicate){
