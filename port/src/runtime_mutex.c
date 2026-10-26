@@ -10,7 +10,8 @@
 #include <immintrin.h>
 typedef struct { int type; } GuestAttr;
 /* owner/depth: who holds it, for the freeze report (written only while holding the mutex). */
-typedef struct { pthread_mutex_t native; void *owner; unsigned depth; char name[32]; } GuestMutex;
+/* nested_wait_logged: a condition wait at depth >1 was reported (once per mutex, see wait_cond). */
+typedef struct { pthread_mutex_t native; void *owner; unsigned depth; char name[32]; unsigned char nested_wait_logged; } GuestMutex;
 static size_t created, locks, unlocks;
 static int32_t orbis_error(int e) {
     if (!e) return 0;
@@ -163,7 +164,9 @@ static ABI int32_t mutex_unlock(GuestMutex **mutex) {
     releasing(m);
     int32_t e = orbis_error(pthread_mutex_unlock(&m->native));
     if (!e) { if (runtime_counters) ++unlocks; }
-    else { m->owner = owner; m->depth = depth; } /* not unlocked: still held as before */
+    /* Not unlocked: still held as before. Only the owner's own fields were changed by releasing();
+     * a non-owner must not write back a snapshot it read without holding the mutex. */
+    else if (owner == holder()) { m->owner = owner; m->depth = depth; }
     return e;
 }
 static ABI int32_t mutex_destroy(GuestMutex **mutex) {
@@ -228,6 +231,20 @@ static ABI int32_t cond_destroy(GuestCond **cond) {
     if (!e) { free(*cond); *cond = NULL; }
     return orbis_error(e);
 }
+/* A recursive mutex held at depth >1: the host wait releases one level only, so the signaller
+ * could never take the mutex. The extra levels are dropped before the wait (the last one is still
+ * held, so no wakeup is missed) and taken back after it. TLG_COND_RECURSIVE=0: the old single-level
+ * wait. Read once. */
+static int cond_recursive(void) {
+    static int cache = -1;
+    int v = __atomic_load_n(&cache, __ATOMIC_RELAXED);
+    if (v < 0) {
+        const char *env = getenv("TLG_COND_RECURSIVE");
+        v = !(env && env[0] == '0');
+        __atomic_store_n(&cache, v, __ATOMIC_RELAXED);
+    }
+    return v;
+}
 /* The mutex is released while waiting: its holder is cleared for the report, then restored.
  * A caller that does not hold the mutex gets EPERM at once, as from the PS4's libthr: the host
  * wait would return holding a mutex the guest never unlocks. inFAMOUS's Wwise job wait (guest
@@ -235,11 +252,21 @@ static ABI int32_t cond_destroy(GuestCond **cond) {
 static int wait_cond(GuestCond *c, GuestMutex *m, const struct timespec *end, uintptr_t frame) {
     if (!m->depth || m->owner != holder()) return EPERM;
     void *owner = m->owner;
-    unsigned depth = m->depth;
+    unsigned depth = m->depth, extra = 0;
+    if (depth > 1) {   /* only a recursive mutex nests */
+        extra = cond_recursive() ? depth - 1 : 0;
+        if (!m->nested_wait_logged) {
+            m->nested_wait_logged = 1;
+            printf("Runtime: condition wait on recursive mutex '%s' held %u deep (%s)\n", m->name, depth,
+                   extra ? "released fully" : "TLG_COND_RECURSIVE=0: one level");
+        }
+    }
     m->owner = NULL; m->depth = 0;
+    for (unsigned i = 0; i < extra; ++i) pthread_mutex_unlock(&m->native);
     runtime_wait_begin(end ? "condition variable (timed)" : "condition variable", c, c->name, NULL, frame);
     int r = end ? pthread_cond_timedwait(&c->native, &m->native, end) : pthread_cond_wait(&c->native, &m->native);
     runtime_wait_end();
+    for (unsigned i = 0; i < extra; ++i) pthread_mutex_lock(&m->native);
     m->owner = owner; m->depth = depth;
     return r;
 }

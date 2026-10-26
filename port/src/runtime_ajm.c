@@ -249,8 +249,9 @@ static uint32_t at9_frame(Instance *in, const unsigned char **input, uint64_t *i
 }
 static void parse_riff(Instance *in, const unsigned char **input, uint64_t *size) {
     const unsigned char *p=*input, *end=p+*size;
+    if (*size<12) { *input=end; *size=0; return; }   /* truncated RIFF header: nothing to decode */
     p+=12;
-    while (p+8<=end) {
+    while (end-p>=8) {
         uint32_t tag, length; memcpy(&tag,p,4); memcpy(&length,p+4,4); p+=8;
         if (tag==0x61746164) break;                                   /* "data" */
         if (tag==0x20746d66 && length>=52 && p+52<=end) {             /* "fmt " */
@@ -260,6 +261,7 @@ static void parse_riff(Instance *in, const unsigned char **input, uint64_t *size
             in->gapless_init.total_samples=total; in->gapless_init.skip_samples=(uint16_t)delay;
             gapless_reset(in);
         }
+        if ((uint64_t)length>(uint64_t)(end-p)) { p=end; break; }   /* chunk runs past the input */
         p+=length;
     }
     *size-=(uint64_t)(p-*input); *input=p;
