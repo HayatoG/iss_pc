@@ -714,6 +714,11 @@ inline constexpr FrameCsvField FrameCsvDetails[] = {
     {"submit_mutex_wait_cp_ms", SubmitMutexWaitNsCp, true},
     {"submit_mutex_wait_recorder_ms", SubmitMutexWaitNsRecorder, true},
     {"submit_mutex_wait_present_ms", SubmitMutexWaitNsPresent, true},
+    // Command processor sleeps on a flip label (ISS_VO_WAIT) and on other label waits.
+    {"vo_waits", VoWaits, false},
+    {"vo_wait_ms", VoWaitNs, true},
+    {"cp_label_stalls", CpLabelStalls, false},
+    {"cp_label_stall_ms", CpLabelStallNs, true},
 };
 
 inline void CaptureFrameCsv(float draws_per_frame, float dispatches_per_frame) {

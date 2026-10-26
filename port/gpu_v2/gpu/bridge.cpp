@@ -589,6 +589,10 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
     Common::Perf::GetTuning().async_uploads=upload_worker;
     std::fprintf(stderr,"PORT_TUNING async_uploads=%d async_pipelines=0\n",upload_worker);
     if(const char *p=std::getenv("ISS_GPU_PROFILE");p&&(p[0]=='1'||p[0]=='2'))Common::Perf::GetTuning().gpu_profile=p[0]-'0';
+    // ISS_PERF_LOG=1 (or ISS_TUNING=perf_log=1): the "Perf:" counter reports in the log every
+    // second (Common::Perf::OnFlip). Nothing else sets it on renderer v2.
+    if(const char *p=std::getenv("ISS_PERF_LOG");p&&p[0]=='1'){Common::Perf::GetTuning().perf_log=true;std::fprintf(stderr,"PORT_TUNING perf_log=1
+");}
     {const char *p=std::getenv("ISS_COMPUTE_PHASES");iss::phase::g_enabled=p&&p[0]=='1';
      std::fprintf(stderr,"PORT_TUNING compute_phases=%d\n",iss::phase::Enabled()?1:0);}
     // ISS_TIMER_1MS=1 (off by default, the user's choice): 1 ms timer resolution for this
@@ -636,6 +640,7 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
             else if(name=="tiered_compute_pipelines")set(tuning.tiered_compute_pipelines,value);
             else if(name=="max_gpu_lag_frames")set(tuning.max_gpu_lag_frames,value);
             else if(name=="gpu_sync_frame_end")set(tuning.gpu_sync_frame_end,value);
+            else if(name=="perf_log")tuning.perf_log=std::strtoull(value.c_str(),nullptr,0)!=0;
             // relaxed_site=<eboot offset> (repeatable, up to 8): reads of GPU written memory from
             // that 256 byte block of the game's code do not wait for the GPU (readback_relaxed_sites).
             else if(name=="relaxed_site"){const u32 n=tuning.num_relaxed_sites.load();if(n<Common::Perf::Tuning::MaxRelaxedSites){tuning.relaxed_sites[n]=std::strtoull(value.c_str(),nullptr,0)&~0xFFull;tuning.num_relaxed_sites.store(n+1);}}
