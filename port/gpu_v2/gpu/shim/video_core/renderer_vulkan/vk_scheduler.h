@@ -514,6 +514,10 @@ public:
     /// (threaded recording submits them later than Flush). Returns at once when they have.
     void WaitSubmitted(u64 tick);
 
+    /// The same for a tick already flushed, from any thread (the present thread): never flushes,
+    /// only waits until the recording thread handed it to the driver.
+    void WaitFlushedSubmitted(u64 tick);
+
     /// Sends the current execution context to the GPU
     /// and increments the scheduler timeline semaphore.
     void Flush(SubmitInfo& info);
@@ -587,7 +591,7 @@ public:
     /// Sets the function waiting for the work given to RequireBeforeSubmit (called under
     /// submit_mutex, before each submission depending on it).
     void SetSubmitDependency(std::function<void(u64)>&& wait) {
-        std::scoped_lock lk{submit_mutex};
+        std::scoped_lock lk{submit_mutex, dependency_mutex};
         submit_dependency_wait = std::move(wait);
     }
 
@@ -716,7 +720,25 @@ public:
 
     static std::mutex submit_mutex;
 
+    /// Who takes submit_mutex (the SubmitMutexWait* counters).
+    enum class SubmitLockCaller : u8 { Cp, Recorder, Present };
+
+    /// Takes submit_mutex: try_lock first, only a contended acquisition is timed and counted
+    /// for its caller class.
+    [[nodiscard]] static std::unique_lock<std::mutex> LockSubmit(SubmitLockCaller caller);
+
+    /// The caller class of this scheduler's flushes (default: the command processor).
+    void SetSubmitLockCaller(SubmitLockCaller caller) noexcept {
+        lock_caller = caller;
+    }
+
 private:
+    /// ISS_SUBMIT_LOCK=split: the upload dependency wait is done before submit_mutex is taken.
+    static bool SplitSubmitLock();
+    /// ISS_SUBMIT_LOCK=split: waits for the upload worker jobs the submission depends on, with
+    /// submit_mutex not held (dependency_mutex keeps the wait function alive).
+    void WaitUploadDependency(SubmitInfo& info);
+
     void EndSession();
 
     void SubmitExecution(SubmitInfo& info);
@@ -822,6 +844,10 @@ private:
     void ProfileSessionEnd();
     void ProfileSessionSubmitted(u64 tick);
     std::function<void(u64)> submit_dependency_wait;
+    /// Guards submit_dependency_wait for ISS_SUBMIT_LOCK=split, whose wait runs without
+    /// submit_mutex. Taken after submit_mutex (SetSubmitDependency), never the other way.
+    std::mutex dependency_mutex;
+    SubmitLockCaller lock_caller{SubmitLockCaller::Cp};
 };
 
 /**

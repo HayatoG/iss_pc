@@ -291,6 +291,16 @@ enum Counter : u32 {
     SubmitLockWaitNs,
     IdleAdmitGaps,
     IdleAdmitGapNs,
+    // Vulkan::Scheduler::submit_mutex (global, all queues) found held by another thread, and the
+    // time waited, by caller class: the command processor (on_submit, direct and unthreaded
+    // submissions), the recording thread (its submissions) and the present thread (the present
+    // scheduler's submission and vkQueuePresentKHR). Uncontended acquisitions are not timed.
+    SubmitMutexContentionsCp,
+    SubmitMutexContentionsRecorder,
+    SubmitMutexContentionsPresent,
+    SubmitMutexWaitNsCp,
+    SubmitMutexWaitNsRecorder,
+    SubmitMutexWaitNsPresent,
     CounterCount,
 };
 
@@ -693,6 +703,9 @@ inline constexpr FrameCsvField FrameCsvDetails[] = {
     {"gpu_completed_work_ms", GpuProfileBusyNs, true},
     {"gpu_completed_submissions", GpuProfileSessions, false},
     {"gpu_completed_readback_ms", GpuProfileReadbackNs, true},
+    {"submit_mutex_wait_cp_ms", SubmitMutexWaitNsCp, true},
+    {"submit_mutex_wait_recorder_ms", SubmitMutexWaitNsRecorder, true},
+    {"submit_mutex_wait_present_ms", SubmitMutexWaitNsPresent, true},
 };
 
 inline void CaptureFrameCsv(float draws_per_frame, float dispatches_per_frame) {
@@ -871,6 +884,13 @@ inline void OnFlip(float draws_per_frame, float dispatches_per_frame) {
     const auto pct = [window_ns](u64 ns) {
         return 100.0 * static_cast<double>(ns) / static_cast<double>(window_ns);
     };
+    const double window_frames = r.frames ? static_cast<double>(r.frames) : 1.0;
+    const auto per_frame = [window_frames](u64 n) {
+        return static_cast<double>(n) / window_frames;
+    };
+    const auto per_frame_ms = [window_frames](u64 ns) {
+        return static_cast<double>(ns) / 1e6 / window_frames;
+    };
     LOG_INFO(Debug,
              "Perf: {:.1f} fps | frame avg {:.1f} ms max {:.1f} ms | >33ms {} >50ms {} | gpu "
              "thread work {:.0f}% spin {:.0f}% (cpu {}) | shaders {} ({:.0f} ms) pipelines {} "
@@ -905,7 +925,9 @@ inline void OnFlip(float draws_per_frame, float dispatches_per_frame) {
              "{:.0f}% submissions {} ({:.2f} ms avg, in flight {:.1f} avg) with readbacks {} "
              "({:.2f} ms avg) compute {} ({:.1f} ms) | relaxed readbacks {} (pages refreshed {} "
              "left {}) | asc queue dispatches {} fallbacks {} submits {} waits gfx {} compute {} "
-             "flushes {} first touches {} | draws/frame {:.0f} dispatches/frame {:.0f}",
+             "flushes {} first touches {} | draws/frame {:.0f} dispatches/frame {:.0f} | "
+             "per frame: recorder sync {:.3f} ms ({:.2f}) submit mutex waits cp {:.3f} ms "
+             "({:.2f}) recorder {:.3f} ms ({:.2f}) present {:.3f} ms ({:.2f})",
              static_cast<double>(r.frames) / seconds,
              r.frames ? r.frame_ms_sum / static_cast<double>(r.frames) : 0.0, r.frame_ms_max,
              r.frames_over_33, r.frames_over_50, pct(t[GpuBusyNs]), pct(t[GpuSpinNs]),
@@ -972,7 +994,12 @@ inline void OnFlip(float draws_per_frame, float dispatches_per_frame) {
              t[ReadbackRelaxedRefreshes], t[ReadbackRelaxedSkips], t[AscQueueDispatches],
              t[AscQueueFallbacks], t[ComputeQueueSubmits], t[CrossWaitsGraphics],
              t[CrossWaitsCompute], t[CrossQueueFlushes], t[CrossQueueFirstTouches],
-             draws_per_frame, dispatches_per_frame);
+             draws_per_frame, dispatches_per_frame, per_frame_ms(t[RecorderSyncNs]),
+             per_frame(t[RecorderSyncs]), per_frame_ms(t[SubmitMutexWaitNsCp]),
+             per_frame(t[SubmitMutexContentionsCp]), per_frame_ms(t[SubmitMutexWaitNsRecorder]),
+             per_frame(t[SubmitMutexContentionsRecorder]),
+             per_frame_ms(t[SubmitMutexWaitNsPresent]),
+             per_frame(t[SubmitMutexContentionsPresent]));
 
     const u64 last_flip = r.last_flip;
     const u64 flip_index = r.flip_index;
