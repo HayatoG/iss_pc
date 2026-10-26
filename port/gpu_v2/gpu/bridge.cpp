@@ -709,7 +709,8 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
                         std::string title=std::string(host.title)+" - "+status;
                         if(title!=shown){SDL_SetWindowTitle(g_window->GetSDLWindow(),title.c_str());shown=title;}
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    // Not sleep_for: without a raised timer period it lasts a ~15.6 ms tick.
+                    IssPreciseSleepUs(5000);
                 }
                 init.join();
                 SDL_SetWindowTitle(g_window->GetSDLWindow(),host.title);
@@ -737,7 +738,10 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
                 // Off the window thread: a changed driver cache takes ~120 ms to write.
                 if(checkpoints&&renderer&&now-last_checkpoint>std::chrono::seconds(30)){
                     std::thread([renderer]{renderer->GetPipelineCache().CheckpointDriverCache();}).detach();last_checkpoint=now;}
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                // Not sleep_for: SDL3 sets no timer period, so a 2 ms sleep_for (Sleep(2)) lasts
+                // a ~15.6 ms tick and input is pumped at ~64 Hz. The high resolution timer sleeps
+                // ~2 ms.
+                IssPreciseSleepUs(2000);
             }
         }catch(const std::exception& e){std::fprintf(stderr,"GPU initialization failed: %s\n",e.what());{std::scoped_lock guard{ready_mutex};ready=-1;}ready_cv.notify_all();}
     });window_thread.detach();
@@ -753,7 +757,9 @@ uint64_t IssImageBase() { return host.image_base; }
 //                  the last core sharing the L3 of LP 0 (LP 14/15 of an 8-core/16-thread CPU, the
 //                  V-cache CCD of a 7950X3D), or the last core overall if the cache query fails.
 //                  With fewer than 4 physical cores nothing is pinned.
-//                  Linux: the same as 14 (no topology code there).
+//                  Linux: on a hybrid Intel CPU (/sys/devices/cpu_core/cpus lists the P-cores'
+//                  logical processors) the first logical processor of the last P-core;
+//                  otherwise the same as 14.
 //   <L>            the physical core of logical processor L (a number: the original behaviour).
 //   empty, off, none, -1   no pinning.
 //   anything else  a warning, then auto.
@@ -788,11 +794,56 @@ CpChoice cp_mode(const char* value) {
 #ifndef _WIN32
 // Linux: the command processor thread alone on logical processor L (the other threads keep
 // their affinity: CPU sets have no Linux equivalent that excludes a core from a process).
-// `auto` keeps the behaviour of the old default 14 (or the last logical processor).
+// `auto`: the last P-core of a hybrid Intel CPU, else the old default 14 (or the last logical
+// processor).
+namespace {
+// The highest logical processor of a sysfs CPU list ("0-11", "0-5,12-15", "3"), -1 if none.
+long last_in_cpu_list(const char* path) {
+    FILE* file = std::fopen(path, "r");
+    if (!file) return -1;
+    char text[512]{};
+    const bool read = std::fgets(text, sizeof(text), file) != nullptr;
+    std::fclose(file);
+    if (!read) return -1;
+    long last = -1;
+    for (const char* p = text; *p;) {
+        if (!std::isdigit(static_cast<unsigned char>(*p))) {
+            ++p;
+            continue;
+        }
+        char* end = nullptr;
+        const long value = std::strtol(p, &end, 10);
+        last = std::max(last, value);
+        p = end;
+    }
+    return last;
+}
+// The first logical processor of a sysfs CPU list, -1 if none.
+long first_in_cpu_list(const char* path) {
+    FILE* file = std::fopen(path, "r");
+    if (!file) return -1;
+    long first = -1;
+    if (std::fscanf(file, "%ld", &first) != 1) first = -1;
+    std::fclose(file);
+    return first;
+}
+// Hybrid Intel CPU: the first logical processor of the last P-core (as Windows' auto picks it:
+// LP 10 of an i7-13700H), -1 when the kernel lists no P-cores.
+long last_p_core_lp() {
+    const long last = last_in_cpu_list("/sys/devices/cpu_core/cpus");
+    if (last < 0) return -1;
+    char siblings[128];
+    std::snprintf(siblings, sizeof(siblings),
+                  "/sys/devices/system/cpu/cpu%ld/topology/thread_siblings_list", last);
+    const long first = first_in_cpu_list(siblings);
+    return first >= 0 && first <= last ? first : last;
+}
+} // namespace
 void IssPinCommandProcessor() {
     const CpChoice choice = cp_mode(std::getenv("ISS_CP_CPU"));
     if (choice.mode == CpMode::Off) return;
-    long wanted = choice.mode == CpMode::Auto ? 14 : choice.lp;
+    const long p_core = choice.mode == CpMode::Auto ? last_p_core_lp() : -1;
+    long wanted = choice.mode == CpMode::Auto ? (p_core >= 0 ? p_core : 14) : choice.lp;
     const long count = sysconf(_SC_NPROCESSORS_ONLN);
     if (count > 0 && wanted >= count) wanted = count - 1; // fewer logical processors than asked
     cpu_set_t set;
@@ -800,7 +851,10 @@ void IssPinCommandProcessor() {
     CPU_SET(static_cast<int>(wanted), &set);
     const int ok = pthread_setaffinity_np(pthread_self(), sizeof(set), &set) == 0;
     std::fprintf(stderr, "PORT_TUNING cp_cpu=%ld mode=%s thread=%d\n", wanted,
-                 choice.mode == CpMode::Auto ? "auto(linux: 14)" : "manual", ok);
+                 choice.mode == CpMode::Auto ? (p_core >= 0 ? "auto(linux: last p-core)"
+                                                            : "auto(linux: 14)")
+                                             : "manual",
+                 ok);
 }
 #else
 
