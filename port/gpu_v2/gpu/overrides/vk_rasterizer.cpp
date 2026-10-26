@@ -16,6 +16,7 @@
 #include "feedback_join.h"
 #include "infamous_renderer/secondary_batch_probe.h"
 #include <unordered_set>
+#include <cerrno>
 #include <cstdio>
 #include <filesystem>
 #include <intrin.h>
@@ -162,15 +163,41 @@ void SubmitFeedbackBatch(Scheduler& scheduler) {
 thread_local u64 periodic_tick{};
 thread_local u32 periodic_draws{};
 thread_local u64 periodic_start_ns{};
-void PeriodicSubmit(Scheduler& scheduler) {
+// The interval is clamped to [100, 100000] us; 0, empty, negative or not a number: off.
+u64 SubmitIntervalNs() {
+    static const u64 interval_ns = [] {
+        u64 us = 0;
+        const char* p = std::getenv("ISS_SUBMIT_INTERVAL_US");
+        if (p) {
+            while (*p == ' ' || *p == '\t') ++p;
+            char* end = nullptr;
+            errno = 0;
+            // Digits only: strtoull would take "-1" as ULLONG_MAX.
+            const unsigned long long v = *p >= '0' && *p <= '9' ? std::strtoull(p, &end, 10) : 0;
+            while (end && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) ++end;
+            const bool parsed = end && end != p && *end == '\0';
+            if (parsed && v != 0) {
+                // strtoull saturates at ULLONG_MAX (ERANGE): clamped here, before the * 1000.
+                us = std::clamp<unsigned long long>(errno == ERANGE ? 100000ull : v, 100ull,
+                                                    100000ull);
+            }
+        }
+        std::fprintf(stderr, "PORT_TUNING submit_interval_us=%llu\n",
+                     static_cast<unsigned long long>(us));
+        return us * 1000ull;
+    }();
+    return interval_ns;
+}
+// hold (OcclusionQueries::AtSegmentLimit): an open occlusion query has used all its counter
+// pairs. A submit ends the rendering scope and so the query's segment; one more segment than
+// counter pairs and the query is emulated (all visible, no culling). The periodic submit waits
+// until the query ends or is cut anyway (readbacks and the other submits are not held).
+void PeriodicSubmit(Scheduler& scheduler, bool hold) {
     static const u32 every = [] {
         const char* p = std::getenv("ISS_SUBMIT_EVERY");
         return p ? static_cast<u32>(std::strtoul(p, nullptr, 10)) : 0u;
     }();
-    static const u64 interval_ns = [] {
-        const char* p = std::getenv("ISS_SUBMIT_INTERVAL_US");
-        return p ? std::strtoull(p, nullptr, 10) * 1000ull : 0ull;
-    }();
+    static const u64 interval_ns = SubmitIntervalNs();
     if (every == 0 && interval_ns == 0) return;
     const u64 tick = scheduler.CurrentTick();
     if (tick != periodic_tick) {
@@ -180,6 +207,10 @@ void PeriodicSubmit(Scheduler& scheduler) {
     }
     const bool due = interval_ns && Common::Perf::NowNs() - periodic_start_ns >= interval_ns;
     if (!due && (every == 0 || ++periodic_draws < every)) return;
+    if (hold) [[unlikely]] {
+        Common::Perf::Add(Common::Perf::SubmitsHeldOcclusion);
+        return;
+    }
     scheduler.Flush();
     periodic_tick = scheduler.CurrentTick();
     periodic_draws = 0;
@@ -1364,7 +1395,7 @@ std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
     const bool pass_learn = native_pass_learn != 0 && !pipelined;
     // Pause guard (pause_guard.h): in the pause every native/fast path below is off.
     const bool native_off = pass_learn || iss::pause_guard::Blocked();
-    if(!pipelined){DrainDrawPipe(5);SubmitFeedbackBatch(scheduler);PeriodicSubmit(scheduler);}
+    if(!pipelined){DrainDrawPipe(5);SubmitFeedbackBatch(scheduler);PeriodicSubmit(scheduler,occlusion.AtSegmentLimit());}
     iss::diagnostics::Scope phase_scope(iss::diagnostics::Draw);
     RENDERER_TRACE;
 

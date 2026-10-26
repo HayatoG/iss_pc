@@ -746,7 +746,7 @@ bool Rasterizer::NativeComputeExecute(iss::native_passes::Segment& s, u64& tick,
     // As Dispatch does before each dispatch.
     DrainDrawPipe(5);
     SubmitFeedbackBatch(scheduler);
-    PeriodicSubmit(scheduler);
+    PeriodicSubmit(scheduler, occlusion.AtSegmentLimit());
     scheduler.PopPendingOperations();
 
     // The reads too: where the full path binds them now (a stream copy of CPU data, another arena:

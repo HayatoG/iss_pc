@@ -1759,7 +1759,7 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
     iss::cp_path::Switch(iss::cp_path::RecTargets);
     DrainDrawPipe(5);
     SubmitFeedbackBatch(scheduler);
-    PeriodicSubmit(scheduler);
+    PeriodicSubmit(scheduler, occlusion.AtSegmentLimit());
     scheduler.PopPendingOperations();
 
     // The render targets, as the first template's pipeline sets them up for the first draw.
