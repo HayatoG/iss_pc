@@ -517,6 +517,17 @@ Paired-round A/B sessions on the bench route (renderer v2), each against the mai
   once (`PORT_TUNING asc_native_queue=1 with unified memory ...`) that the two queues' label
   writes are not ordered. Expected gain is low anyway: more than 99% of compute segments fall back
   to the graphics queue.
+- **Readback stall breakdown** (diag session `diag-rb-6519380`): the 3.8 ms/frame readback stall
+  splits into GPU wait 1.58 ms, CP pickup (RT1) 0.91 ms, RT2 0.91 ms and CP begin 0.37 ms; the
+  sync `FinishAllQueues` share is 0. Top sites: particle feedback `0x3f3eff` at 1.3 ms/frame, and
+  write faults at 2.4 ms/frame.
+- **`ISS_READBACK_GUEST_FINISH=1`** (bench `gf-gate-rb`, branch `claude/readback-guest-finish`,
+  kept unmerged): the guest finishes 7.3 readbacks/frame with 0 fallbacks, but FPS is neutral
+  (-0.7%, CI includes 0) and CP time does not drop. Same pattern as before: removing a CP round
+  trip moves the wait elsewhere.
+- **Do not use `ISS_PREFETCH_GATE=1`** (same bench): -2.5% FPS (95% CI -3.9..-1.2%). In-flight
+  windows get stamped as scanned, so the gate skips scans that would still produce prefetches;
+  prefetch hits fall from 1.39 to 0.62 per frame.
 
 ## Tests and rollout
 
