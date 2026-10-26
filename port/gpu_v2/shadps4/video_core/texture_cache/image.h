@@ -10,6 +10,7 @@
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view.h"
 
+#include <atomic>
 #include <deque>
 #include <optional>
 #include <boost/container/small_vector.hpp>
@@ -109,6 +110,43 @@ struct Image {
         return track_addr != 0 && track_addr_end != 0;
     }
 
+    /// iss: the command processor changes flags without the texture cache lock (render target,
+    /// depth and storage binds) while guest threads change them under it (write faults, unmaps
+    /// clearing Registered). A plain `flags |= x` of one side could store back a stale value and
+    /// lose the other's bits (a lost CpuDirty: stale texture; a resurrected Registered: a second
+    /// free asserting in UnregisterImage). Every read-modify-write goes through these helpers.
+    /// A change that would not alter the bits is a plain load (no locked instruction).
+    void SetFlags(ImageFlagBits bits) noexcept {
+        std::atomic_ref<ImageFlagBits> ref{flags};
+        ImageFlagBits old = ref.load(std::memory_order_relaxed);
+        while ((old & bits) != bits &&
+               !ref.compare_exchange_weak(old, old | bits, std::memory_order_acq_rel,
+                                          std::memory_order_relaxed)) {
+        }
+    }
+    void ClearFlags(ImageFlagBits bits) noexcept {
+        std::atomic_ref<ImageFlagBits> ref{flags};
+        ImageFlagBits old = ref.load(std::memory_order_relaxed);
+        while (u32(old & bits) != 0 &&
+               !ref.compare_exchange_weak(old, old & ~bits, std::memory_order_acq_rel,
+                                          std::memory_order_relaxed)) {
+        }
+    }
+    /// Sets `set` and clears `clear` in one atomic step.
+    void ChangeFlags(ImageFlagBits set, ImageFlagBits clear) noexcept {
+        std::atomic_ref<ImageFlagBits> ref{flags};
+        ImageFlagBits old = ref.load(std::memory_order_relaxed);
+        while (((old | set) & ~clear) != old &&
+               !ref.compare_exchange_weak(old, (old | set) & ~clear, std::memory_order_acq_rel,
+                                          std::memory_order_relaxed)) {
+        }
+    }
+    /// A tear free read of the flags for the paths that look at them without the lock.
+    [[nodiscard]] ImageFlagBits LoadFlags() const noexcept {
+        return std::atomic_ref<ImageFlagBits>{const_cast<ImageFlagBits&>(flags)}.load(
+            std::memory_order_relaxed);
+    }
+
     bool SafeToDownload() const {
         return True(flags & ImageFlagBits::GpuModified) && False(flags & (ImageFlagBits::Dirty));
     }
@@ -136,7 +174,9 @@ public:
     ImageInfo info;
     vk::ImageAspectFlags aspect_mask = vk::ImageAspectFlagBits::eColor;
     vk::SampleCountFlags supported_samples = vk::SampleCountFlagBits::e1;
-    ImageFlagBits flags = ImageFlagBits::Dirty;
+    /// Changed only through SetFlags/ClearFlags/ChangeFlags (see there).
+    alignas(std::atomic_ref<ImageFlagBits>::required_alignment) ImageFlagBits flags =
+        ImageFlagBits::Dirty;
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;
     ImageId depth_id{};
