@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <span>
@@ -8,13 +9,13 @@
 
 namespace Vulkan {
 /// iss: the largest driver cache file read or written (the 24-byte envelope included).
-/// ISS_PIPELINE_CACHE_MAX_MB, default 1024 (was a fixed 256 MB; past it saving stopped silently).
+/// ISS_PIPELINE_CACHE_MAX_MB, default 512 (was a fixed 256 MB; past it saving stopped silently).
 inline std::uint64_t DriverCacheMaxBytes() {
     static const std::uint64_t bytes = [] {
-        std::uint64_t mb = 1024;
+        std::uint64_t mb = 512;
         if (const char* value = std::getenv("ISS_PIPELINE_CACHE_MAX_MB"); value && *value) {
             const auto parsed = std::strtoull(value, nullptr, 10);
-            if (parsed) mb = std::clamp<std::uint64_t>(parsed, 64, 4000); // one WriteFile call
+            if (parsed) mb = std::clamp<std::uint64_t>(parsed, 64, 4000); // one WriteFile each
         }
         return mb * 1024 * 1024;
     }();
@@ -30,12 +31,19 @@ inline std::uint64_t ReadCacheWord(std::span<const std::uint8_t> data, std::size
     for (int i = 0; i < size; ++i) value |= std::uint64_t(data[offset + i]) << (i * 8);
     return value;
 }
-inline std::vector<std::uint8_t> PackDriverCache(std::span<const std::uint8_t> payload) {
-    std::vector<std::uint8_t> out;
+/// The 24-byte envelope written before the payload (magic, version, size, checksum).
+inline std::array<std::uint8_t, 24> DriverCacheHeader(std::span<const std::uint8_t> payload) {
+    std::array<std::uint8_t, 24> out{};
+    std::size_t at = 0;
     const auto append = [&](std::uint64_t value, int size) {
-        for (int i = 0; i < size; ++i) out.push_back(std::uint8_t(value >> (i * 8)));
+        for (int i = 0; i < size; ++i) out[at++] = std::uint8_t(value >> (i * 8));
     };
     append(0x434b5653, 4); append(1, 4); append(payload.size(), 8); append(CacheChecksum(payload), 8);
+    return out;
+}
+inline std::vector<std::uint8_t> PackDriverCache(std::span<const std::uint8_t> payload) {
+    const auto header = DriverCacheHeader(payload);
+    std::vector<std::uint8_t> out(header.begin(), header.end());
     out.insert(out.end(), payload.begin(), payload.end());
     return out;
 }

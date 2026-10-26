@@ -61,11 +61,13 @@ bool PipelineCache::CheckpointDriverCache(bool final){
         std::fprintf(stderr,"PIPELINE_CHECKPOINT unavailable result=%d bytes=%zu\n",int(snapshot.result),snapshot.value.size());return false;}
     const u64 hash=XXH3_64bits(snapshot.value.data(),snapshot.value.size());
     if(hash==previous_hash){checkpointed_creates=creates;return true;}
-    const auto bytes=PackDriverCache(snapshot.value);
+    // The envelope and the payload written one after the other: no packed copy of the whole cache.
+    const auto header=DriverCacheHeader(snapshot.value);
     auto temporary=driver_cache_path;temporary+=L".pending-"+std::to_wstring(GetCurrentProcessId());
     HANDLE file=CreateFileW(temporary.c_str(),GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(file==INVALID_HANDLE_VALUE){std::fprintf(stderr,"PIPELINE_CHECKPOINT open error=%lu\n",GetLastError());return false;}
-    DWORD written=0;bool ok=WriteFile(file,bytes.data(),DWORD(bytes.size()),&written,nullptr)&&written==bytes.size();
+    DWORD written=0;bool ok=WriteFile(file,header.data(),DWORD(header.size()),&written,nullptr)&&written==header.size();
+    if(ok)ok=WriteFile(file,snapshot.value.data(),DWORD(snapshot.value.size()),&written,nullptr)&&written==snapshot.value.size();
     if(ok)ok=FlushFileBuffers(file)!=0;const DWORD write_error=ok?0:GetLastError();CloseHandle(file);
     if(ok)ok=MoveFileExW(temporary.c_str(),driver_cache_path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
     if(ok){previous_hash=hash;checkpointed_creates=creates;}

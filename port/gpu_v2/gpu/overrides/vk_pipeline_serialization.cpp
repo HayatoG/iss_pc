@@ -10,6 +10,8 @@
 #include "common/path_util.h"
 #include "shader_salt.h"
 #include "cache_blob.h"
+#include "assert_failure.h"
+#include <unordered_set>
 #include "common/serdes.h"
 #include "common/elf_info.h"
 #include "pipeline_library.h"
@@ -82,9 +84,10 @@ std::unordered_map<u64, std::vector<u32>> recipe_spirv; // permutation hash -> S
 /// cached one (written to ISS_AOT_RECIPE_VERIFIED for make_recipes.py: recipes keep only those).
 std::vector<u64> recipe_verified;
 
-// iss: a truncated or corrupt cache blob is skipped and deleted instead of aborting the boot. Its
-// reads assert (serdes.h); on the WarmUp thread those throw while one of these is active. Off again
-// before anything is added to the caches, so a half-built pipeline is never left in one.
+// iss: a truncated or corrupt cache blob is skipped (and deleted from this cache) instead of
+// aborting the boot. Its reads assert (serdes.h); on the WarmUp thread those throw iss::AssertFailure
+// while one of these is active, and only that is caught. Off again before anything is added to the
+// caches, which are only added to once an entry is complete.
 struct AssertsThrow {
     explicit AssertsThrow(bool value) : previous{iss::assert_throws} {
         iss::assert_throws = value;
@@ -96,7 +99,29 @@ struct AssertsThrow {
     AssertsThrow& operator=(const AssertsThrow&) = delete;
     bool previous;
 };
-u32 corrupt_blobs = 0; // WarmUp is serial
+// The corrupt blobs of this preload, each counted once (metadata is shared by many keys).
+// WarmUp is serial.
+struct CorruptBlobs {
+    u32 deleted = 0; // this cache's, deleted
+    u32 skipped = 0; // the read-only shader library's, only skipped
+    std::unordered_set<std::string> seen;
+};
+CorruptBlobs corrupt_blobs;
+
+/// Skips a corrupt blob: deleted when it is this cache's (`in_cache`), counted once. False when it
+/// was already counted (nothing more to log).
+bool DropCorruptBlob(Storage::BlobType type, const std::string& name, bool in_cache) {
+    if (!name.empty() && !corrupt_blobs.seen.insert(fmt::format("{}/{}", u32(type), name)).second) {
+        return false;
+    }
+    if (in_cache) {
+        ++corrupt_blobs.deleted;
+        Storage::DataBase::Instance().Remove(type, name);
+    } else {
+        ++corrupt_blobs.skipped;
+    }
+    return true;
+}
 } // Anonymous namespace
 
 void SetComputeShaderVariant(u32 variant) {
@@ -250,12 +275,10 @@ bool PipelineCache::LoadCachedPipelineStage(u64 hash, size_t stage) {
     Serialization::Archive meta_ar{std::move(meta_blob)};
     try {
         return LoadPipelineStage(meta_ar, stage, hash);
-    } catch (const std::exception& e) {
-        ++corrupt_blobs;
-        LOG_WARNING(Render_Vulkan, "Corrupt cached shader metadata {} skipped: {}", meta_name,
-                    e.what());
-        if (!from_library) {
-            Storage::DataBase::Instance().Remove(Storage::BlobType::ShaderMeta, meta_name);
+    } catch (const iss::AssertFailure& e) { // only from reading the metadata, before any insert
+        if (DropCorruptBlob(Storage::BlobType::ShaderMeta, meta_name, !from_library)) {
+            LOG_WARNING(Render_Vulkan, "Corrupt cached shader metadata {} {}: {}", meta_name,
+                        from_library ? "skipped" : "skipped and deleted", e.what());
         }
         return false;
     }
@@ -276,18 +299,20 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
     }
 
     const AssertsThrow asserts_abort{false};
-    const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
-    if (!is_new) {
+    if (compute_pipelines.count(compute_key) != 0) {
         // A merged library can carry the same pipeline from two cache lineages (different file
         // names, same key): the first one is kept.
         return false;
     }
 
-    it.value() =
+    // Built before the insert: the map never holds an empty entry.
+    auto pipeline =
         std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile, *pipeline_cache,
                                           compute_key, *infos[0], modules[0], sdata, true,
                                           parallel_preload);
-    if (parallel_preload) QueuePreload(it.value().get());
+    ComputePipeline* const created = pipeline.get();
+    compute_pipelines.emplace(compute_key, std::move(pipeline));
+    if (parallel_preload) QueuePreload(created);
 
     infos.fill(nullptr);
     modules.fill(nullptr);
@@ -353,15 +378,17 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     }
 
     const AssertsThrow asserts_abort{false};
-    const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
-    if (!is_new) {
+    if (graphics_pipelines.count(graphics_key) != 0) {
         return false; // the same pipeline from another lineage of a merged library
     }
 
-    it.value() = std::make_unique<GraphicsPipeline>(
+    // Built before the insert: the map never holds an empty entry.
+    auto pipeline = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
         runtime_infos, fetch_shader, modules, sdata, true, parallel_preload);
-    if (parallel_preload) QueuePreload(it.value().get());
+    GraphicsPipeline* const created = pipeline.get();
+    graphics_pipelines.emplace(graphics_key, std::move(pipeline));
+    if (parallel_preload) QueuePreload(created);
 
     infos.fill(nullptr);
     modules.fill(nullptr);
@@ -381,7 +408,14 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
     Shader::StageSpecialization spec{};
     spec.info = &program->info;
     size_t perm_idx{};
-    if (!LoadShaderMeta(ar, program->info, spec, perm_idx)) {
+    bool meta_loaded{};
+    try {
+        meta_loaded = LoadShaderMeta(ar, program->info, spec, perm_idx);
+    } catch (const std::logic_error& e) {
+        // Parsing only: a corrupt bitset (invalid_argument) or length (length_error) of the blob.
+        throw iss::AssertFailure(e.what());
+    }
+    if (!meta_loaded) {
         return false;
     }
     if (HashCombine(program->info.pgm_hash, u64{perm_idx}) != expected_hash) {
@@ -402,11 +436,9 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
     }
     if (!bytes.empty() && !iss::cache_blob::IsValidSpirv(bytes)) {
         // Truncated or not SPIR-V: never handed to the driver. Made again when the game needs it.
-        ++corrupt_blobs;
-        LOG_WARNING(Render_Vulkan, "Corrupt cached SPIR-V {} ({} bytes) skipped", spv_name,
-                    bytes.size());
-        if (!spv_from_library) {
-            Storage::DataBase::Instance().Remove(Storage::BlobType::ShaderBinary, spv_name);
+        if (DropCorruptBlob(Storage::BlobType::ShaderBinary, spv_name, !spv_from_library)) {
+            LOG_WARNING(Render_Vulkan, "Corrupt cached SPIR-V {} ({} bytes) {}", spv_name,
+                        bytes.size(), spv_from_library ? "skipped" : "skipped and deleted");
         }
     } else if (!bytes.empty()) {
         spv.resize(bytes.size() / sizeof(u32));
@@ -474,10 +506,12 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage, 
 
     // The scout thread looks programs and their permutations up meanwhile.
     std::unique_lock lock{program_cache_mutex};
-    auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
-    if (new_program) {
+    const u64 pgm_hash = program->info.pgm_hash;
+    auto it_pgm = program_cache.find(pgm_hash);
+    if (it_pgm == program_cache.end()) {
+        // Compiled before the insert: the map never holds an empty Program.
         { std::vector<u32> salted; module = CompileSPV(iss::shader_salt::Apply(spv, salted), instance.GetDevice()); }
-        it_pgm.value() = std::move(program);
+        it_pgm = program_cache.emplace(pgm_hash, std::move(program)).first;
     } else {
         const auto& saved = it_pgm.value()->modules;
         if (perm_idx < saved.size() && saved[perm_idx].module) {
@@ -664,11 +698,10 @@ void PipelineCache::WarmUp() {
             ++num_total_pipelines;
             iss::g_preload_entries.fetch_add(1, std::memory_order_relaxed);
             const auto drop_corrupt = [&](const char* why) {
-                ++corrupt_blobs;
-                LOG_WARNING(Render, "Corrupt cached pipeline key {} skipped: {}",
-                            name.empty() ? "(library)" : name, why);
-                if (!name.empty()) {
-                    Storage::DataBase::Instance().Remove(Storage::BlobType::PipelineKey, name);
+                if (DropCorruptBlob(Storage::BlobType::PipelineKey, name, !name.empty())) {
+                    LOG_WARNING(Render, "Corrupt cached pipeline key {} {}: {}",
+                                name.empty() ? "(library)" : name,
+                                name.empty() ? "skipped" : "skipped and deleted", why);
                 }
             };
             if (data.size() < 16) {
@@ -703,7 +736,7 @@ void PipelineCache::WarmUp() {
                 } else {
                     result = LoadGraphicsPipeline(ar);
                 }
-            } catch (const std::exception& e) {
+            } catch (const iss::AssertFailure& e) { // reading the key, before any insert
                 drop_corrupt(e.what());
                 return;
             }
@@ -715,7 +748,7 @@ void PipelineCache::WarmUp() {
     if (const char* value = std::getenv("ISS_AOT_RECIPES"); value && value[0] == '1' && library_ready) {
         PrepareRecipeStages();
     }
-    corrupt_blobs = 0;
+    corrupt_blobs = {};
     Storage::DataBase::Instance().ForEachNamedBlob(Storage::BlobType::PipelineKey, preload_key);
     const u32 normal_accepted = num_pipelines;
     const u32 normal_total = num_total_pipelines;
@@ -763,12 +796,15 @@ void PipelineCache::WarmUp() {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines);
     }
-    if (corrupt_blobs) {
-        LOG_WARNING(Render, "{} corrupt pipeline cache files were skipped and deleted",
-                    corrupt_blobs);
-        std::fprintf(stderr, "PIPELINE_PRELOAD corrupt_blobs=%u (skipped and deleted)\n",
-                     corrupt_blobs);
+    if (corrupt_blobs.deleted || corrupt_blobs.skipped) {
+        LOG_WARNING(Render,
+                    "Corrupt pipeline cache blobs: {} skipped and deleted from the cache, {} skipped "
+                    "in the shader library (read-only)",
+                    corrupt_blobs.deleted, corrupt_blobs.skipped);
+        std::fprintf(stderr, "PIPELINE_PRELOAD corrupt_deleted=%u corrupt_library_skipped=%u\n",
+                     corrupt_blobs.deleted, corrupt_blobs.skipped);
     }
+    corrupt_blobs.seen.clear();
 
     Storage::DataBase::Instance().FinishPreload();
     if (seed_profile) {

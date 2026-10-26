@@ -4,6 +4,7 @@
 // truncated blob through serdes.h throws (as on the WarmUp thread during the preload, which skips
 // and deletes the blob) instead of aborting.
 #include "cache_blob.h"
+#include "assert_failure.h"
 #include "common/serdes.h"
 #include <cassert>
 #include <cstdio>
@@ -17,12 +18,12 @@
 // The renderer's assert hooks (gpu_v2/gpu/host_hooks.cpp): throw while assert_throws is set.
 namespace iss { thread_local bool assert_throws = false; }
 void assert_fail_impl() {
-    if (iss::assert_throws) throw std::runtime_error("assertion");
+    if (iss::assert_throws) throw iss::AssertFailure("assertion");
     std::fputs("assertion with assert_throws off\n", stderr);
     std::abort();
 }
 [[noreturn]] void unreachable_impl() {
-    if (iss::assert_throws) throw std::runtime_error("unreachable");
+    if (iss::assert_throws) throw iss::AssertFailure("unreachable");
     std::abort();
 }
 namespace Common::Log {
@@ -75,7 +76,7 @@ bool LoadKey(std::vector<u8>&& data, u32& corrupt) {
         r.Read(words);
         return version == 7 && key.stage_hashes[5] == 0x1005 && bits.size() == 64 &&
                words.size() == 5 && words[4] == 5;
-    } catch (const std::exception&) {
+    } catch (const iss::AssertFailure&) {
         ++corrupt;
         return false;
     }
