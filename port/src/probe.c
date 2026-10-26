@@ -1687,8 +1687,9 @@ int main(int argc, char **argv) {
     if (isa_table) {
         isa_table->protect_red_zone = red_zone_on;
         isa_table->no_hits = !runtime_counters;   /* TLG_RUNTIME_COUNTERS, read by runtime_start */
-        /* TLG_EXTRQ_INLINE=1 (default 0): SSE4A sites an SSE2 sequence computes get an inline stub
-         * instead of the isa_emulate_sse4a call (docs/isa_rewrite.md). */
+        /* TLG_EXTRQ_INLINE=1 (default 0; gpu_v2/defaults.env sets ISS_EXTRQ_INLINE=1): SSE4A sites an
+         * SSE2 sequence computes get an inline stub instead of the isa_emulate_sse4a call
+         * (docs/isa_rewrite.md). */
         const char *extrq_inline = getenv("TLG_EXTRQ_INLINE");
         isa_table->inline_sse4a = extrq_inline && !strcmp(extrq_inline, "1");
         IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
