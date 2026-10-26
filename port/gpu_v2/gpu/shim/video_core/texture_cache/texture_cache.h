@@ -599,7 +599,10 @@ private:
     /// of the LRU item, which already holds that tick).
     std::vector<u64> lru_touched;
     /// iss: LRU ids touched without the lock (TouchImage), applied under it before the next
-    /// collection. Owned by the command processor, like lru_touched.
+    /// collection. Owned by the command processor, like lru_touched. With ISS_CP_SPLIT the ASC
+    /// command processor thread also passes TouchImage's IsCurrentCpThread check: the vector is
+    /// single owner only because AssertNoAscTextureAccess keeps the ASC queue out of the texture
+    /// cache (GetImage, UpdateImage, Find*). A texture path opened to ASC must change this.
     std::vector<size_t> pending_lru_touches;
     const bool defer_lru_touches = DeferLruTouchesSetting();
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;

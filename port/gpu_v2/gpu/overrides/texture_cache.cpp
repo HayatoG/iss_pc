@@ -357,6 +357,15 @@ void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
         // which may be waiting for this mutex (the freeze of 2026-10-22, R4-7). Such an image
         // is marked CPU dirty instead, without a hash: its next binding uploads it on the
         // command processor (ObtainBufferForImage takes the GPU's data for those pages).
+        // Still open, narrowed: the command processor can make a page GPU modified (and read
+        // protect it) between this check and the hash below; that hash then faults as before.
+        // Closing it needs a non faulting read of the backing (HashSparseMemory), not done.
+        // The hash stays 0 after this fast-out, so a later maybe-dirty of the image checks
+        // again (and takes it again while its pages are GPU modified): a full upload each time.
+        // Not restored at the refresh on purpose: that is what the old path did too (the full
+        // size hash set below never matched RefreshImage's 64 pixel hash, so it uploaded), and
+        // hashing there would read the GPU modified pages on the command processor (readback
+        // faults) for every such image.
         if (buffer_cache.IsRegionGpuModified(image.info.guest_address, image.info.guest_size)) {
             static std::atomic<u64> skipped{};
             const u64 n = skipped.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1847,6 +1856,7 @@ void TextureCache::GarbageCollectSamplers() {
         }
         --num_deletions;
         const auto it = samplers.find(hash);
+        ASSERT(it != samplers.end());
         const size_t lru_id = it->second.lru_id;
         // The handle may be in command buffers being recorded or not yet executed, and in
         // descriptors native passes pool jobs are writing (R4-1): it is destroyed only once the
