@@ -501,10 +501,22 @@ Paired-round A/B sessions on the bench route (renderer v2), each against the mai
   occlusion hold and overlap age): +19.2% FPS (95% CI +15.4..+23.0%).
 - **Interval sweep:** 250 to 1000 us is a plateau (all within noise of each other); 500 stays the
   default.
-- **Keep off:** `ISS_ASC_NATIVE_QUEUE` hangs the game after about 55 s of gameplay.
+- **`ISS_EXTRQ_INLINE=1`** (inline SSE2 stubs for SSE4A `extrq` sites; now the default in
+  `port/gpu_v2/defaults.env`): +2.2% FPS (95% CI +1.1..+3.3%), guest CPU -5.5%, measured against
+  the submit-interval default. An earlier session had also shown about +2%.
 - **Neutral** (no FPS change outside the noise): the VO, FLIP, SPLIT, LP, RSPIN and PS variants.
-- **Borderline:** `ISS_EXTRQ_INLINE=1` (inline SSE2 stubs for SSE4A `extrq` sites) about +2%,
-  not clearly outside the noise; it stays opt-in.
+  SPLIT (`ISS_CP_SPLIT=1`) and SI1000 (`ISS_SUBMIT_INTERVAL_US=1000`) stay neutral with the
+  submit interval of 500 us in place, although they cut the mutex waits by 60-70%: those waits
+  are not what limits the frame rate.
+- **Keep off:** `ISS_ASC_NATIVE_QUEUE=1` hangs the game after about 55 s of gameplay. Root cause:
+  without unified memory (the Windows default) `AscRelease` deferred a compute ring's label
+  writes to the compute queue's priority operations, while the same ring's graphics-path label
+  writes happen when the command processor parses them. A deferred (older) value could land after
+  a newer one, so a monotonic guest fence went backwards and the guest spun forever. `AscRelease`
+  now writes the label at parse time when unified memory is off; with unified memory on it logs
+  once (`PORT_TUNING asc_native_queue=1 with unified memory ...`) that the two queues' label
+  writes are not ordered. Expected gain is low anyway: more than 99% of compute segments fall back
+  to the graphics queue.
 
 ## Tests and rollout
 
