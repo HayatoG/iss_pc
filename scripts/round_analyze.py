@@ -640,7 +640,7 @@ def bench_table(runs, control=None, noise_k=2.0, all_runs=None):
             # two agree); else the unpaired test: |diff| within noise_k x the control's CV (a stdev of 0 is no noise
             # estimate: a 0% diff is not "within the noise")
             e = paired.get(g)
-            if d is not None and e and e["ci95"] is not None and e["sd"]:
+            if d is not None and e and e["ci95"] is not None and e["sd"] and not e["dropped"]:
                 v["noise"] = e["ci95"][0] <= 0 <= e["ci95"][1]
                 v["noise_test"] = "paired"
             else:
@@ -697,7 +697,10 @@ def paired_diffs(runs, groups, control, key):
         if g == control: continue
         v = series(g)
         d = [100.0 * (v[k] - ctl[k]) / ctl[k] for k in sorted(v) if k in ctl and ctl[k]]
-        e = dict(n=len(d), mean=None, sd=None, ci95=None, by_round=by_round)
+        # rounds whose control value is 0 have no % diff and are dropped; bench_table then uses
+        # the unpaired test, so its '~' goes with the % of all the runs
+        dropped = sum(1 for k in v if k in ctl and not ctl[k])
+        e = dict(n=len(d), mean=None, sd=None, ci95=None, by_round=by_round, dropped=dropped)
         if d: e["mean"] = mean(d)
         if len(d) > 1:
             e["sd"] = st.stdev(d)

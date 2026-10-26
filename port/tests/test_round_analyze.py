@@ -272,6 +272,20 @@ class Bench(unittest.TestCase):
         self.assertIn("cache not warm", out)
         self.assertEqual(json.loads((self.root / "t.json").read_text())["control"], "A")
 
+    def test_paired_mark_falls_back_when_a_control_round_is_0(self):
+        # over33: the control's round 1 is 0 (no % diff), so the pairs would cover rounds 2-3 only;
+        # the '~' then uses the unpaired test, which goes with the % of all the runs
+        rows = [(1, "A", 0), (1, "B", 3), (2, "B", 4), (2, "A", 4), (3, "A", 5), (3, "B", 6)]
+        files = []
+        for i, (rd, n, v) in enumerate(rows, 1):
+            files.append(self.write(f"z/{i:02d}-{n}/bench.json", bench(n, 60.0, over33=v)))
+            self.write(f"z/{i:02d}-{n}/run.json", dict(status="ok", round=rd, warmup=0))
+        runs = [ra.load_bench(f) for f in files]
+        self.assertEqual(ra.paired_diffs(runs, ["A", "B"], "A", "over33")["B"]["dropped"], 1)
+        t = ra.bench_table(runs, "A", 2.0)
+        cell = next(r for r in t["rows"] if r["metric"] == "over33")["groups"]["B"]
+        self.assertEqual(cell["noise_test"], "unpaired")
+
     def test_paired_fps_ci(self):
         # per-round pairs (run.json 'round'): a steady +2% the unpaired table calls noise ('~'),
         # the paired CI excludes 0

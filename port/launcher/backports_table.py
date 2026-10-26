@@ -317,7 +317,7 @@ import advanced_table  # noqa: E402
 ADVANCED = advanced_table.build(_make)
 
 # Rows whose variable nothing in renderer v2 (port/gpu_v2) or the shared runtime (port/src) reads:
-# they only change this port's renderer, and their names say so. tests/test_backports_table.py
+# they only change this port's renderer, and their names say so. tests/test_launch_env_v2.py
 # checks this list against the sources. (The launcher's own GPU accuracy / read-ahead / write
 # merge settings are marked the same way in infamous_launcher.py TEXT.)
 NO_EFFECT_V2 = frozenset([f'BP{n:02d}' for n in range(1, 13)] + [
@@ -334,12 +334,15 @@ NO_EFFECT_V2 = frozenset([f'BP{n:02d}' for n in range(1, 13)] + [
     'TLG_SQUARE_PASS', 'TLG_INTERP_INT_FIX', 'TLG_1D_NO_STORAGE', 'TLG_1D_NO_MUTABLE', 'TLG_EXPLICIT_RANGE',
     'TLG_BARRIER_SPLIT', 'TLG_BARRIER_MERGE', 'TLG_PERF_DIAG', 'TLG_IMG_TRACE', 'TLG_BC1D_LOG',
     'TLG_WAVE_STATS'])
+# Rows renderer v2 reads but the launcher does not pass to it (infamous_run.V2_DEFAULTS_WIN:
+# gpu_v2/defaults.env decides there); they get the same note.
+V2_DEFAULTS_WIN_IDS = frozenset(['TLG_DRAW_PIPE'])
 NO_EFFECT_V2_NOTE = (' (no effect in renderer v2)', ' (sem efeito no renderer v2)')
 
 
 def _note_no_effect_v2(items):
     return [item._replace(name=(item.name[0] + NO_EFFECT_V2_NOTE[0], item.name[1] + NO_EFFECT_V2_NOTE[1]))
-            if item.id in NO_EFFECT_V2 else item for item in items]
+            if item.id in NO_EFFECT_V2 | V2_DEFAULTS_WIN_IDS else item for item in items]
 
 
 BACKPORTS = _note_no_effect_v2(BACKPORTS)

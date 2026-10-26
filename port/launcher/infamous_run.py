@@ -180,6 +180,11 @@ def renderer_v2_env(settings):
     return env
 
 
+# Switches that renderer v2 does not take from the player: defaults.env's value applies (an
+# ISS_/TLG_ variable set outside the launcher still wins). ISS_DRAW_PIPE: defaults.env sets 0 and
+# the draw pipeline's stability in v2 is not established, so an old tlg.ini adv_draw_pipe=1 (from
+# this port's renderer) must not turn it on. backports_table.V2_DEFAULTS_WIN_IDS marks the rows.
+V2_DEFAULTS_WIN = ('ISS_DRAW_PIPE',)
 # A variable with this value is removed from the game's environment after the defaults and the
 # launcher's switches are applied (build_env): the way to run without a defaults.env key.
 UNSET = '__unset__'
@@ -842,10 +847,11 @@ def build_env(settings, extra=None):
     # shadPS4's ~/.local/share/shadPS4 and Windows <saves>/user).
     env['TLG_GPU_USER_DIR'] = str(gpu_user_dir())
     # Renderer v2: its defaults (gpu_v2/defaults.env) first, so that the switches below that the
-    # player changed win over them (Advanced "Draw pipeline" = ISS_DRAW_PIPE, which defaults.env
-    # sets to 0). A variable set outside the launcher wins over both, except ISS_TUNING: that one
-    # is merged per key with the defaults' (merge_tuning), so a variant's "x=1" keeps scout=1 etc.
-    if renderer_v2(settings):
+    # player changed win over them, except the V2_DEFAULTS_WIN keys. A variable set outside the
+    # launcher wins over both, except ISS_TUNING: that one is merged per key with the defaults'
+    # (merge_tuning), so a variant's "x=1" keeps scout=1 etc.
+    v2 = renderer_v2(settings)
+    if v2:
         for key, value in renderer_v2_env(settings).items():
             if key == 'ISS_TUNING' and os.environ.get(key) and os.environ[key] != UNSET:
                 env[key] = merge_tuning(value, os.environ[key])
@@ -853,7 +859,11 @@ def build_env(settings, extra=None):
                 env[key] = value
     # Experimental fixes (BPnn) and A/B switches the player changed: ISS_<name>=0/1 (the probe
     # copies them to TLG_). Untouched ones add nothing; ISS_/TLG_ set outside the launcher win.
-    env.update(backports_table.environment(experimental_states(settings), os.environ))
+    switches = backports_table.environment(experimental_states(settings), os.environ)
+    if v2:
+        for key in V2_DEFAULTS_WIN:
+            switches.pop(key, None)
+    env.update(switches)
     if extra:
         env.update(extra)
     # The Mods checkbox is authoritative, including when an older session script

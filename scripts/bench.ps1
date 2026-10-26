@@ -852,7 +852,7 @@ function Merge-Tuning([string]$base, [string]$override) {
         $eq = $item.IndexOf('='); $name = if ($eq -ge 0) { $item.Substring(0, $eq) } else { $item }
         $at = -1
         for ($n = 0; $n -lt $items.Count; $n++) { if ($items[$n].Split('=')[0] -ceq $name) { $at = $n; break } }
-        if ($eq -lt 0 -or $TuningRepeatable -contains $name -or $at -lt 0) { if (-not $items.Contains($item)) { $items.Add($item) } }
+        if ($eq -lt 0 -or $TuningRepeatable -ccontains $name -or $at -lt 0) { if (-not $items.Contains($item)) { $items.Add($item) } }
         else { $items[$at] = $item }
     }
     return ($items -join ',')
@@ -875,6 +875,20 @@ function Resolve-VariantDefaults($set, $launchers) {
             if (($null -eq $val -or "$val" -eq '') -and $defs.Contains($k)) {
                 Fail ("variant '$v': $k='' would leave gpu_v2\defaults.env's $k=$($defs[$k]) in place (the launcher " +
                     "fills in every unset key). Use '$UnsetValue' to run without $k, or a value (0, off, ...).")
+            }
+        }
+        $unsets = @($envs.Keys | Where-Object { "$($envs[$_])" -ceq $UnsetValue })
+        if ($unsets.Count) {
+            $l = $launchers[$v]
+            if ($l.Kind -eq 'py' -and -not $l.Missing) {
+                # A source launcher supports the sentinel when its infamous_run.py defines it.
+                if (-not ([IO.File]::ReadAllText($l.Exe)).Contains("UNSET = '$UnsetValue'")) {
+                    Fail ("variant '$v': $($unsets -join ', ') = '$UnsetValue' needs a launcher that removes it " +
+                        "(infamous_run.py UNSET); $($l.Exe) does not, so the game would get the literal value")
+                }
+            } else {
+                Note ("warning: variant '$v': $($unsets -join ', ') = '$UnsetValue': only a launcher built with " +
+                    "infamous_run.py UNSET removes it ($($l.Exe) cannot be checked); an older one passes the literal value")
             }
         }
         if ($envs.Contains('ISS_TUNING') -and "$($envs['ISS_TUNING'])" -and "$($envs['ISS_TUNING'])" -ne $UnsetValue -and $defs.Contains('ISS_TUNING')) {
