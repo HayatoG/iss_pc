@@ -591,8 +591,7 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
     if(const char *p=std::getenv("ISS_GPU_PROFILE");p&&(p[0]=='1'||p[0]=='2'))Common::Perf::GetTuning().gpu_profile=p[0]-'0';
     // ISS_PERF_LOG=1 (or ISS_TUNING=perf_log=1): the "Perf:" counter reports in the log every
     // second (Common::Perf::OnFlip). Nothing else sets it on renderer v2.
-    if(const char *p=std::getenv("ISS_PERF_LOG");p&&p[0]=='1'){Common::Perf::GetTuning().perf_log=true;std::fprintf(stderr,"PORT_TUNING perf_log=1
-");}
+    if(const char *p=std::getenv("ISS_PERF_LOG");p&&p[0]=='1'){Common::Perf::GetTuning().perf_log=true;std::fprintf(stderr,"PORT_TUNING perf_log=1\n");}
     {const char *p=std::getenv("ISS_COMPUTE_PHASES");iss::phase::g_enabled=p&&p[0]=='1';
      std::fprintf(stderr,"PORT_TUNING compute_phases=%d\n",iss::phase::Enabled()?1:0);}
     // ISS_TIMER_1MS=1 (off by default, the user's choice): 1 ms timer resolution for this
