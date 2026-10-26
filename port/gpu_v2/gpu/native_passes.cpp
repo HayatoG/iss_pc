@@ -27,6 +27,12 @@
 #ifdef _WIN32
 bool IssCommandProcessorCpuSets(std::vector<ULONG>& out); // bridge.cpp, ISS_CP_CPU
 #endif
+// liverpool.cpp: the command processor serves the guest commands queued for it (a no-op on any
+// other thread). ISS_NATIVE_WAIT_PUMP, below.
+void IssCpServeCommands();
+// bridge.cpp: a non-faulting write through the host backing, invalidating only the SRT write
+// watches of the pages written (false without a backing).
+bool IssWriteBackingRange(void* address, const void* data, std::uint64_t size);
 
 namespace iss::native_passes {
 namespace {
@@ -75,6 +81,10 @@ struct Stats {
     std::array<std::atomic<u64>, 258> unknown_opcodes{}; // 256: not type 3, 257: past the cursor
     // Command processor.
     std::atomic<u64> claimed{}, executed{}, executed_draws{}, rejected{}, learned{};
+    // Claims of a registered segment whose token was not in its NOP (overwritten: a readback of
+    // a GPU-modified command buffer page, or a reused command buffer), and token writes done with
+    // a plain store (no host backing).
+    std::atomic<u64> token_misses{}, token_plain_stores{};
     // Compute (ISS_NATIVE_COMPUTE): dispatches seen and recorded, segments, learn requests,
     // dispatches without gnmdriver's trailing NOP, and what closed compute segments (opcode).
     std::atomic<u64> dispatches{}, dispatches_recorded{}, cs_segments{}, cs_learn_posted{},
@@ -84,6 +94,24 @@ struct Stats {
     std::array<std::atomic<u64>, 257> cs_close_opcodes{};
 };
 Stats stats;
+// Writes a segment token (TokenMagic, generation, tag) into the payload of a command buffer NOP
+// through the host backing of the guest memory: no fault. A plain store into a command buffer
+// page the GPU modified (labels or query results the command processor wrote into data embedded
+// in it) faults into a readback, which waits for the command processor, which may be waiting for
+// this pool thread: a deadlock. A readback overwriting the page later just loses the token (Claim
+// misses it: stats.token_misses, the segment takes the full path). Only the SRT write watches of
+// the token's page are invalidated (as the fault of a plain store would). Plain store only
+// without a backing (stats.token_plain_stores).
+void WriteToken(const u32* at, u32 generation, u32 token) {
+    const u32 words[3]{TokenMagic, generation, token};
+    auto* dest = const_cast<u32*>(at);
+    if (!IssWriteBackingRange(dest, words, sizeof(words))) {
+        stats.token_plain_stores.fetch_add(1, std::memory_order_relaxed);
+        dest[0] = words[0];
+        dest[1] = words[1];
+        dest[2] = words[2];
+    }
+}
 // Learn request divergence by tracked word (command processor only).
 std::array<u64, TrackedWords_> divergence{};
 u64 divergence_samples{};
@@ -725,9 +753,7 @@ u64 ISS_SYSV DrawIndexHook(CommandBuffer* dcb, u32 count, u64 index_address, u32
     }
     if (token_for && dcb->cursor == packet + DrawDwords && ((packet[6] >> 8) & 0xFF) == 0x10 &&
         ((packet[6] >> 16) & 0x3FFF) == 2) {
-        packet[7] = TokenMagic;
-        packet[8] = token_for->generation;
-        packet[9] = token_for->token;
+        WriteToken(packet + 7, token_for->generation, token_for->token);
     }
     if (l->begin == dcb->begin && dcb->cursor >= packet) l->scanned = dcb->cursor;
     return result;
@@ -894,10 +920,7 @@ const u32* RecordDispatch(Lane& l, const u32* packet, const u32* next, const u32
         if (seg.draw_packets.size() >= MaxComputeDispatches) CloseCompute(l, CloseFull, 0x15);
     }
     if (token_for && has_nop) {
-        auto* w = const_cast<u32*>(next);
-        w[1] = TokenMagic;
-        w[2] = token_for->generation;
-        w[3] = token_for->token;
+        WriteToken(next + 1, token_for->generation, token_for->token);
     }
     return after;
 }
@@ -1037,10 +1060,7 @@ void RecordCommandBuffer(Lane& l, const u32* begin, const u32* end, const std::v
             if (seg.draw_packets.size() >= MaxSegmentDraws) CloseSegment(l, CloseFull);
         }
         if (token_for && has_nop) {
-            auto* w = const_cast<u32*>(next);
-            w[1] = TokenMagic;
-            w[2] = token_for->generation;
-            w[3] = token_for->token;
+            WriteToken(next + 1, token_for->generation, token_for->token);
         }
         plain_from = after;
         p = after;
@@ -1335,7 +1355,10 @@ Segment* Claim(const u32* packet) {
         Segment* s = slot.segment.load(std::memory_order_acquire);
         if (!s) return nullptr;
         const u32* const t = TokenWords(packet);
-        if (t[0] != TokenMagic || t[1] != s->generation || t[2] != s->token) return nullptr;
+        if (t[0] != TokenMagic || t[1] != s->generation || t[2] != s->token) {
+            stats.token_misses.fetch_add(1, std::memory_order_relaxed);
+            return nullptr;
+        }
         u32 expected = Ready;
         if (!s->state.compare_exchange_strong(expected, Claimed)) return nullptr;
         if (s->first_draw != packet || t[1] != s->generation) {
@@ -1407,12 +1430,36 @@ bool JobWait() {
     }();
     return enabled;
 }
+// ISS_NATIVE_WAIT_PUMP=1 (default 0: untimed waits): the command processor waiting for the pool
+// wakes every 1 ms (not sub-ms: libc++ on Win32 truncates that to a busy poll) and serves the
+// guest commands queued for it, the pool lock released. A pool or scan thread faulting on a
+// GPU-modified command buffer page waits for such a command (a readback): without it, both wait
+// for each other. The waits are at a packet boundary, where the command processor's loop serves
+// the commands anyway (ProcessCommands before WaitRecordedAt).
+bool WaitPump() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_NATIVE_WAIT_PUMP");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
+void WaitDone(std::unique_lock<std::mutex>& lock, const auto& done) {
+    if (!WaitPump()) {
+        submit.done_cv.wait(lock, done);
+        return;
+    }
+    while (!submit.done_cv.wait_for(lock, std::chrono::milliseconds(1), done)) {
+        lock.unlock();
+        IssCpServeCommands();
+        lock.lock();
+    }
+}
 // Waits (pool lock held) until job k of the command processor's command buffer is recorded.
 void WaitJob(std::unique_lock<std::mutex>& lock, DcbWork& work, u32 k) {
     const auto done = [&] { return work.job_done[k].load(std::memory_order_acquire) != 0; };
     if (done()) return;
     const u64 t0 = NowUs();
-    submit.done_cv.wait(lock, done);
+    WaitDone(lock, done);
     submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
     submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
 }
@@ -1439,7 +1486,7 @@ void WaitRecorded(const u32* dcb) {
         // others as the command processor reaches them (WaitRecordedAt).
         if (!scanned()) {
             const u64 t0 = NowUs();
-            submit.done_cv.wait(lock, scanned);
+            WaitDone(lock, scanned);
             submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
             submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
         }
@@ -1457,7 +1504,7 @@ void WaitRecorded(const u32* dcb) {
     }
     if (done()) return;
     const u64 t0 = NowUs();
-    submit.done_cv.wait(lock, done);
+    WaitDone(lock, done);
     submit.cp_waits.fetch_add(1, std::memory_order_relaxed);
     submit.cp_wait_us.fetch_add(NowUs() - t0, std::memory_order_relaxed);
 }
@@ -2032,7 +2079,8 @@ void Report() {
     std::fprintf(stderr,
                  "NATIVE_PASSES draws=%llu recorded=%llu segments=%llu learn_posted=%llu "
                  "unknown_state=%llu not_ready=%llu abandoned=%llu no_slot=%llu | cp claimed=%llu "
-                 "executed=%llu executed_draws=%llu rejected=%llu learned=%llu close[%s ] "
+                 "executed=%llu executed_draws=%llu rejected=%llu learned=%llu token_misses=%llu "
+                 "token_plain_stores=%llu close[%s ] "
                  "boundaries[%s ]\n",
                  (unsigned long long)s.draws.load(), (unsigned long long)s.recorded.load(),
                  (unsigned long long)s.segments.load(), (unsigned long long)s.learn_posted.load(),
@@ -2040,7 +2088,8 @@ void Report() {
                  (unsigned long long)s.abandoned.load(), (unsigned long long)s.no_slot.load(),
                  (unsigned long long)s.claimed.load(), (unsigned long long)s.executed.load(),
                  (unsigned long long)s.executed_draws.load(), (unsigned long long)s.rejected.load(),
-                 (unsigned long long)s.learned.load(), closes.c_str(), opcodes.c_str());
+                 (unsigned long long)s.learned.load(), (unsigned long long)s.token_misses.load(),
+                 (unsigned long long)s.token_plain_stores.load(), closes.c_str(), opcodes.c_str());
     if (const u64 n = s.dispatches.load(std::memory_order_relaxed)) {
         std::vector<std::pair<u64, u32>> cs_top;
         for (u32 i = 0; i < 257; ++i)

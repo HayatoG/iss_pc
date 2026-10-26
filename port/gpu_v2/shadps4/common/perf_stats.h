@@ -301,6 +301,14 @@ enum Counter : u32 {
     SubmitMutexWaitNsCp,
     SubmitMutexWaitNsRecorder,
     SubmitMutexWaitNsPresent,
+    // Command processor waits on a flip label (video out, liverpool.cpp WaitRegMem) and their
+    // time (ISS_VO_WAIT); waits on a label or semaphore not yet written (WaitRegMem and
+    // MemSemaphore, graphics and compute), counted when the first test fails, and the time until
+    // it passed (the queue yields meanwhile; the time can overlap between queues).
+    VoWaits,
+    VoWaitNs,
+    CpLabelStalls,
+    CpLabelStallNs,
     CounterCount,
 };
 
@@ -927,7 +935,8 @@ inline void OnFlip(float draws_per_frame, float dispatches_per_frame) {
              "left {}) | asc queue dispatches {} fallbacks {} submits {} waits gfx {} compute {} "
              "flushes {} first touches {} | draws/frame {:.0f} dispatches/frame {:.0f} | "
              "per frame: recorder sync {:.3f} ms ({:.2f}) submit mutex waits cp {:.3f} ms "
-             "({:.2f}) recorder {:.3f} ms ({:.2f}) present {:.3f} ms ({:.2f})",
+             "({:.2f}) recorder {:.3f} ms ({:.2f}) present {:.3f} ms ({:.2f}) | "
+             "vo waits {} ({:.2f} ms/frame) | cp label stalls {} ({:.2f} ms/frame)",
              static_cast<double>(r.frames) / seconds,
              r.frames ? r.frame_ms_sum / static_cast<double>(r.frames) : 0.0, r.frame_ms_max,
              r.frames_over_33, r.frames_over_50, pct(t[GpuBusyNs]), pct(t[GpuSpinNs]),
@@ -999,7 +1008,9 @@ inline void OnFlip(float draws_per_frame, float dispatches_per_frame) {
              per_frame(t[SubmitMutexContentionsCp]), per_frame_ms(t[SubmitMutexWaitNsRecorder]),
              per_frame(t[SubmitMutexContentionsRecorder]),
              per_frame_ms(t[SubmitMutexWaitNsPresent]),
-             per_frame(t[SubmitMutexContentionsPresent]));
+             per_frame(t[SubmitMutexContentionsPresent]), t[VoWaits],
+             r.frames ? ms(t[VoWaitNs]) / static_cast<double>(r.frames) : 0.0, t[CpLabelStalls],
+             r.frames ? ms(t[CpLabelStallNs]) / static_cast<double>(r.frames) : 0.0);
 
     const u64 last_flip = r.last_flip;
     const u64 flip_index = r.flip_index;

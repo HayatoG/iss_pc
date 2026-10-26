@@ -415,6 +415,23 @@ void VideoOutDriver::Flip(const Request& req, u64 vblank_count) {
     // Update HDR status before presenting.
     presenter->SetHDR(req.port->is_hdr);
 
+    // ISS_FLIP_EARLY_LABEL=1 (default 0): flip status, flip events and the previous buffer's
+    // label are released before Present instead of after it, so a command processor waiting on
+    // that label (and the guest waiting on the flip) do not also wait for the acquire, ImGui,
+    // submit and present. Safe for the data: Present only reads req.frame->image (and the last
+    // frame's image), which PrepareFrame filled from the guest buffer with commands recorded and
+    // flushed on the draw scheduler (vk_presenter.cpp PrepareFrame: pp_pass into frame->image,
+    // draw_scheduler.Flush). Guest rendering into the released buffer is recorded later on the
+    // same queue, so it is ordered after that copy. The released label is the one of the buffer
+    // flipped before this one, whose own copy is older still.
+    static const bool early_label = [] {
+        const char* value = std::getenv("ISS_FLIP_EARLY_LABEL");
+        return value && value[0] == '1';
+    }();
+    if (early_label) {
+        ReleaseFlip(req, vblank_count);
+    }
+
     // Present the frame.
     IssFrames::shown.fetch_add(1, std::memory_order_relaxed);
     presenter->Present(req.frame);
@@ -426,6 +443,12 @@ void VideoOutDriver::Flip(const Request& req, u64 vblank_count) {
                             frame_id, 0, Common::Perf::NowNs() - present_start);
     }
 
+    if (!early_label) {
+        ReleaseFlip(req, vblank_count);
+    }
+}
+
+void VideoOutDriver::ReleaseFlip(const Request& req, u64 vblank_count) {
     // Update flip status.
     auto* port = req.port;
     u64 flip_count{};

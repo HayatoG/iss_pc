@@ -5,6 +5,7 @@
 #include <boost/preprocessor/stringize.hpp>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <algorithm>
 #include <chrono>
 #include <array>
@@ -1485,9 +1486,10 @@ void Liverpool::Process(std::stop_token stoken) {
         if (submit_done) {
             if (iss::submit_gate::FrameEndMarks()) {
                 run_frame_ends(true);
-            } else {
+            } else if (submit_done.exchange(false)) {
+                // Cleared before the frame end work: a SubmitDone arriving meanwhile sets it
+                // again and gets its own frame end (it was lost when cleared after).
                 frame_end();
-                submit_done = false;
             }
         }
         account_time(true);
@@ -1706,6 +1708,27 @@ struct SegmentCensus {
     bool drew{};
     u32 draws{};
 };
+// ISS_VO_WAIT=event: the command processor waiting on a flip label sleeps until the label is
+// written, a guest command arrives (SendCommand wakes it, see Liverpool::WakeVoWait) or compute
+// work it yields to is submitted, with a long safety timeout. Default (legacy): 1 ms timed steps
+// (a sub-ms remainder of which libc++ on Win32 truncates to a busy poll).
+static bool VoWaitEvent() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ISS_VO_WAIT");
+        return value && std::strcmp(value, "event") == 0;
+    }();
+    return enabled;
+}
+
+void Liverpool::SignalVoWait() {
+    if (vo_port) vo_port->SignalVoLabel();
+}
+
+void Liverpool::ServeCommandsOnCp() {
+    if (std::this_thread::get_id() != gpu_id) return;
+    ProcessCommands();
+}
+
 static bool SegmentCensusEnabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("ISS_SEGMENT_CENSUS");
@@ -3305,8 +3328,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     VideoCore::NoteHostWrite();
                 } else {
                     if (rasterizer) rasterizer->SyncUnifiedRead(sem_address, sizeof(u64));
-                    while (!packet.Signaled()) {
-                        YIELD_GFX();
+                    if (!packet.Signaled()) {
+                        const u64 stall_start = Common::Perf::NowNs();
+                        do {
+                            YIELD_GFX();
+                        } while (!packet.Signaled());
+                        Common::Perf::Add(Common::Perf::CpLabelStalls);
+                        Common::Perf::Add(Common::Perf::CpLabelStallNs,
+                                          Common::Perf::NowNs() - stall_start);
                     }
                     if (CpSplitActive()) {
                         const auto write = [packet] { packet.Decrement(); };
@@ -3379,23 +3408,65 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         Common::Perf::GetTuning().asc_yield_packets.load(
                             std::memory_order_relaxed) != 0;
                     bool satisfied = false;
-                    while (!(satisfied = vo_port->WaitVoLabelFor(
-                                 [&] { return wait_reg_mem->Test(regs.reg_array); },
-                                 std::chrono::milliseconds{1}))) {
-                        ProcessCommands();
-                        if (yield_to_compute && asc_submits.load(std::memory_order_relaxed) != 0) {
-                            break;
+                    if (VoWaitEvent()) {
+                        // Pending commands end the wait only when ProcessCommands below can
+                        // serve them: it returns at once on a compute lane under ISS_CP_SPLIT
+                        // (qid != GfxQueueId), where counting them would spin hot until the
+                        // graphics lane drains them. Then only the label or the timeout ends it.
+                        const bool serves_commands =
+                            !(CpSplitActive() && thread_context.owner == this &&
+                              thread_context.qid != GfxQueueId);
+                        cp_in_vo_wait.store(true, std::memory_order_relaxed);
+                        // Pairs with the fence in WakeVoWait (store buffering: one side sees
+                        // the other's write).
+                        std::atomic_thread_fence(std::memory_order_seq_cst);
+                        while (true) {
+                            vo_port->WaitVoLabelFor(
+                                [&] {
+                                    satisfied = wait_reg_mem->Test(regs.reg_array);
+                                    return satisfied ||
+                                           (serves_commands && num_commands.load() != 0) ||
+                                           (yield_to_compute &&
+                                            asc_submits.load(std::memory_order_relaxed) != 0);
+                                },
+                                std::chrono::milliseconds{16});
+                            if (satisfied) break;
+                            ProcessCommands();
+                            if (yield_to_compute &&
+                                asc_submits.load(std::memory_order_relaxed) != 0) {
+                                break;
+                            }
+                        }
+                        cp_in_vo_wait.store(false, std::memory_order_relaxed);
+                    } else {
+                        while (!(satisfied = vo_port->WaitVoLabelFor(
+                                     [&] { return wait_reg_mem->Test(regs.reg_array); },
+                                     std::chrono::milliseconds{1}))) {
+                            ProcessCommands();
+                            if (yield_to_compute &&
+                                asc_submits.load(std::memory_order_relaxed) != 0) {
+                                break;
+                            }
                         }
                     }
-                    blocked_ns += Common::Perf::NowNs() - wait_start;
+                    const u64 vo_wait_ns = Common::Perf::NowNs() - wait_start;
+                    blocked_ns += vo_wait_ns;
+                    Common::Perf::Add(Common::Perf::VoWaits);
+                    Common::Perf::Add(Common::Perf::VoWaitNs, vo_wait_ns);
                     if (satisfied) {
                         // Written by the presentation, not by the guest CPU: no new upload epoch.
                         Common::Perf::Add(Common::Perf::EpochVoWaitsSkipped);
                         break;
                     }
                 }
-                while (!wait_reg_mem->Test(regs.reg_array)) {
-                    YIELD_GFX();
+                if (!wait_reg_mem->Test(regs.reg_array)) {
+                    const u64 stall_start = Common::Perf::NowNs();
+                    do {
+                        YIELD_GFX();
+                    } while (!wait_reg_mem->Test(regs.reg_array));
+                    Common::Perf::Add(Common::Perf::CpLabelStalls);
+                    Common::Perf::Add(Common::Perf::CpLabelStallNs,
+                                      Common::Perf::NowNs() - stall_start);
                 }
                 OnWaitRegMemSatisfied(*wait_reg_mem);
                 break;
@@ -3996,8 +4067,14 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
                 }
                 VideoCore::NoteHostWrite();
             } else {
-                while (!packet.Signaled()) {
-                    YIELD_ASC_QUEUE(vqid);
+                if (!packet.Signaled()) {
+                    const u64 stall_start = Common::Perf::NowNs();
+                    do {
+                        YIELD_ASC_QUEUE(vqid);
+                    } while (!packet.Signaled());
+                    Common::Perf::Add(Common::Perf::CpLabelStalls);
+                    Common::Perf::Add(Common::Perf::CpLabelStallNs,
+                                      Common::Perf::NowNs() - stall_start);
                 }
                 if (CpSplitActive()) {
                     const auto write = [packet] { packet.Decrement(); };
@@ -4037,8 +4114,14 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
                     break;
                 }
             }
-            while (!wait_reg_mem->Test(compute_regs.reg_array)) {
-                YIELD_ASC_QUEUE(vqid);
+            if (!wait_reg_mem->Test(compute_regs.reg_array)) {
+                const u64 stall_start = Common::Perf::NowNs();
+                do {
+                    YIELD_ASC_QUEUE(vqid);
+                } while (!wait_reg_mem->Test(compute_regs.reg_array));
+                Common::Perf::Add(Common::Perf::CpLabelStalls);
+                Common::Perf::Add(Common::Perf::CpLabelStallNs,
+                                  Common::Perf::NowNs() - stall_start);
             }
             OnWaitRegMemSatisfied(*wait_reg_mem);
             break;
@@ -4584,9 +4667,20 @@ bool Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb, u64 generation
         task.handle.destroy();
         throw;
     }
-    if (published) submit_cv.notify_all();
-    else task.handle.destroy(); // Stale DingDong snapshot must not keep the slot alive.
+    if (published) {
+        submit_cv.notify_all();
+        WakeVoWait(); // ISS_VO_WAIT=event: compute work the flip label wait yields to.
+    } else {
+        task.handle.destroy(); // Stale DingDong snapshot must not keep the slot alive.
+    }
     return published;
 }
 
 } // namespace AmdGpu
+
+extern std::unique_ptr<AmdGpu::Liverpool> liverpool; // gnmdriver.cpp
+
+// native_passes.cpp (ISS_NATIVE_WAIT_PUMP): the command processor waiting for the pool.
+void IssCpServeCommands() {
+    if (liverpool) liverpool->ServeCommandsOnCp();
+}
