@@ -477,6 +477,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, runtime, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
     present_scheduler.SetSubmitLockCaller(Scheduler::SubmitLockCaller::Present);
+    flip_scheduler.SetSubmitLockCaller(Scheduler::SubmitLockCaller::Present);
     const u32 num_images = swapchain.GetImageCount();
     const vk::Device device = instance.GetDevice();
 

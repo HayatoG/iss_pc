@@ -862,8 +862,7 @@ void Scheduler::WaitSubmitted(u64 tick) {
         // Not flushed yet: the caller flushes first.
         Flush();
     }
-    std::unique_lock lk{submitted_mutex};
-    submitted_cv.wait(lk, [&] { return submitted_tick.load(std::memory_order_acquire) >= tick; });
+    WaitTickPublished(tick, "WaitSubmitted");
 }
 
 void Scheduler::WaitFlushedSubmitted(u64 tick) {
@@ -875,8 +874,24 @@ void Scheduler::WaitFlushedSubmitted(u64 tick) {
         LOG_ERROR(Render_Vulkan, "WaitFlushedSubmitted: tick {} not flushed ({})", tick, name);
         return;
     }
+    WaitTickPublished(tick, "WaitFlushedSubmitted");
+}
+
+void Scheduler::WaitTickPublished(u64 tick, const char* who) {
+    // Bounded steps of whole milliseconds (libc++ on Win32 turns sub-ms waits into 0): a submit
+    // that failed never publishes its tick, which is logged instead of hanging silently.
     std::unique_lock lk{submitted_mutex};
-    submitted_cv.wait(lk, [&] { return submitted_tick.load(std::memory_order_acquire) >= tick; });
+    const auto published = [&] { return submitted_tick.load(std::memory_order_acquire) >= tick; };
+    const u64 start = Common::Perf::NowNs();
+    bool logged = false;
+    while (!submitted_cv.wait_for(lk, std::chrono::milliseconds{100}, published)) {
+        if (!logged && Common::Perf::NowNs() - start >= 1'000'000'000ULL) {
+            logged = true;
+            LOG_ERROR(Render_Vulkan, "{}: tick {} not submitted after 1 s ({}, submitted {}), "
+                      "still waiting", who, tick, name,
+                      submitted_tick.load(std::memory_order_acquire));
+        }
+    }
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {

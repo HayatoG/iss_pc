@@ -588,8 +588,9 @@ public:
         }
     }
 
-    /// Sets the function waiting for the work given to RequireBeforeSubmit (called under
-    /// submit_mutex, before each submission depending on it).
+    /// Sets the function waiting for the work given to RequireBeforeSubmit (called before each
+    /// submission depending on it: under submit_mutex by default, under dependency_mutex only
+    /// with ISS_SUBMIT_LOCK=split).
     void SetSubmitDependency(std::function<void(u64)>&& wait) {
         std::scoped_lock lk{submit_mutex, dependency_mutex};
         submit_dependency_wait = std::move(wait);
@@ -738,6 +739,8 @@ private:
     /// ISS_SUBMIT_LOCK=split: waits for the upload worker jobs the submission depends on, with
     /// submit_mutex not held (dependency_mutex keeps the wait function alive).
     void WaitUploadDependency(SubmitInfo& info);
+    /// Waits until submitted_tick reaches tick, logging once after ~1 s.
+    void WaitTickPublished(u64 tick, const char* who);
 
     void EndSession();
 
@@ -844,8 +847,9 @@ private:
     void ProfileSessionEnd();
     void ProfileSessionSubmitted(u64 tick);
     std::function<void(u64)> submit_dependency_wait;
-    /// Guards submit_dependency_wait for ISS_SUBMIT_LOCK=split, whose wait runs without
-    /// submit_mutex. Taken after submit_mutex (SetSubmitDependency), never the other way.
+    /// Guards submit_dependency_wait for ISS_SUBMIT_LOCK=split, whose wait holds only this
+    /// mutex, then releases it before taking submit_mutex. The two are held together only in
+    /// SetSubmitDependency (std::scoped_lock, deadlock free).
     std::mutex dependency_mutex;
     SubmitLockCaller lock_caller{SubmitLockCaller::Cp};
 };
