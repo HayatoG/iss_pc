@@ -218,7 +218,7 @@ public:
         // draw as a render target or texture: the lock is skipped). A guest write arriving
         // this instant is seen by the next binding, as it would be with the lock.
         if (Common::Perf::GetTuning().tex_memo.load(std::memory_order_relaxed) &&
-            False(image.flags & ImageFlagBits::Dirty) &&
+            False(image.LoadFlags() & ImageFlagBits::Dirty) &&
             image.track_addr == image.info.guest_address &&
             image.track_addr_end == image.info.guest_address + image.info.guest_size) {
             TouchImage(image);
@@ -266,6 +266,13 @@ public:
     /// memo) is valid while it does not change. Lock free.
     [[nodiscard]] u64 SamplersGeneration() const noexcept {
         return samplers_generation.load(std::memory_order_acquire);
+    }
+
+    /// Whether sampler memo hits should touch the sampler LRU (once per gc tick and memo entry,
+    /// through GetSampler): the sampler count reached half the collector's trigger. Below it the
+    /// collector does not run and the LRU order is not read. Lock free.
+    [[nodiscard]] bool SamplerTouchesWanted() const noexcept {
+        return sampler_touches_wanted.load(std::memory_order_relaxed);
     }
 
     /// Whether the id names a registered image (ISS_NATIVE_MATERIALS: a remembered id may have
@@ -506,8 +513,16 @@ private:
     /// Removes the image and any views/surface metas that reference it.
     void DeleteImage(ImageId image_id);
 
-    /// Touch the image in the LRU cache.
+    /// Touch the image in the LRU cache. Command processor only, with or without the lock: by
+    /// default (ISS_TEX_DEFER_LRU_TOUCH) the touch is queued and applied to the LRU under the
+    /// lock (ApplyPendingTouchesLocked), as guest threads change the LRU list under it (unmaps).
     void TouchImage(const Image& image);
+    /// Applies the queued touches to the LRU (command processor, mutex held).
+    void ApplyPendingTouchesLocked();
+    static bool DeferLruTouchesSetting();
+
+    /// Counts frees by thread (TEXTURE_FREE_OFF_CP; ISS_ASSERT_FREE_ON_CP=1 asserts).
+    void NoteFreeThread(const std::source_location& where);
 
     // Pure view lookup only: callers still execute tracking, refresh and usage updates.
     ImageView& FindViewMemoized(ImageId image_id, const ImageViewInfo& info,
@@ -522,10 +537,11 @@ private:
         // A second free of an image (a race not found yet) would assert in UnregisterImage: it
         // is logged with both callers and skipped.
         if (!slot_images.is_allocated(image_id) ||
-            False(slot_images[image_id].flags & ImageFlagBits::Registered)) {
+            False(slot_images[image_id].LoadFlags() & ImageFlagBits::Registered)) {
             ReportDoubleFree(image_id, where);
             return;
         }
+        NoteFreeThread(where);
         NoteFree(image_id, where);
         UntrackImage(image_id);
         UnregisterImage(image_id);
@@ -582,6 +598,10 @@ private:
     /// TouchImage: gc_tick + 1 of the last touch of each LRU entry (a dense array read instead
     /// of the LRU item, which already holds that tick).
     std::vector<u64> lru_touched;
+    /// iss: LRU ids touched without the lock (TouchImage), applied under it before the next
+    /// collection. Owned by the command processor, like lru_touched.
+    std::vector<size_t> pending_lru_touches;
+    const bool defer_lru_touches = DeferLruTouchesSetting();
     Common::LeastRecentlyUsedCache<u64, u64> sampler_lru_cache;
     const bool readback_linear_images;
     const bool texture_lookup_memo_enabled;
@@ -591,6 +611,7 @@ private:
     /// invalidations, which mostly hit pages without images (guest write faults).
     std::atomic<u64> generation{1};
     std::atomic<u64> samplers_generation{1};
+    std::atomic<bool> sampler_touches_wanted{false};
     void BumpGeneration() noexcept {
         generation.fetch_add(1, std::memory_order_release);
     }

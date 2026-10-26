@@ -4402,6 +4402,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     }
 }
 
+namespace {
+/// The gc tick + 1 at which each entry of the graphics sampler memo last touched the sampler LRU
+/// (BindTextures, command processor). The ASC recorder's memo does not touch: the texture cache
+/// is not its to call.
+u64& SamplerMemoTouchTick(std::ptrdiff_t entry) {
+    static std::array<u64, 1024> ticks{};
+    return ticks[static_cast<size_t>(entry) & 1023];
+}
+} // Anonymous namespace
+
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::BindTex};
     auto& image_bindings = ComputeBindingsActive() ? compute_bindings.image_bindings
@@ -4765,6 +4775,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             if (sampler_memo->key == sampler_key &&
                 sampler_memo->generation == texture_cache.SamplersGeneration()) {
                 vk_sampler = sampler_memo->sampler;
+                // A hit never touched the sampler LRU: once the collector may run, the samplers
+                // used most were its first victims (R4-1). Near its trigger, the first hit of
+                // each entry in a gc tick takes the cache path, which touches the sampler.
+                if (texture_cache.SamplerTouchesWanted() && !ComputeBindingsActive() &&
+                    SamplerMemoTouchTick(sampler_memo - sampler_memos.data()) !=
+                        texture_cache.GcTick() + 1) {
+                    vk_sampler = VK_NULL_HANDLE;
+                }
             }
         }
         if (!vk_sampler) {
@@ -4776,6 +4794,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                     .generation = texture_cache.SamplersGeneration(),
                     .sampler = vk_sampler,
                 };
+                if (!ComputeBindingsActive()) {
+                    SamplerMemoTouchTick(sampler_memo - sampler_memos.data()) =
+                        texture_cache.GcTick() + 1;
+                }
             }
         }
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
