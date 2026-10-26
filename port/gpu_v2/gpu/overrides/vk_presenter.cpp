@@ -942,10 +942,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
     if(!swapchain.SyncExclusiveState()) {free_frame();return;}
+    // No swapchain while the surface is 0x0 (minimized): Recreate retries on a later frame.
+    if (!swapchain.GetHandle()) {free_frame();return;}
 
     if (!swapchain.AcquireNextImage()) {
         if(!swapchain.NeedsRecreation() || !window.CanPresent()){free_frame();return;}
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        if (!swapchain.GetHandle()) {free_frame();return;}
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
@@ -962,6 +965,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
     // the frame's present fence and future GetRenderFrame() call will hang waiting for this frame.
     const auto reset_result = instance.GetDevice().resetFences(frame->present_done);
+    if (reset_result == vk::Result::eErrorDeviceLost) {
+        GpuCrashDiag::ReportDeviceLost(instance, "present fence reset");
+    }
     ASSERT_MSG(reset_result == vk::Result::eSuccess,
                "Unexpected error resetting present done fence: {}", vk::to_string(reset_result));
 
