@@ -179,6 +179,30 @@ def renderer_v2_env(settings):
         env[var] = '1' if backports_table.effective(item, states) == '1' else '0'
     return env
 
+
+# A variable with this value is removed from the game's environment after the defaults and the
+# launcher's switches are applied (build_env): the way to run without a defaults.env key.
+UNSET = '__unset__'
+# ISS_TUNING keys the renderer adds up instead of replacing (bridge.cpp: relaxed_site, up to 8).
+TUNING_REPEATABLE = ('relaxed_site',)
+
+
+def merge_tuning(base, override):
+    """ISS_TUNING "name=value,..." of base (defaults.env) with override's items applied per key:
+    a name already in base takes override's value in place, a new one is appended, and a
+    repeatable one (relaxed_site) or an item without '=' is appended unless already there.
+    merge_tuning(base, merge_tuning(base, x)) == merge_tuning(base, x)."""
+    items = [item for item in base.split(',') if item]
+    for item in (i for i in override.split(',') if i):
+        name, sep, _ = item.partition('=')
+        at = next((n for n, old in enumerate(items) if old.partition('=')[0] == name), None)
+        if not sep or name in TUNING_REPEATABLE or at is None:
+            if item not in items:
+                items.append(item)
+        else:
+            items[at] = item
+    return ','.join(items)
+
 # Game language: PS4 system language ids (sceSystemServiceParamGetInt LANG). Which of them the
 # player's dump has comes from its PlayGo chunks (game_languages); each choice passes its own id.
 GAME_LANGUAGES = {'en': 1, 'en_GB': 18, 'pt_BR': 17, 'pt_PT': 7, 'es_LA': 20, 'es': 3, 'fr_CA': 22, 'fr': 2,
@@ -817,19 +841,34 @@ def build_env(settings, extra=None):
     # Shaders and pipelines beside the saves (the GPU reads it when it starts; before, Linux used
     # shadPS4's ~/.local/share/shadPS4 and Windows <saves>/user).
     env['TLG_GPU_USER_DIR'] = str(gpu_user_dir())
+    # Renderer v2: its defaults (gpu_v2/defaults.env) first, so that the switches below that the
+    # player changed win over them (Advanced "Draw pipeline" = ISS_DRAW_PIPE, which defaults.env
+    # sets to 0). A variable set outside the launcher wins over both, except ISS_TUNING: that one
+    # is merged per key with the defaults' (merge_tuning), so a variant's "x=1" keeps scout=1 etc.
+    if renderer_v2(settings):
+        for key, value in renderer_v2_env(settings).items():
+            if key == 'ISS_TUNING' and os.environ.get(key) and os.environ[key] != UNSET:
+                env[key] = merge_tuning(value, os.environ[key])
+            elif key not in os.environ:
+                env[key] = value
     # Experimental fixes (BPnn) and A/B switches the player changed: ISS_<name>=0/1 (the probe
     # copies them to TLG_). Untouched ones add nothing; ISS_/TLG_ set outside the launcher win.
     env.update(backports_table.environment(experimental_states(settings), os.environ))
-    if renderer_v2(settings):
-        for key, value in renderer_v2_env(settings).items():
-            if key not in os.environ:
-                env[key] = value
     if extra:
         env.update(extra)
     # The Mods checkbox is authoritative, including when an older session script
     # leaves scale variables in the launcher's inherited environment.
     env.update(camera_mod_environment())
     env['ISS_CAMERA_PREVENT_PITCH_SLOWDOWN'] = '1' if camera_pitch_mod_enabled() else '0'
+    # ISS_X=__unset__ (bench.ps1 variants, shells): the game runs without ISS_X, even when
+    # defaults.env sets it (an empty value would leave the default in place), and without its
+    # TLG_X twin unless that one is set outside the launcher.
+    for key in [k for k, v in env.items() if v == UNSET]:
+        env.pop(key)
+        if key.startswith(('ISS_', 'TLG_')):
+            twin = ('TLG_' if key.startswith('ISS_') else 'ISS_') + key[4:]
+            if twin not in os.environ or os.environ[twin] == UNSET:
+                env.pop(twin, None)
     return env
 
 
@@ -973,8 +1012,12 @@ def launch(settings, seconds=0, extra_env=None):
     if ISA_TABLE.is_file():
         cmd += ['--isa-rewrite', str(ISA_TABLE)]
     raise_open_file_limit()
+    env = build_env(settings, extra_env)
+    given = os.environ.get('ISS_TUNING')
+    if given and env.get('ISS_TUNING') != given:   # merged per key with defaults.env (build_env)
+        print(f'ISS_TUNING={env.get("ISS_TUNING", "")} (defaults.env merged with ISS_TUNING={given})', flush=True)
     with open(log, 'wb') as out:   # the child keeps its own copy of the descriptor
-        process = subprocess.Popen(cmd, cwd=str(data), env=build_env(settings, extra_env),
+        process = subprocess.Popen(cmd, cwd=str(data), env=env,
                                    stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                    **detach_options())
     return process, log
