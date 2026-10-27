@@ -21,6 +21,10 @@
 #include "common/logging/log.h"
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
+// Xlib (VK_USE_PLATFORM_XLIB_KHR) defines None; the DLSS header pulls in amdgpu/pixel_format.h, which uses NumberConversion::None.
+#ifdef None
+#undef None
+#endif
 #include "iss_temporal_dlss.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
