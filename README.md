@@ -22,7 +22,7 @@
 
 <p align="center"><a href="https://youtu.be/F5sD_HCGCWo"><img src="docs/screenshots/video-tutorial.jpg" width="640" alt="Como portar jogos de PS4 — vídeo no YouTube"></a></p>
 
-<p align="center">▶️ <a href="https://youtu.be/F5sD_HCGCWo"><b>Tutorial video:</b> how to port PS4 games to PC (in Portuguese)</a></p>
+<p align="center">▶️ <a href="https://youtu.be/F5sD_HCGCWo"><b>Tutorial video:</b> how to port PS4 games to PC (English subtitles)</a></p>
 
 > **Playable, in development.** The game boots, reaches gameplay and gets through the first chapters, but performance is still unstable (20–30 FPS typical on an RTX 2060) and there are known graphics glitches. See the [Status](#status).
 

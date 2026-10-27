@@ -990,7 +990,26 @@ static np::DrawResult Record(np::Segment& s, void* regs_ptr, u64 key, const u32*
     // writing one into the command buffer crashed NVIDIA's driver. The command processor checks
     // the rest (TexturesValid) before executing the segment.
     for (const auto& cap : t->images) {
-        if (cap.id && !g.texture_cache->ImageAlive(cap.id, cap.uid)) return miss(MissViews);
+        if (cap.id && !g.texture_cache->ImageAlive(cap.id, cap.uid)) {
+            // The image was freed (texture collector) and may come back under a new uid: drop the
+            // template, as the command processor does for a stale one (NativeMaterialBind), so the
+            // next draw of this material learns it again with the live image. Kept, it missed for
+            // good: on a 4 GB card the collector frees images all the time and 50-80% of native
+            // draws ended up on the command processor. ISS_NATIVE_PASSES_DEAD_VIEW_RELEARN=0: as
+            // before (miss only).
+            static const bool relearn = [] {
+                const char* p = std::getenv("ISS_NATIVE_PASSES_DEAD_VIEW_RELEARN");
+                return !p || p[0] != '0';
+            }();
+            if (!relearn) return miss(MissViews);
+            auto& tables = NativeMaterial::State();
+            {
+                std::unique_lock lock{tables.mutex};
+                const auto it = tables.templates.find(t->key);
+                if (it != tables.templates.end() && it->second == t) tables.templates.erase(it);
+            }
+            return miss(MissViews, LearnGate(t->key));
+        }
     }
     const auto* pipeline = t->pipeline;
     if (!pipeline->IsReady() || (!pipeline->UsesPushDescriptors() && !NativeMaterial::SetsEnabled()))

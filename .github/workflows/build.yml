@@ -261,21 +261,24 @@ jobs:
           # Put accumulated changes first, before package and setup instructions.
           bash .github/scripts/release_notes.sh "$GITHUB_SHA" > notes.md
           cat >> notes.md <<NOTES
-          Publicação manual do commit ${short}. **Nenhum arquivo do jogo incluído**: veja o README-player.md dentro do pacote para o que copiar do seu PS4.
           Manual release of commit ${short}. **No game files included**: see README-player.md inside the package for what to copy from your PS4.
+          Publicação manual do commit ${short}. **Nenhum arquivo do jogo incluído**: veja o README-player.md dentro do pacote para o que copiar do seu PS4.
 
-          ☕ Apoie o desenvolvimento / Support development: [Buy me a coffee](https://buymeacoffee.com/hayatog)
+          ☕ Support development / Apoie o desenvolvimento: [Buy me a coffee](https://buymeacoffee.com/hayatog)
 
           - Linux x86-64 (glibc 2.39+): \`infamous-linux-x86_64.tar.gz\`
           - Windows 10/11 64-bit: \`infamous-windows-x86_64.zip\`
 
-          **Sensor de movimento e touchpad** (grafite, absorver poderes, portas): no DualShock 4/DualSense funcionam direto. Em outros controles, um toque em **L3+R3** liga/desliga o modo sensor (ou Share no Xbox Series): ele é a lata de spray do grafite: o controle fica de lado, X/A sacode, R2 pinta e o **analógico esquerdo mira** o cursor (para os lados e para cima/baixo; ele fica onde você soltar). **View/Select** é o clique do touchpad (segurar para absorver fumaça, neon...), e **View/Select + analógico direito** desliza. Teclado: T/G viram de lado (as setas miram enquanto seguram), Y sacode, F pinta (R2), Tab/Backspace clicam, Tab + setas deslizam, Tab + Backspace apertam as duas pontas (View/Select + R1 no controle: levantar o carro de cima do Reggie). A zona morta dos analógicos fica no launcher.
-
           **Motion sensor and touchpad** (graffiti, absorbing powers, doors): on a DualShock 4/DualSense they work as is. On other controllers, one tap on **L3+R3** toggles sensor mode (or Share on an Xbox Series): it is the graffiti's spray can: the controller is held sideways, cross/A shakes, R2 sprays and the **left stick aims** the cursor (left/right and up/down; it stays where you let go). **View/Select** is the touchpad click (hold it to absorb smoke, neon...), and **View/Select + right stick** swipes. Keyboard: T/G turn it sideways (the arrow keys aim while held), Y shakes, F sprays (R2), Tab/Backspace click, Tab + arrow keys swipe, Tab + Backspace press both ends (View/Select + R1 on a controller: lifting the car off Reggie). The stick dead zone is in the launcher.
+
+          **Sensor de movimento e touchpad** (grafite, absorver poderes, portas): no DualShock 4/DualSense funcionam direto. Em outros controles, um toque em **L3+R3** liga/desliga o modo sensor (ou Share no Xbox Series): ele é a lata de spray do grafite: o controle fica de lado, X/A sacode, R2 pinta e o **analógico esquerdo mira** o cursor (para os lados e para cima/baixo; ele fica onde você soltar). **View/Select** é o clique do touchpad (segurar para absorver fumaça, neon...), e **View/Select + analógico direito** desliza. Teclado: T/G viram de lado (as setas miram enquanto seguram), Y sacode, F pinta (R2), Tab/Backspace clicam, Tab + setas deslizam, Tab + Backspace apertam as duas pontas (View/Select + R1 no controle: levantar o carro de cima do Reggie). A zona morta dos analógicos fica no launcher.
 
           NOTES
           # The list of game files the player needs (docs/ARQUIVOS_NECESSARIOS.md), before the download.
-          sed '1,/^\[Português\]/d' docs/ARQUIVOS_NECESSARIOS.md >> notes.md
+          # English first, then Portuguese.
+          { sed -n '/^## Required game files/,$p' docs/ARQUIVOS_NECESSARIOS.md; echo
+            sed -n '/^## Arquivos do jogo necessários/,/^## Required game files/p' docs/ARQUIVOS_NECESSARIOS.md | sed '$d'
+          } >> notes.md
           tag="v$(date -u +%Y.%m.%d)-${short}"
           # A re-run of the same commit finds its release already published: keep it.
           if gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
@@ -289,8 +292,10 @@ jobs:
             --title "$tag ($(date -u +%Y-%m-%d) · ${short})" --notes-file notes.md
           n=$(gh release view "$tag" --json assets --jq '.assets | length')
           [[ $n -ge 3 ]] || { echo "draft release has $n assets"; exit 1; }
+          # Published as a pre-release: the stable release (1.0) stays Latest, and the launcher's
+          # updater (releases/latest) keeps offering it.
           for try in 1 2 3; do
-            gh release edit "$tag" --draft=false --latest && break
+            gh release edit "$tag" --draft=false --prerelease --latest=false && break
             sleep 10
           done
           [[ $(gh release view "$tag" --json isDraft --jq .isDraft) == false ]]
