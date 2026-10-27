@@ -1617,6 +1617,12 @@ int main(int argc, char **argv) {
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
         TlgGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
+#ifdef _WIN32
+        /* The 6 GiB guest commit goes first: after the driver and the shader precompile it may
+         * no longer fit a small page file (error 1450). */
+        if (runtime_memory_create_pool()) fail("not enough virtual memory for the guest pool (see the line above)");
+        boot_step("guest memory committed");
+#endif
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         boot_step("initializing GPU");
         if (tlggpu_init(&gpu)) fail("GPU initialization failed");

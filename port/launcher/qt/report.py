@@ -110,13 +110,16 @@ def read_log(path, limit=LOG_READ_LIMIT):
 
 
 _FPS_RE = re.compile(r'Frame stats:\s*([0-9.]+)\s*FPS(?:,\s*worst frame\s*([0-9.]+)\s*ms)?')
-_EVENT_RE = re.compile(r'^\s*(Fault|STOP|FREEZE):\s*(.*)$')
+_EVENT_RE = re.compile(r'^\s*(Fault|STOP|FREEZE|ERROR):\s*(.*)$')
+# Runtime lines that explain a STOP, e.g. "Runtime: cannot create 6080 MiB of guest memory (error 1450)"
+_RUNTIME_FAIL_RE = re.compile(r'^\s*(Runtime):\s*(cannot .*)$')
+_EVENT_PREFIXES = ('STOP:', 'Fault:', 'FREEZE:', 'ERROR:', 'Runtime: cannot ')
 _HEADER_KEYS = ('Build:', 'Settings:', 'Window:', 'GPU:', 'GPU 0:', 'VideoOut:', 'CPU:')
 
 
 def summarize_log(text):
-    """What a log says at a glance: the Build:/Config: header lines, Fault:/STOP:/FREEZE: events and
-    the FPS of the "Frame stats" lines."""
+    """What a log says at a glance: the Build:/Config: header lines, Fault:/STOP:/FREEZE:/ERROR: and
+    "Runtime: cannot ..." events and the FPS of the "Frame stats" lines."""
     lines = text.splitlines()
     summary = {'build': '', 'config': [], 'header': [], 'events': [], 'event_counts': {}, 'fps_avg': None,
                'fps_min': None, 'fps_max': None, 'worst_ms': None, 'fps_samples': 0, 'lines': len(lines)}
@@ -140,7 +143,7 @@ def summarize_log(text):
     seen = {}
     fps, worst = [], []
     for line in lines:
-        event = _EVENT_RE.match(line)
+        event = _EVENT_RE.match(line) or _RUNTIME_FAIL_RE.match(line)
         if event:
             kind = event.group(1)
             key = (kind, event.group(2)[:160])
@@ -483,7 +486,7 @@ def markdown_report(rows, summary_text, log_name, known, description='', t=None,
 
 def short_report(rows, summary_text, t):
     """Only the hardware block and the headline of the log: what fits in a URL."""
-    keep = [l for l in summary_text if l.startswith(('Build:', 'STOP:', 'Fault:', 'FREEZE:')) or 'FPS' in l][:8]
+    keep = [l for l in summary_text if l.startswith(('Build:',) + _EVENT_PREFIXES) or 'FPS' in l][:8]
     parts = [f'### {t("rep_h_hw")}', ''] + [f'- **{a}:** {b}' for a, b in rows]
     if keep:
         parts += ['', f'### {t("rep_h_log")}', '', '```', *keep, '```']
