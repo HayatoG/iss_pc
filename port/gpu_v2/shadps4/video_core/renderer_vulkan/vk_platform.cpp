@@ -21,17 +21,18 @@
 #include "common/logging/log.h"
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
-// Xlib (VK_USE_PLATFORM_XLIB_KHR) defines None; the DLSS header pulls in amdgpu/pixel_format.h, which uses NumberConversion::None.
-#ifdef None
-#undef None
-#endif
-#include "iss_temporal_dlss.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+
+// Declared here, not by including iss_temporal_dlss.h: that header pulls in amdgpu/pixel_format.h after Xlib
+// (VK_USE_PLATFORM_XLIB_KHR), whose None macro breaks NumberConversion::None on Linux.
+namespace Vulkan::IssTemporal::Dlss {
+void AppendInstanceExtensions(std::vector<const char*>& enabled);
+}
 
 namespace Vulkan {
 bool g_iss_surface_capabilities2 = false;
