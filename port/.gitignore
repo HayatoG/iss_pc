@@ -9,6 +9,7 @@ pgo/
 !packaging/icon/*.png
 !launcher/*.png
 !launcher/qt/assets/controller_guides/*.png
+!docs/amd_v2/*.png
 last_run.log
 dist/
 fsr4_411/

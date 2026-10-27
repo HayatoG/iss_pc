@@ -29,6 +29,8 @@ Item {
         y: 4; width: parent.width; radius: 12
         height: Math.max(78, info.implicitHeight + 28)
         color: Theme.card
+        opacity: d.disabled ? 0.45 : 1
+        enabled: !d.disabled
         border.width: 1; border.color: d.changed ? Qt.rgba(row.accent.r, row.accent.g, row.accent.b, 0.7) : Theme.cardLine
         Column {
             id: info

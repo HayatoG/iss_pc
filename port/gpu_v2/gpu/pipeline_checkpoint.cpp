@@ -21,7 +21,7 @@ bool PipelineCache::CheckpointDriverCache(){
     const auto started=Common::Perf::NowNs();
     const auto snapshot=instance.GetDevice().getPipelineCacheData(*pipeline_cache);
     if(snapshot.result!=vk::Result::eSuccess||snapshot.value.size()<32||snapshot.value.size()>256ULL*1024*1024-24){
-        std::fprintf(stderr,"PIPELINE_CHECKPOINT unavailable result=%d\n",int(snapshot.result));return false;}
+        std::fprintf(stderr,"PIPELINE_CHECKPOINT unavailable result=%d bytes=%zu\n",int(snapshot.result),snapshot.value.size());return false;}
     const u64 hash=XXH3_64bits(snapshot.value.data(),snapshot.value.size());
     if(hash==previous_hash)return true;
     const auto bytes=PackDriverCache(snapshot.value);

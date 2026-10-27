@@ -421,19 +421,31 @@ void Swapchain::FindPresentMode() {
         present_mode = vk::PresentModeKHR::eFifo;
     } else if (requested_mode == "Immediate") {
         present_mode = vk::PresentModeKHR::eImmediate;
+    } else if (requested_mode == "FifoRelaxed") {
+        present_mode = vk::PresentModeKHR::eFifoRelaxed;
     } else {
         LOG_ERROR(Render_Vulkan, "Unknown present mode {}, defaulting to Mailbox.",
                   EmulatorSettings.GetPresentMode());
         present_mode = vk::PresentModeKHR::eMailbox;
     }
 
-    if (std::ranges::find(modes, present_mode) == modes.cend()) {
-        // FIFO is guaranteed to be supported by the Vulkan spec.
-        constexpr auto fallback = vk::PresentModeKHR::eFifo;
-        LOG_WARNING(Render, "Requested present mode {} is not supported, falling back to {}.",
-                    vk::to_string(present_mode), vk::to_string(fallback));
-        present_mode = fallback;
+    const auto has = [&](vk::PresentModeKHR m) { return std::ranges::find(modes, m) != modes.cend(); };
+    const auto requested = present_mode;
+    // iss: AMD's Windows driver has no Mailbox. Plain FIFO there halved the frame rate on every
+    // late frame and the acquire fence waited 2-7 ms a frame on RDNA2 (#533, #535, #556, #571).
+    // The VSync setting picks the replacement: on, FIFO_RELAXED (tears only when a frame is
+    // late); off, Immediate. FIFO stays the last resort (the spec guarantees it).
+    if (!has(present_mode)) {
+        const bool vsync = TlgSettings::Get().vsync.load();
+        if (!vsync && has(vk::PresentModeKHR::eImmediate)) present_mode = vk::PresentModeKHR::eImmediate;
+        else if (has(vk::PresentModeKHR::eFifoRelaxed)) present_mode = vk::PresentModeKHR::eFifoRelaxed;
+        else present_mode = vk::PresentModeKHR::eFifo;
     }
+    std::fprintf(stderr, "PRESENT_MODE requested=%s chosen=%s vsync=%d available=",
+                 vk::to_string(requested).c_str(), vk::to_string(present_mode).c_str(),
+                 int(TlgSettings::Get().vsync.load()));
+    for (const auto m : modes) std::fprintf(stderr, "%s,", vk::to_string(m).c_str());
+    std::fputc('\n', stderr);
 }
 
 void Swapchain::SetSurfaceProperties() {

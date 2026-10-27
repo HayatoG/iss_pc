@@ -974,6 +974,9 @@ def launch(settings, seconds=0, extra_env=None):
     if note:
         print(note, flush=True)
     probe = V2_PROBE if renderer_v2(settings) else PROBE
+    if backports_table.V1_DISABLED and probe != V2_PROBE:
+        # Renderer 1 is off in this build: no silent fallback to it when the v2 build is missing.
+        raise FileNotFoundError(f'Renderer v2 is required and missing: {V2_PROBE}')
     if probe == V2_PROBE:
         print('Renderer v2 (port/gpu_v2)', flush=True)
     cmd = [str(probe), str(OUT_DIR / 'boot-linked.bin'), '--app0', settings['game_dir'],

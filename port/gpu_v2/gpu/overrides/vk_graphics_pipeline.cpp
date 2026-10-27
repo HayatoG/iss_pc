@@ -320,7 +320,10 @@ void GraphicsPipeline::CompileVariant(bool fast) {
         .requiredSubgroupSize = 64,
     };
     for (auto& stage : shader_stages) {
-        stage.pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr;
+        // iss: only on the stages the driver lists in requiredSubgroupSizeStages; anywhere else
+        // the struct is invalid usage (AMD's driver lists compute alone).
+        stage.pNext = instance.IsRequiredSubgroupSize64ValidFor(stage.stage) ? &subgroup_size_ci
+                                                                            : nullptr;
     }
 
     const auto depth_format =
