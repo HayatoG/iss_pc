@@ -41,6 +41,7 @@ from . import gcn_mem
 from . import jobfile
 from . import kcap, knli
 from . import signature as S
+from . import witnesses as W
 
 U64 = (1 << 64) - 1
 PASS_SIZE = 0xB8
@@ -440,8 +441,10 @@ def _particle_strides(ix: Index) -> Dict[int, int]:
 class Builder:
     def __init__(self, ix: Index, tables: Optional[ET.Tables], max_state=12, max_material=12,
                  max_compute=8, compute_model="re", compute_wide=False, eboot_path=None,
-                 step_variants=True, null_variants=True):
+                 step_variants=True, null_variants=True, witnesses=None):
         self.ix = ix
+        # (vs, ps) -> descriptors the game was seen binding (witnesses.py): extra records
+        self.witnesses = witnesses or {}
         self.stats = Counter()
         self.model = tables is None
         self.t = tables if tables is not None else ET.Tables({})
@@ -722,6 +725,7 @@ class Builder:
                 choices = self.engine_choices(self.profiles_for(pid), [(k, u) for k, u, *_ in vslots],
                                               [(k, u) for k, u, *_ in pslots], ph, self.max_state)
             base_regs = header_regs(vh, ph)
+            pair_recs = []
             for mkey, _ in mt_cnt.most_common(self.max_material):
                 fcode, mt, smp, attrs = mt_keep[mkey]
                 for st, vsw, psw in choices:
@@ -782,7 +786,22 @@ class Builder:
                         continue
                     self.seen.add(sig)
                     self.stats["graphics"] += 1
+                    pair_recs.append(rec)
                     yield rec
+            yield from self.observed(vs, ps, pair_recs)
+
+    def observed(self, vs, ps, recs) -> Iterable[dict]:
+        """Copies of a shader pair's records with the descriptors the game was seen binding."""
+        for variant in self.witnesses.get((vs, ps), ()):
+            for rec in recs:
+                rec = W.apply(rec, variant, S_PS, S_VS)
+                sig = S.freeze(S.signature(rec, self.ix.headers))
+                if sig in self.seen:
+                    self.stats["witness_duplicate"] += 1
+                    continue
+                self.seen.add(sig)
+                self.stats["witness_records"] += 1
+                yield rec
 
     def compute(self, hashes: Iterable[int]) -> Iterable[dict]:
         ix = self.ix
@@ -897,6 +916,8 @@ def build(index_path, tables: Optional[ET.Tables] = None, *, game=None, pairs=No
     """All records (a generator) and the builder (its .stats fill while iterating).
     tables=None is the product: only the eboot tables of engine_tables (no capture)."""
     ix = Index(index_path, game)
+    if tables is None and "witnesses" not in caps:
+        caps["witnesses"] = W.load()  # the product: the table shipped next to the generator
     b = Builder(ix, tables, eboot_path=eboot, **caps)
     b.progress = progress
 
