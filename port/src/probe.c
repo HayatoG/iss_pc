@@ -1616,7 +1616,10 @@ int main(int argc, char **argv) {
         sfo_value(sfo,"ATTRIBUTE",NULL,0,&attributes);
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
-        TlgGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
+        char app_ver[16]="01.07";
+        sfo_value(sfo,"APP_VER",app_ver,sizeof(app_ver),NULL);
+        TlgGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080,
+                          (uint64_t)(uintptr_t)image,app0,app_ver};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         boot_step("initializing GPU");
         if (tlggpu_init(&gpu)) fail("GPU initialization failed");
@@ -1687,6 +1690,9 @@ int main(int argc, char **argv) {
     if (gpu_enabled) install_stat_multipliers(app0, segments, ns, size);
     if (gpu_enabled) install_view_tuning(segments, ns, size);
     if (gpu_enabled) install_iss_temporal(app0, segments, ns, size);
+#ifdef TLG_GPU_V3
+    if (gpu_enabled) tlggpu_apply_game_patches();
+#endif
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
@@ -1784,6 +1790,9 @@ int main(int argc, char **argv) {
     unsigned char *stack=runtime_low_map(MAIN_STACK,PROT_READ|PROT_WRITE);
     if (!stack) fail("cannot allocate guest main stack");
     clobber_thread_init();
+#ifdef TLG_GPU_V3
+    if (gpu_enabled) tlggpu_mark_game_main_thread();
+#endif
     enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
 #endif
     fail("entry unexpectedly returned");

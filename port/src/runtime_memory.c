@@ -45,6 +45,25 @@ static uint64_t pool_size_bytes(void) {
  * hint and then verifies; an exact free hint in this window is honoured. */
 #define SYSTEM_RESERVED_MIN UINT64_C(0x700000000)
 #define SYSTEM_RESERVED_MAX UINT64_C(0x800000000)
+/* Renderer v3 (TLG_GPU_V3, the imported axylpup core): guest mappings without a fixed address start at
+ * shadPS4's mapping base, as the core's tuned video core names the addresses its game patches and its
+ * 512 MiB GPU heap (0x248000000) rely on. This range contains the system-reserved window above.
+ * TLG_GUEST_LOW=0, or a range Windows cannot reserve, keeps the layout of renderer v1/v2.
+ * Layout idea from Liondarkz/issn_pc (runtime_memory.c, GPL-2.0), core by axylpup. */
+#define GUEST_LOW_MIN UINT64_C(0x200000000)
+#define GUEST_LOW_MAX UINT64_C(0x0800000000)
+static int guest_low_enabled = -1;
+static int guest_low(void) {
+#ifdef TLG_GPU_V3
+    if (guest_low_enabled<0) {
+        const char *e=getenv("TLG_GUEST_LOW");
+        guest_low_enabled = !(e && *e=='0');
+    }
+    return guest_low_enabled;
+#else
+    return 0;
+#endif
+}
 #define LIMIT 4096
 #define INVALID ((int32_t)UINT32_C(0x80020016))
 #define NO_MEMORY ((int32_t)UINT32_C(0x8002000c))
@@ -179,12 +198,23 @@ void runtime_memory_reserve(void) {
         win_fail("reserving the PS4 address range (link with --disable-high-entropy-va)",USER_MIN,USER_MAX-USER_MIN);
     /* The system-reserved window sits below USER_MIN; without its own placeholder, a hinted map
      * there (TLG's tessellation ring) stopped the game with "guest range outside the reservation". */
-    if (VirtualAlloc2(NULL,(void *)SYSTEM_RESERVED_MIN,SYSTEM_RESERVED_MAX-SYSTEM_RESERVED_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
-        region_insert(region_count,(HostRegion){SYSTEM_RESERVED_MIN,SYSTEM_RESERVED_MAX,0,0});
-    else fprintf(stderr,"Runtime: system-reserved window %p unavailable (error %lu); hinted maps there move to the user range\n",(void *)SYSTEM_RESERVED_MIN,GetLastError());
+    if (guest_low()) {
+        if (VirtualAlloc2(NULL,(void *)GUEST_LOW_MIN,GUEST_LOW_MAX-GUEST_LOW_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0)) {
+            region_insert(0,(HostRegion){GUEST_LOW_MIN,GUEST_LOW_MAX,0,0});
+        } else {
+            fprintf(stderr,"Runtime: 0x%" PRIx64 "-0x%" PRIx64 " is in use (error %lu): guest memory starts at 0x%" PRIx64 "\n",
+                    (uint64_t)GUEST_LOW_MIN,(uint64_t)GUEST_LOW_MAX,GetLastError(),(uint64_t)USER_MIN);
+            guest_low_enabled=0;
+        }
+    }
+    if (!guest_low()) {
+        if (VirtualAlloc2(NULL,(void *)SYSTEM_RESERVED_MIN,SYSTEM_RESERVED_MAX-SYSTEM_RESERVED_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
+            region_insert(region_count,(HostRegion){SYSTEM_RESERVED_MIN,SYSTEM_RESERVED_MAX,0,0});
+        else fprintf(stderr,"Runtime: system-reserved window %p unavailable (error %lu); hinted maps there move to the user range\n",(void *)SYSTEM_RESERVED_MIN,GetLastError());
+    }
     region_insert(region_count,(HostRegion){USER_MIN,USER_MAX,0,0});
 }
-static int system_window_reserved(void) { return region_count && regions[0].start==SYSTEM_RESERVED_MIN; }
+static int system_window_reserved(void) { return region_count && (regions[0].start==SYSTEM_RESERVED_MIN || (regions[0].start<=SYSTEM_RESERVED_MIN && regions[0].end>=SYSTEM_RESERVED_MAX)); }
 static void view_map(const HostRegion *r, DWORD protect) {
     DWORD initial=protect==PAGE_NOACCESS ? PAGE_READWRITE : protect, old;
     if (!MapViewOfFile3(section,GetCurrentProcess(),(void *)r->start,r->phys,r->end-r->start,MEM_REPLACE_PLACEHOLDER,initial,NULL,0))
@@ -395,15 +425,23 @@ static int range_free(uintptr_t start, uint64_t size) {
     size_t i=vma_index(start);
     return i==vma_count || vmas[i].start>=start+size;
 }
-static uintptr_t find_free(uintptr_t hint, uint64_t size, uint64_t alignment) {
-    if (hint>=SYSTEM_RESERVED_MIN && hint+size<=SYSTEM_RESERVED_MAX && !(hint%alignment) && system_window_reserved() && range_free(hint,size))
-        return hint;
-    uintptr_t at=align_up(hint<USER_MIN ? USER_MIN : hint, alignment);
-    for (size_t i=vma_index(at); at+size<=USER_MAX; ++i) {
+/* First-fit search in [lo, hi), starting from the hint. */
+static uintptr_t find_free_in(uintptr_t hint, uint64_t size, uint64_t alignment, uintptr_t lo, uintptr_t hi) {
+    uintptr_t at=align_up(hint<lo ? lo : hint, alignment);
+    for (size_t i=vma_index(at); at+size<=hi; ++i) {
         if (i==vma_count || vmas[i].start>=at+size) return at;
         at=align_up(vmas[i].end,alignment);
     }
     return 0;
+}
+static uintptr_t find_free(uintptr_t hint, uint64_t size, uint64_t alignment) {
+    if (hint>=SYSTEM_RESERVED_MIN && hint+size<=SYSTEM_RESERVED_MAX && !(hint%alignment) && system_window_reserved() && range_free(hint,size))
+        return hint;
+    if (guest_low() && hint<GUEST_LOW_MAX) {
+        const uintptr_t low=find_free_in(hint,size,alignment,GUEST_LOW_MIN,GUEST_LOW_MAX);
+        if (low) return low;
+    }
+    return find_free_in(hint,size,alignment,USER_MIN,USER_MAX);
 }
 static void drop_range(uintptr_t start, uintptr_t end) {
     int error; size_t i=carve(start,end,&error), n=0;

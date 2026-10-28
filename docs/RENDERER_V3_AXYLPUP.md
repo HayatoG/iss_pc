@@ -79,7 +79,11 @@ jogador); DLSS 5; hashes e endereços fixos sem aprendizagem; o `dlss_bridge` de
   - `shim/tlg_runtime_glue.cpp`: respostas neutras para o que o nosso runtime espera do shim e o núcleo importado não
     tem: diálogos de save (`begin` devolve 0 = sem janela), karma/troféus (nada guardado), roda de poderes, governador de
     qualidade (`tlg_view_*`), mouse capturado, `input_settings`.
-- **Etapa 3 (a fazer):** trocar cada stub de `tlg_runtime_glue.cpp` pela implementação real de `port/gpu/shim`;
+- **Etapa 3a (feita):** `TlgGpuConfig` ganhou `eboot_base`, `game_dir` e `app_ver` (o runtime os preenche; v1/v2 ignoram);
+  com `TLG_GPU_V3` o `probe.c` chama `tlggpu_apply_game_patches()` e `tlggpu_mark_game_main_thread()`; `runtime_memory.c`
+  reserva `0x200000000-0x800000000` para o guest (a janela reservada do sistema fica dentro; `TLG_GUEST_LOW=0` desliga).
+  v3 e v2 compilam. **Ainda não foi executado.**
+- **Etapa 3b (a fazer):** trocar cada stub de `tlg_runtime_glue.cpp` pela implementação real de `port/gpu/shim`;
   fazer o runtime passar `eboot_base`, `game_dir`, `app_ver` e chamar `apply_game_patches`/`mark_game_main_thread`
   (campos novos do `TlgGpuConfig` do núcleo importado, que hoje o `tlggpu.h` do runtime não tem: **por isso o
   executável ainda não deve ser aberto**); resolver a base de memória do guest (`0x200000000`).

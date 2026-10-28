@@ -13,7 +13,17 @@ typedef struct {
     uint32_t sdk_version;       /* from the eboot's procparam */
     uint32_t psf_attributes;    /* param.sfo ATTRIBUTE */
     int32_t width, height;      /* initial window size */
+    /* Used by renderer v3 (gpu_v3, the imported axylpup core); v1 and v2 ignore them. */
+    uint64_t eboot_base;        /* where the eboot's first segment is mapped */
+    const char *game_dir;       /* the /app0 folder, or NULL */
+    const char *app_ver;        /* param.sfo APP_VER ("01.07") */
 } TlgGpuConfig;
+#ifdef TLG_GPU_V3
+/* Renderer v3 only: the core's code patches for the game, applied to the linked image before its
+ * pages are protected, and the mark of the thread that enters the eboot. */
+void tlggpu_apply_game_patches(void);
+void tlggpu_mark_game_main_thread(void);
+#endif
 /* Registers kernel event queues (needed with or without graphics). */
 void tlggpu_register_kernel(void);
 /* Creates window, Vulkan device, presenter and GPU command processor. */
