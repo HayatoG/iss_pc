@@ -40,8 +40,8 @@ inline int Mode() {
         if (v && (v[0] == '1' || v[0] == '2')) {
             return v[0] - '0';
         }
-        // issn-axy: ISSN_FSR4=1 - FSR 4 Native AA in the same slot (issn_fsr4.h).
-        const char* fsr4 = std::getenv("ISSN_FSR4");
+        // tlg-axy: TLG_FSR4=1 - FSR 4 Native AA in the same slot (tlg_fsr4.h).
+        const char* fsr4 = std::getenv("TLG_FSR4");
         return fsr4 && fsr4[0] == '1' ? 3 : 0;
     }();
     return mode;

@@ -233,7 +233,7 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
     modules.fill(nullptr);
     fetch_shader.reset();
     compute_key.Deserialize(ar);
-    disk_metas.insert(compute_key.value); // issn_pc: its permutation index stays taken
+    disk_metas.insert(compute_key.value); // tlg_pc: its permutation index stays taken
 
     ComputePipeline::SerializationSupport sdata{};
     sdata.Deserialize(ar);
@@ -452,7 +452,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     modules.fill(nullptr);
     fetch_shader.reset();
     graphics_key.Deserialize(ar);
-    // issn_pc: the permutations this key names stay taken even when their meta is missing (a seed
+    // tlg_pc: the permutations this key names stay taken even when their meta is missing (a seed
     // drops differing metas but keeps the keys): a new permutation there would make this key load
     // the wrong shader on a later boot.
     for (const auto stage_hash : graphics_key.stage_hashes) {
@@ -460,7 +460,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
             disk_metas.insert(stage_hash);
         }
     }
-    // A seed key preloads only where the stamp allows graphics (seed_graphics_keys). issn_pc: not
+    // A seed key preloads only where the stamp allows graphics (seed_graphics_keys). tlg_pc: not
     // in a VERIFY run, which reads no stamp (that needs bit 1) and checks the folder's own SPIR-V:
     // the 0.3.2 release verify skipped every graphics key of a folder grown from a seed, so its
     // new stamp held only compute and the folder's few own graphics stages.
@@ -706,7 +706,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
             if (SimProfileActive()) {
                 // counted above
             } else if (!found.empty()) {
-                // issn_pc: the annotator returns codes only when the rebuild with them is word for
+                // tlg_pc: the annotator returns codes only when the rebuild with them is word for
                 // word the cached module, so the permutation is verified in this same run.
                 vs_formats[fmt_key] = std::move(found);
                 vs_formats_dirty = true;
@@ -1215,7 +1215,7 @@ void PipelineCache::WarmUp() {
         }
     });
 
-    // issn_pc: every shader meta on disk (PipelineCache::disk_metas), so a new permutation never
+    // tlg_pc: every shader meta on disk (PipelineCache::disk_metas), so a new permutation never
     // takes the index of one this boot does not load.
     disk_metas.clear();
     if (const auto folder = Storage::DataBase::Instance().SidecarPath(""); !folder.empty()) {
@@ -1307,7 +1307,7 @@ void PipelineCache::WarmUp() {
     precompile_retired = ReadPrecompileHashes(PrecompileRetiredFile);
     ReadSeedGraphicsKeys(); // any rebuild mode: seed keys stay out unless the stamp allows them
     if (CacheRebuildMode() & 2) {
-        // issn_pc: the list of differing metas is this VERIFY run's alone (it was appended to, so
+        // tlg_pc: the list of differing metas is this VERIFY run's alone (it was appended to, so
         // an ANNOTATE run before it left the vertex shaders it then fixed in the list).
         std::error_code ec;
         std::filesystem::remove(Storage::DataBase::Instance().SidecarPath("rebuild-differ.txt"), ec);
@@ -1359,7 +1359,7 @@ void PipelineCache::WarmUp() {
                     ++num_pipelines;
                 }
             } catch (const Serialization::CorruptedEntry&) {
-                // issn-axy: skipped; the game builds that pipeline again when it needs it.
+                // tlg-axy: skipped; the game builds that pipeline again when it needs it.
                 ++num_corrupted_pipelines;
             }
         });
@@ -1544,7 +1544,7 @@ void PipelineCache::WarmUp() {
 
     Storage::DataBase::Instance().FinishPreload();
 
-    // issn_pc: SHADPS4_EXIT_AFTER_WARMUP=1 (packaging/windows/make_seed.sh): the process ends here,
+    // tlg_pc: SHADPS4_EXIT_AFTER_WARMUP=1 (packaging/windows/make_seed.sh): the process ends here,
     // once the boot preload (and a VERIFY run's stamp) is done, before the game starts.
     if (const char* exit_env = std::getenv("SHADPS4_EXIT_AFTER_WARMUP");
         exit_env && exit_env[0] == '1') {

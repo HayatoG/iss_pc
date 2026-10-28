@@ -104,7 +104,7 @@ struct Writer {
     Archive& ar;
 };
 
-/// issn-axy: a cache entry that ends early (a file cut off when the game closed while writing
+/// tlg-axy: a cache entry that ends early (a file cut off when the game closed while writing
 /// it, tester 2026-10-22: the game no longer started). Thrown instead of a fatal assertion, so
 /// the cache loader can skip that one entry.
 struct CorruptedEntry : std::runtime_error {

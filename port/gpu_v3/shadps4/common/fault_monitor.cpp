@@ -33,7 +33,7 @@
 #include <timeapi.h>
 #pragma comment(lib, "winmm.lib")
 #else
-// issn-axy: the Windows-only diagnostics (module names, stack keys) are inert on Linux builds.
+// tlg-axy: the Windows-only diagnostics (module names, stack keys) are inert on Linux builds.
 using HMODULE = void*;
 using LPCSTR = const char*;
 #define MAX_PATH 260

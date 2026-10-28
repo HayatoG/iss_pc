@@ -13,7 +13,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
-#include "video_core/renderer_vulkan/issn_shader_report.h"
+#include "video_core/renderer_vulkan/tlg_shader_report.h"
 #include "video_core/renderer_vulkan/vk_pipeline_compile_pool.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
@@ -36,7 +36,7 @@ struct Stats {
     std::atomic<u64> queue_max{}, promoted{};
 };
 Stats g_stats;
-/// issn_pc (2026-10-23): compute compiles the game is waiting for, or will soon (demand queue), and
+/// tlg_pc (2026-10-23): compute compiles the game is waiting for, or will soon (demand queue), and
 /// threads blocked in Wait(); ComputeUrgent() lets the graphics compiler threads stand back.
 std::atomic<u32> g_demand_size{};
 std::atomic<u32> g_waiters{};

@@ -18,9 +18,9 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/system/systemservice.h"
-#include "issn_overlay.h"
-#include "issn_settings.h"
-#include "issn_png.h" // issn-axy: the port's menu / FPS counter instead of shadPS4's ImGui layers
+#include "tlg_overlay.h"
+#include "tlg_settings.h"
+#include "tlg_png.h" // tlg-axy: the port's menu / FPS counter instead of shadPS4's ImGui layers
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
@@ -416,10 +416,10 @@ static bool ConvertReadbackToRgba8(const ScreenshotReadback& readback, std::vect
 
 static bool WritePng(const std::filesystem::path& path, const std::span<const u8> rgba,
                      const u32 width, const u32 height) {
-    // issn-axy: stb_image_write instead of libpng (the port links no libpng).
+    // tlg-axy: stb_image_write instead of libpng (the port links no libpng).
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
-    const auto data = IssnEncodePng(rgba.data(), static_cast<int>(width), static_cast<int>(height));
+    const auto data = TlgEncodePng(rgba.data(), static_cast<int>(width), static_cast<int>(height));
     if (data.empty()) {
         return false;
     }
@@ -538,14 +538,14 @@ void Presenter::DrawBootScreen(std::string_view headline, std::string_view detai
         }
     }
 
-    // issn-axy: the port's loading screen stands in for the ImGui boot window.
+    // tlg-axy: the port's loading screen stands in for the ImGui boot window.
     (void)headline;
     (void)detail;
     (void)one_time;
     // The rasterizer (and its warm-up) is built before the presenter's body runs: the menu's
     // ImGui context comes up here on the first boot frame.
-    IssnOverlay::Init(instance, swapchain.GetSurfaceFormat().format, swapchain.GetImageCount());
-    IssnOverlay::SetLoading(true, static_cast<u32>(std::clamp(fraction, 0.0f, 1.0f) * 1000.0f), 1000);
+    TlgOverlay::Init(instance, swapchain.GetSurfaceFormat().format, swapchain.GetImageCount());
+    TlgOverlay::SetLoading(true, static_cast<u32>(std::clamp(fraction, 0.0f, 1.0f) * 1000.0f), 1000);
 
     auto& scheduler = present_scheduler;
     auto command_access = scheduler.AcquireCommandBuffer();
@@ -557,7 +557,7 @@ void Presenter::DrawBootScreen(std::string_view headline, std::string_view detai
         .baseArrayLayer = 0,
         .layerCount = VK_REMAINING_ARRAY_LAYERS,
     };
-    // issn-axy: a black picture under the loading screen (the overlay loads, never clears).
+    // tlg-axy: a black picture under the loading screen (the overlay loads, never clears).
     const vk::ImageMemoryBarrier to_transfer{
         .srcAccessMask = vk::AccessFlagBits::eNone,
         .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
@@ -586,7 +586,7 @@ void Presenter::DrawBootScreen(std::string_view headline, std::string_view detai
     cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
                            vk::PipelineStageFlagBits::eColorAttachmentOutput,
                            vk::DependencyFlagBits::eByRegion, {}, {}, to_attachment);
-    IssnOverlay::Render(cmdbuf, swapchain.ImageView(), swapchain.GetExtent());
+    TlgOverlay::Render(cmdbuf, swapchain.ImageView(), swapchain.GetExtent());
     const vk::ImageMemoryBarrier to_present{
         .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
         .dstAccessMask = vk::AccessFlagBits::eNone,
@@ -658,8 +658,8 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
 
-    IssnOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
-    IssnOverlay::SetLoading(false, 0, 0); // the warm-up's boot screen (if any) is over
+    TlgOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
+    TlgOverlay::SetLoading(false, 0, 0); // the warm-up's boot screen (if any) is over
 }
 
 Presenter::~Presenter() {
@@ -1169,11 +1169,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool hold_frame) {
                           MarkersPalette::GpuMarkerColor, profiler_ctx != nullptr);
 
         const vk::Extent2D extent = swapchain.GetExtent();
-        // issn-axy: no ImGui dock window - the game frame is blitted (letterboxed) straight into
+        // tlg-axy: no ImGui dock window - the game frame is blitted (letterboxed) straight into
         // the swapchain image, then the port's menu / FPS counter is drawn over it.
         SetExpectedGameSize(s32(extent.width), s32(extent.height));
         {
-            auto& settings = IssnSettings::Get(); // the in-game menu's Image > Information
+            auto& settings = TlgSettings::Get(); // the in-game menu's Image > Information
             settings.image_width = s32(frame->width);
             settings.image_height = s32(frame->height);
             settings.window_width = s32(extent.width);
@@ -1266,7 +1266,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool hold_frame) {
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
                                vk::PipelineStageFlagBits::eAllCommands,
                                vk::DependencyFlagBits::eByRegion, {}, {}, post_blit);
-        IssnOverlay::Render(cmdbuf, swapchain_image_view, extent);
+        TlgOverlay::Render(cmdbuf, swapchain_image_view, extent);
 
         if (capture_with_overlays_count > 0) {
             pending_screenshots.emplace_back(

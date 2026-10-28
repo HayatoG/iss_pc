@@ -67,3 +67,20 @@ jogador); DLSS 5; hashes e endereços fixos sem aprendizagem; o `dlss_bridge` de
 - **Nada da Sony no git.** Qualquer arquivo gerado do jogo fica fora do repositório.
 - **Um jogo por vez**, com a trava; o agente nunca abre o jogo sem a permissão do usuário.
 - Cada fase tem sua medição registrada em `docs/` e no ai-memory antes de a próxima começar.
+
+## Estado (28/10/2026)
+
+- **Etapa 1 (feita):** núcleo do issn_pc importado em `port/gpu_v3`, com `issn`→`tlg` renomeado.
+- **Etapa 2 (feita, só compila e liga):** `cmake -S port/gpu_v3 -B port/out/gpu_v3 -G Ninja` + `ninja -C port/out/gpu_v3 tlg-probe`
+  gera `tlg-probe.exe` (12 MB), com o nosso `port/src`. Nunca foi executado.
+  - `third_party` vem de `port/gpu/third_party` (só `stb` é novo, domínio público).
+  - Stubs de fornecedor em `shim/tlg_vendor_stubs.cpp`: Streamline DLSS, DLSS 5 e FSR 4 não são compilados
+    (nada de SDK da NVIDIA nem pesos sem proveniência no repositório).
+  - `shim/tlg_runtime_glue.cpp`: respostas neutras para o que o nosso runtime espera do shim e o núcleo importado não
+    tem: diálogos de save (`begin` devolve 0 = sem janela), karma/troféus (nada guardado), roda de poderes, governador de
+    qualidade (`tlg_view_*`), mouse capturado, `input_settings`.
+- **Etapa 3 (a fazer):** trocar cada stub de `tlg_runtime_glue.cpp` pela implementação real de `port/gpu/shim`;
+  fazer o runtime passar `eboot_base`, `game_dir`, `app_ver` e chamar `apply_game_patches`/`mark_game_main_thread`
+  (campos novos do `TlgGpuConfig` do núcleo importado, que hoje o `tlggpu.h` do runtime não tem: **por isso o
+  executável ainda não deve ser aberto**); resolver a base de memória do guest (`0x200000000`).
+- **Etapa 4 (a fazer):** primeira execução e medição (fase 0), com a permissão do usuário e a trava.

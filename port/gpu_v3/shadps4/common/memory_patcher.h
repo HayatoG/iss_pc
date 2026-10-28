@@ -91,7 +91,7 @@ bool InLiveResizeWindow();
 /// A size of the render shape (+-3%): the game's screen-sized targets and their half / quarter.
 bool IsRenderShaped(u32 width, u32 height);
 /// axylpup 1.1.1: the fitted movie quad's corner (x, y) when movies are fitted to another screen
-/// shape (issn_pc: issn_game_patches.cpp), else false.
+/// shape (tlg_pc: tlg_game_patches.cpp), else false.
 bool MovieFitRect(float& x, float& y);
 /// Milliseconds since the last change (INT64_MAX: none) - DLSS's grace window.
 s64 MsSinceLiveResize();

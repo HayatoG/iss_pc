@@ -7953,7 +7953,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size,
             if (const volatile u32* g = g_sort_guard_words) {
                 // q36: the sort replacement's invalid-width exits (0 = never; the hang guard did not fire).
                 LOG_INFO(Render, "q36 SortGuard: invalid-width exits {} (last first {} last {}), overflow exits {}",
-                         u32{g[0]}, u32{g[1]}, u32{g[2]}, u32{g[3]}); // issn-axy: fmt 9 has no volatile
+                         u32{g[0]}, u32{g[1]}, u32{g[2]}, u32{g[3]}); // tlg-axy: fmt 9 has no volatile
                 if (g[4] != 0) { // SHADPS4_SORT_VERIFY=1
                     LOG_INFO(Render,
                              "SortVerify: dispatches {} | input out of order: lanes {} groups {} (worst "

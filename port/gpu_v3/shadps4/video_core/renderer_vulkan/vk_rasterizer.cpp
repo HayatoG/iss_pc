@@ -40,7 +40,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/amdgpu/mtb_census.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
-#include "video_core/renderer_vulkan/issn_fsr4.h"
+#include "video_core/renderer_vulkan/tlg_fsr4.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_dlss_upscale.h"
 #include "video_core/renderer_vulkan/vk_dlss5.h"
@@ -1661,7 +1661,7 @@ void Rasterizer::DlssResolve() {
     ++dlss_calls;
     ++dlss_phases[dlss_phase_in & 3];
     {
-        // issn-axy: more than 100 ms since the last resolve (Home switched it off, a menu, a
+        // tlg-axy: more than 100 ms since the last resolve (Home switched it off, a menu, a
         // load): FSR's history is another picture, so it starts over.
         const u64 now_ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                    std::chrono::steady_clock::now().time_since_epoch())
@@ -1688,7 +1688,7 @@ void Rasterizer::DlssResolve() {
         return id ? &texture_cache.GetImage(id) : nullptr;
     };
     const bool fsr4_mode = Dlss::Mode() == 3;
-    // issn-axy: axylpup's 1.1 learns the inputs from this frame's SMAA draws (above). Where
+    // tlg-axy: axylpup's 1.1 learns the inputs from this frame's SMAA draws (above). Where
     // they hold no colour image of the target's format, the offset search of 0.3.0: the colour
     // and the motion vectors move together between game builds (CUSA00223 1.07: +0x2c0000), and
     // each R16G16 float image of the target's size is tried as the motion vectors.
@@ -1723,7 +1723,7 @@ void Rasterizer::DlssResolve() {
             motion_at = Dlss::MotionAddr + dlss_addr_delta;
         }
     }
-    // issn-axy: the colour input of the target's own format first; FSR 4 also takes another
+    // tlg-axy: the colour input of the target's own format first; FSR 4 also takes another
     // colour format (it blits). Tester 2026-10-21: with FSR 4 on the picture was yellow and the
     // log had only the 8 "no matching input" lines - every resolve was skipped, so the target
     // kept what another pass had left in that memory.
@@ -1807,11 +1807,11 @@ void Rasterizer::DlssResolve() {
     bool evaluated = false;
     bool hud_layer = false;
     if (Dlss::Mode() == 3) {
-        // issn-axy: ISSN_FSR4 - FSR 4 Native AA from the same inputs (issn_fsr4.h).
+        // tlg-axy: TLG_FSR4 - FSR 4 Native AA from the same inputs (tlg_fsr4.h).
         VideoCore::Image* motion = find(motion_at);
         VideoCore::Image* depth = find(depth_addr);
         if (motion && depth) [[likely]] {
-            // FSR 4 copies them into images of its own (issn_fsr4.cpp CopyInputs).
+            // FSR 4 copies them into images of its own (tlg_fsr4.cpp CopyInputs).
             for (VideoCore::Image* image : {in, motion, depth}) {
                 image->Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
                                {});
@@ -1842,7 +1842,7 @@ void Rasterizer::DlssResolve() {
                 fsr4 = std::make_unique<Fsr4Aa::Upscaler>(instance, scheduler);
             }
             const auto cmdbuf = scheduler.AcquireCommandBuffer().Handle();
-            // issn-axy: FSR 4 as the upscaler (vk_dlss_upscale.h, as DLSS): with the window larger
+            // tlg-axy: FSR 4 as the upscaler (vk_dlss_upscale.h, as DLSS): with the window larger
             // than the game's render size it writes the window size into the upscaler's own image
             // and this target becomes the HUD layer the presenter lays over it.
             Dlss::Upscaler* const upscaler =
@@ -13806,7 +13806,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     for (u32 cb = state.num_color_attachments; cb < state.color_attachments.size(); ++cb) {
         state.color_attachments[cb] = {};
     }
-    // axylpup 1.1.1 (user 10-22): black bars beside a fitted movie (issn_game_patches.cpp
+    // axylpup 1.1.1 (user 10-22): black bars beside a fitted movie (tlg_game_patches.cpp
     // ApplyMovieFit). On the PS4 the movie quad covered its target whole, so beside the smaller quad
     // the target kept the last game frame. The full-screen movie draw (vs b94242a8 + the NV12 ps
     // b03b3012) whose first vertex is the fitted corner clears its target to black first; menu
@@ -14550,7 +14550,7 @@ void Rasterizer::UpdateColorBlendingState(const GraphicsPipeline* pipeline) cons
     const auto& regs = liverpool->BackRegs();
     auto& dynamic_state = scheduler.GetDynamicState();
     dynamic_state.SetBlendConstants(regs.blend_constants);
-    if (Dlss::UpscaleWanted()) [[unlikely]] { // issn-axy: DLSS or FSR 4 upscaling
+    if (Dlss::UpscaleWanted()) [[unlikely]] { // tlg-axy: DLSS or FSR 4 upscaling
         auto masks = pipeline->GetGraphicsKey().write_masks;
         Dlss::ApplyHudLayerMask(masks, regs.color_buffers[0].Address());
         dynamic_state.SetColorWriteMasks(masks);

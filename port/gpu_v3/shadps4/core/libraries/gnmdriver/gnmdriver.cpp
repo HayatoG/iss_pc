@@ -12,8 +12,8 @@
 #include <vector>
 #include "gnm_error.h"
 #include "gnmdriver.h"
-#include "issn_freeze.h"
-#include "issn_gpu_trace.h"
+#include "tlg_freeze.h"
+#include "tlg_gpu_trace.h"
 
 #include "common/fence_watch.h"
 #include "common/scope_exit.h"
@@ -125,7 +125,7 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
 
 static void WaitGpuIdle() {
     HLE_TRACE;
-    IssnFreeze::WaitScope wait{"GPU idle (submit done)"}; // port: freeze report
+    TlgFreeze::WaitScope wait{"GPU idle (submit done)"}; // port: freeze report
     std::unique_lock lock{m_submission};
     if (Common::FenceWatch::Enabled() && submission_lock != 0) [[unlikely]] {
         auto& fw = Common::FenceWatch::Get();
@@ -340,7 +340,7 @@ int PS4_SYSV_ABI sceGnmDestroyWorkloadStream() {
 void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "vqid {}, offset_dw {}", gnm_vqid, next_offs_dw);
-    IssnGpuTrace::Event("sceGnmDingDong vqid %u offset %u", gnm_vqid, next_offs_dw); // port
+    TlgGpuTrace::Event("sceGnmDingDong vqid %u offset %u", gnm_vqid, next_offs_dw); // port
 
     if (gnm_vqid == 0) {
         return;
@@ -2644,8 +2644,8 @@ int PS4_SYSV_ABI sceGnmMapComputeQueue(u32 pipe_id, u32 queue_id, VAddr ring_bas
         liverpool->asc_queues.insert(VAddr(ring_base_addr), read_ptr_addr, ring_size_dw, pipe_id);
     // We need to offset index as `dingDong` assumes it to be from the range [1..64]
     const auto gnm_vqid = vqid.index + 1;
-    IssnGpuTrace::Count(IssnGpuTrace::CountMapComputeQueue); // port
-    IssnGpuTrace::Event("sceGnmMapComputeQueue pipe %u queue %u ring %#llx (%u dwords) -> vqid %u",
+    TlgGpuTrace::Count(TlgGpuTrace::CountMapComputeQueue); // port
+    TlgGpuTrace::Event("sceGnmMapComputeQueue pipe %u queue %u ring %#llx (%u dwords) -> vqid %u",
                         pipe_id, queue_id, static_cast<unsigned long long>(ring_base_addr),
                         ring_size_dw, gnm_vqid);
     LOG_INFO(Lib_GnmDriver, "ASC pipe {} queue {} mapped to vqueue {}", pipe_id, queue_id,
@@ -3866,8 +3866,8 @@ int PS4_SYSV_ABI sceGnmSubmitDone() {
     }
     liverpool->SubmitDone();
     // port: the loader's watchdog counts frames here.
-    IssnGpuTrace::Count(IssnGpuTrace::CountSubmitDone);
-    IssnGpuTrace::Event("sceGnmSubmitDone (frame %llu)", static_cast<unsigned long long>(frames_submitted));
+    TlgGpuTrace::Count(TlgGpuTrace::CountSubmitDone);
+    TlgGpuTrace::Event("sceGnmSubmitDone (frame %llu)", static_cast<unsigned long long>(frames_submitted));
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();

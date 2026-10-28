@@ -1,6 +1,6 @@
 // port: the MemoryManager surface used by the video core and GnmDriver.
 // Guest memory lives at identical host addresses; the C runtime owns the VMAs.
-// issn-axy: the additions of axylpup's shadPS4 build (TryReadBacking, download exclusions, ...).
+// tlg-axy: the additions of axylpup's shadPS4 build (TryReadBacking, download exclusions, ...).
 #pragma once
 #include <array>
 #include <atomic>

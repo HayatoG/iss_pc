@@ -11,37 +11,37 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
-#include "issn_overlay.h"
-#include "issn_graphics.h"
-#include "issn_settings.h"
+#include "tlg_overlay.h"
+#include "tlg_graphics.h"
+#include "tlg_settings.h"
 
 namespace Frontend {
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
     // port: the desktop shows this name and matches the app id with the launcher's .desktop entry
-    // (Alt+Tab, dock). The launcher sets ISSN_APP_NAME / ISSN_APP_ID per game.
+    // (Alt+Tab, dock). The launcher sets TLG_APP_NAME / TLG_APP_ID per game.
     {
-        const char* app_name = std::getenv("ISSN_APP_NAME");
-        const char* app_id = std::getenv("ISSN_APP_ID");
+        const char* app_name = std::getenv("TLG_APP_NAME");
+        const char* app_id = std::getenv("TLG_APP_ID");
         SDL_SetAppMetadata(app_name && *app_name ? app_name : "The Last Guardian", nullptr,
                            app_id && *app_id ? app_id : "tlg-pc");
         SDL_SetHint(SDL_HINT_APP_ID, app_id && *app_id ? app_id : "tlg-pc");
     }
-    // issn: started from Steam (a non-Steam shortcut to the launcher), the environment carries
+    // tlg: started from Steam (a non-Steam shortcut to the launcher), the environment carries
     // Steam Input's device filter: SDL is to hide the physical pad and use Steam's virtual one,
     // which belongs to the launcher Steam started, not to this process. Tester 2026-10-22: an
     // 8BitDo Ultimate C that worked before was "gamepad=none" once launched from Steam. The
-    // filter is dropped (ISSN_KEEP_STEAM_PAD_FILTER=1 keeps it).
+    // filter is dropped (TLG_KEEP_STEAM_PAD_FILTER=1 keeps it).
     for (const char* hint : {SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES,
                              SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT}) {
         const char* value = std::getenv(hint);
-        const char* keep = std::getenv("ISSN_KEEP_STEAM_PAD_FILTER");
+        const char* keep = std::getenv("TLG_KEEP_STEAM_PAD_FILTER");
         if (value && *value && !(keep && keep[0] == '1')) {
             std::printf("Window: %s=%s from Steam ignored (the pads stay visible)\n", hint, value);
             SDL_SetHintWithPriority(hint, "", SDL_HINT_OVERRIDE);
         }
     }
-    // issn: under Steam the physical pad can be hidden from this process while Steam Input
+    // tlg: under Steam the physical pad can be hidden from this process while Steam Input
     // presents a virtual one (VID 0x28de), which SDL skips unless allowed (tester 2026-10-22:
     // with the filter dropped SDL still saw 0 joysticks).
     if (std::getenv("SteamGameId") || std::getenv("SteamAppId") || std::getenv("SteamClientLaunch")) {
@@ -102,7 +102,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
     // port: the game's own icon (run.py converts sce_sys/icon0.png to BMP, SDL's built-in format).
-    if (const char* icon_path = std::getenv("ISSN_WINDOW_ICON")) {
+    if (const char* icon_path = std::getenv("TLG_WINDOW_ICON")) {
         if (SDL_Surface* icon = SDL_LoadBMP(icon_path)) {
             SDL_SetWindowIcon(window, icon);
             SDL_DestroySurface(icon);
@@ -128,13 +128,13 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     } else {
         UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
     }
-    // port: ISSN_FULLSCREEN=1 (older launchers) still asks for fullscreen.
-    if (const char* fullscreen = std::getenv("ISSN_FULLSCREEN"); fullscreen && fullscreen[0] == '1' &&
-        IssnSettings::Get().display_mode == IssnGraphics::Windowed) {
-        IssnSettings::Get().display_mode = IssnGraphics::Borderless;
+    // port: TLG_FULLSCREEN=1 (older launchers) still asks for fullscreen.
+    if (const char* fullscreen = std::getenv("TLG_FULLSCREEN"); fullscreen && fullscreen[0] == '1' &&
+        TlgSettings::Get().display_mode == TlgGraphics::Windowed) {
+        TlgSettings::Get().display_mode = TlgGraphics::Borderless;
     }
-    ApplyDisplayMode(IssnSettings::Get().display_mode);
-    // port: no system cursor over the game; the in-game menu draws its own (IssnOverlay::SetOpen).
+    ApplyDisplayMode(TlgSettings::Get().display_mode);
+    // port: no system cursor over the game; the in-game menu draws its own (TlgOverlay::SetOpen).
     // (ps4_core: UpdateMouseCapture shows it again while Esc keeps the game's mouse released.)
     SDL_HideCursor();
     int w = 0, h = 0;
@@ -148,18 +148,18 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 // mode. Window thread only (SDL). The swapchain follows the size events.
 void WindowSDL::ApplyDisplayMode(int mode) {
     display_mode = mode;
-    if (mode == IssnGraphics::Windowed) {
+    if (mode == TlgGraphics::Windowed) {
         SDL_SetWindowFullscreen(window, false);
     } else {
         const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window));
-        const bool exclusive = mode == IssnGraphics::Fullscreen && desktop;
+        const bool exclusive = mode == TlgGraphics::Fullscreen && desktop;
         if (!SDL_SetWindowFullscreenMode(window, exclusive ? desktop : nullptr)) {
             LOG_WARNING(Frontend, "Fullscreen mode: {}", SDL_GetError());
         }
         SDL_SetWindowFullscreen(window, true);
     }
     SDL_SyncWindow(window);
-    std::printf("Window: %s\n", IssnGraphics::DisplayModeNames[mode]);
+    std::printf("Window: %s\n", TlgGraphics::DisplayModeNames[mode]);
 }
 
 WindowSDL::~WindowSDL() {
@@ -184,7 +184,7 @@ void WindowSDL::UpdateTextTitle() {
     const std::string title = text_active ? base_title + " \u2014 " + text_prompt + ": " + text + "_  (Enter = OK, Esc = cancel)"
                                           : base_title;
     SDL_SetWindowTitle(window, title.c_str());
-    IssnOverlay::SetTextEntry(text_active, text_prompt, text);
+    TlgOverlay::SetTextEntry(text_active, text_prompt, text);
 }
 
 bool WindowSDL::PollEvents() {
@@ -198,9 +198,9 @@ bool WindowSDL::PollEvents() {
         }
     }
     if (!text_active) {
-        IssnOverlay::UpdateTextInput(window);
+        TlgOverlay::UpdateTextInput(window);
     }
-    if (const int mode = IssnSettings::Get().display_mode; mode != display_mode) {
+    if (const int mode = TlgSettings::Get().display_mode; mode != display_mode) {
         ApplyDisplayMode(mode);
     }
     SDL_Event event;
@@ -232,7 +232,7 @@ bool WindowSDL::PollEvents() {
             UpdateTextTitle();
             continue;
         }
-        if (IssnOverlay::HandleEvent(event)) {
+        if (TlgOverlay::HandleEvent(event)) {
             continue;
         }
         switch (event.type) {
@@ -246,7 +246,7 @@ bool WindowSDL::PollEvents() {
         }
         case SDL_EVENT_QUIT:
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-            // issn: say why the game closes (the log otherwise just ends with the counters).
+            // tlg: say why the game closes (the log otherwise just ends with the counters).
             std::printf("Window: %s: closing the game\n",
                         event.type == SDL_EVENT_QUIT
                             ? "quit requested (Alt+F4, the console window closed or the system)"

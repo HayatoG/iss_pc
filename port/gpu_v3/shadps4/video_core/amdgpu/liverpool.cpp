@@ -9373,7 +9373,7 @@ void Liverpool::LeanBackFollow(const CpSplit::DcbRefPayload& ref) {
                         return;
                     }
                     TT::g_c[5].fetch_add(1, std::memory_order_relaxed);
-                    // issn-axy: the pairs differ in width (u32 vs u8); libstdc++ has no mixed-type pair compare.
+                    // tlg-axy: the pairs differ in width (u32 vs u8); libstdc++ has no mixed-type pair compare.
                     bool bad = mat_n[m].first != st.pre_n[m].first ||
                                mat_n[m].second != st.pre_n[m].second;
                     for (u32 i = 0; !bad && i < mat_n[m].first; ++i) {

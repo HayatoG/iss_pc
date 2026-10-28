@@ -205,7 +205,7 @@ static u64 FaultRip(void* context) {
     return static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord->Rip;
 }
 #else
-// issn-axy: the Windows-only read-fault diagnostics are inert on the port's Linux build.
+// tlg-axy: the Windows-only read-fault diagnostics are inert on the port's Linux build.
 static bool ReadFaultRipEnabled() {
     return false;
 }
@@ -1156,7 +1156,7 @@ void ArmTimestampReaderProbe(const void* address) {
 } // namespace AmdGpu
 #else
 namespace AmdGpu {
-// issn-axy: SHADPS4_TIMESTAMP_READER (diagnostic) is Windows-only.
+// tlg-axy: SHADPS4_TIMESTAMP_READER (diagnostic) is Windows-only.
 void ArmTimestampReaderProbe(const void*) {}
 } // namespace AmdGpu
 #endif

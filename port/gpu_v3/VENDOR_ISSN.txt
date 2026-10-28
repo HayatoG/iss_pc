@@ -1,15 +1,15 @@
-issn-axy (branch issn-axy, 2026-10-21): shadps4/video_core, shadps4/shader_recompiler, shadps4/common,
+tlg-axy (branch tlg-axy, 2026-10-21): shadps4/video_core, shadps4/shader_recompiler, shadps4/common,
 shadps4/core/libraries/gnmdriver and shadps4/core/libraries/videoout are axylpup's inFAMOUS Second Son build
 of shadPS4 (github.com/axylpup/shadPS4, branch second-son, 2212a345 = release v1.0.2, GPL-2.0-or-later;
 shadPS4 0.17, upstream main of 2026-08-08, plus ~750 commits). Its release switches (shadps4-flags.txt)
 are the game profile's defaults (scripts/game_profiles.py, AXY_RELEASE_FLAGS); its game code patches are
-shim/issn_game_patches.cpp. Port changes on top are marked "issn-axy:" (and "port:" as before):
+shim/tlg_game_patches.cpp. Port changes on top are marked "tlg-axy:" (and "port:" as before):
 common/path_util.{h,cpp} and common/ntapi.h are the port's versions (upstream b4e7ae7 + port changes),
 the presenter blits the frame and draws the port's menu instead of shadPS4's ImGui layers, screenshots
 are off (no libpng), and the Windows-only diagnostics are stubbed on Linux builds. Also vendored:
 third_party/streamline-sdk (NVIDIA Streamline headers, MIT) and third_party/stb (stb_image, public domain).
 The previous core (upstream b4e7ae7 with the port's own renderer work, FSR 3/4, TAA, ...) is in the
-history of branch issn.
+history of branch tlg.
 
 Vendored from https://github.com/shadps4-emu/shadPS4 commit b4e7ae776071ceb1dd35004577a8719481e1d258 (GPL-2.0-or-later).
 Directories: src/video_core, src/shader_recompiler, src/common, src/core/libraries/{gnmdriver,videoout}, externals/gcn, externals/sirit, externals/half.
@@ -22,7 +22,7 @@ Backported from upstream after b4e7ae7 (2026-10-02), recompiler correctness fixe
   fb6367d29 32-bit literals in the high dword of 64-bit floats (#5114), 94e217781 V_BFM_B32 (#5185),
   d1cb90dbb ADDC (#5200), dd43d1cac V_CVT_PK_U8_F32 (#5194), ef08b1e1f V_ALIGNBIT/ALIGNBYTE (#5186).
 
-issn (inFAMOUS Second Son port), changes marked "issn:":
+tlg (inFAMOUS Second Son port), changes marked "tlg:":
   Backported from upstream between b4e7ae7 and 2338a06, unchanged: 612713d5 geometry invocation
   count, 53af37af V_TRUNC_F64, 282f6445 V_MIN_F64, caeb240d Flat VUID-06202, e0cd957a SampleId on
   the KHR barycentric path, 4c7b287f readlanes before tessellation/ring passes, 3f21ee0b

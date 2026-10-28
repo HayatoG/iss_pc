@@ -1,5 +1,5 @@
 // port: fault-handler registry. The C loader's SIGSEGV handler calls
-// issngpu_handle_fault() first; registered handlers run in priority order.
+// tlggpu_handle_fault() first; registered handlers run in priority order.
 #pragma once
 #include <compare>
 #include <set>

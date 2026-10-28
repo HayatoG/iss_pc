@@ -23,7 +23,7 @@ public:
     boost::icl::interval_set<VAddr> GetUsableRegions();
     VAddr SystemReservedVirtualBase() const { return 0x7'0000'0000ULL; }
     u64 SystemReservedVirtualSize() const { return 0x1'0000'0000ULL; }
-    /// issn-axy: the backing view is the runtime's; the video core only uses it for
+    /// tlg-axy: the backing view is the runtime's; the video core only uses it for
     /// SHADPS4_HOST_MIRROR, which the port leaves off.
     [[nodiscard]] u8* BackingBase() const noexcept { return nullptr; }
     [[nodiscard]] u64 BackingSizeBytes() const noexcept { return 0; }

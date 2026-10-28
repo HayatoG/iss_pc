@@ -401,7 +401,7 @@ bool ComputeDynamicState(DynamicState& ds, const Instance& instance, const AmdGp
     }
     ds.SetLineWidth(regs.line_control.Width());
     ds.SetBlendConstants(regs.blend_constants);
-    if (Dlss::UpscaleWanted()) [[unlikely]] { // issn-axy: DLSS or FSR 4 upscaling
+    if (Dlss::UpscaleWanted()) [[unlikely]] { // tlg-axy: DLSS or FSR 4 upscaling
         // SHADPS4_DLSS_UPSCALE: HUD draws into the HUD layer also write coverage.
         auto masks = pipeline->GetGraphicsKey().write_masks;
         Dlss::ApplyHudLayerMask(masks, regs.color_buffers[0].Address());

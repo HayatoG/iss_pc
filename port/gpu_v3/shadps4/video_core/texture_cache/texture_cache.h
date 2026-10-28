@@ -120,11 +120,11 @@ public:
     /// The most recently used image at `address` of that size (and of `format`, when given).
     [[nodiscard]] ImageId FindImageAtSize(VAddr address, u32 width, u32 height,
                                           vk::Format format = vk::Format::eUndefined);
-    /// issn-axy: every image starting at `address` (format, size, last use), for the log.
+    /// tlg-axy: every image starting at `address` (format, size, last use), for the log.
     [[nodiscard]] std::string DescribeImagesAt(VAddr address);
-    /// issn-axy: the `count` most recently used images of that size anywhere (address, format).
+    /// tlg-axy: the `count` most recently used images of that size anywhere (address, format).
     [[nodiscard]] std::string DescribeRecentImages(u32 width, u32 height, size_t count);
-    /// issn-axy: the guest addresses of the images of that size and format, most recent first.
+    /// tlg-axy: the guest addresses of the images of that size and format, most recent first.
     [[nodiscard]] std::vector<VAddr> FindAddressesOf(u32 width, u32 height, vk::Format format);
 
     /// SHADPS4_DRAW_REPEAT_HEAP: any image whose guest address is exactly `address` (the

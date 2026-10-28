@@ -84,12 +84,12 @@ static std::optional<std::filesystem::path> GetBundleParentDirectory() {
 }
 #endif
 
-// port: built on first use, not at load time: issngpu_init() sets ISSN_GPU_USER_DIR from the probe's
+// port: built on first use, not at load time: tlggpu_init() sets TLG_GPU_USER_DIR from the probe's
 // --user folder (the saves folder) before anything asks for a path, so the GPU caches live in the
 // port's own user folder on every OS. Never shadPS4's ~/.local/share/shadPS4 or %APPDATA% folder:
 // an installed shadPS4 emulator owns those (and the same <serial> cache names).
 static std::unordered_map<PathType, fs::path> MakeUserPaths() {
-    const char* port_dir = std::getenv("ISSN_GPU_USER_DIR");
+    const char* port_dir = std::getenv("TLG_GPU_USER_DIR");
     const auto user_dir = port_dir && port_dir[0] ? std::filesystem::path(port_dir)
                                                   : std::filesystem::current_path() / PORTABLE_DIR;
     std::filesystem::create_directories(user_dir);

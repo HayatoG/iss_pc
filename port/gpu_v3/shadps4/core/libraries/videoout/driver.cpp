@@ -306,9 +306,9 @@ void VideoOutDriver::Flip(const Request& req) {
     // save to prev buf index
     port->prev_index = req.index;
 
-    // port: ISSN_FRAME_STATS=1 prints the frame rate every 5 s to stdout (the benchmark logs).
+    // port: TLG_FRAME_STATS=1 prints the frame rate every 5 s to stdout (the benchmark logs).
     static const bool frame_stats = [] {
-        const char* v = std::getenv("ISSN_FRAME_STATS");
+        const char* v = std::getenv("TLG_FRAME_STATS");
         return v && v[0] == '1';
     }();
     if (frame_stats) {

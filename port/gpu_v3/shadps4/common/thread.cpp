@@ -15,7 +15,7 @@
 
 
 #include "common/error.h"
-#include "issn_sampler.h"
+#include "tlg_sampler.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
 #include "ntapi.h"
@@ -185,7 +185,7 @@ bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanosec
 void SetCurrentThreadName(const char* name) {
     // port: guest thread names are kept by the C runtime.
     SetThreadDescription(GetCurrentThread(), UTF8ToUTF16W(name).data());
-    IssnSampler::RegisterThisThread(name); // issn-axy: ISSN_SAMPLE=1 samples every named host thread
+    TlgSampler::RegisterThisThread(name); // tlg-axy: TLG_SAMPLE=1 samples every named host thread
 }
 
 void SetThreadName(void* thread, const char* name) {
@@ -591,7 +591,7 @@ void ApplyCommandProcessorPlacement() {
     const char* value = std::getenv("SHADPS4_CP_QOS");
     int mode = value ? value[0] - '0' : 0;
     if (value && (value[0] == 'a' || value[0] == 'A')) {
-        // issn-axy: =auto from axylpup's 1.1 (src/common/thread.cpp): mode 3 only with enough
+        // tlg-axy: =auto from axylpup's 1.1 (src/common/thread.cpp): mode 3 only with enough
         // logical processors, else off. A reserved P-core costs a CPU with few cores more than it
         // gives: on 6 cores / 12 threads =0 beat =3 by 11.6%, on 16 threads by ~8% (his s1404,
         // s1421). SHADPS4_CP_QOS_AUTO_MIN moves the line.

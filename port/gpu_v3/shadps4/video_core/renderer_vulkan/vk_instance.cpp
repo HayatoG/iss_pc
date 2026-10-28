@@ -21,7 +21,7 @@
 #include "video_core/renderer_vulkan/vk_dlss5.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_memory_budget.h"
-#include "video_core/renderer_vulkan/issn_fsr4.h"
+#include "video_core/renderer_vulkan/tlg_fsr4.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
 #include <vk_mem_alloc.h>
@@ -391,7 +391,7 @@ bool Instance::CreateDevice() {
                  image_2d_view_of_3d_features.sampler2DViewOf3D);
     }
     image_view_min_lod = add_extension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
-    // issn-axy: ISSN_FSR4 (issn_fsr4.h) - the v07 INT8 model needs linear compute derivatives.
+    // tlg-axy: TLG_FSR4 (tlg_fsr4.h) - the v07 INT8 model needs linear compute derivatives.
     bool fsr4_derivatives = false;
     if (Fsr4Aa::Wanted()) {
         const auto derivatives =
@@ -791,7 +791,7 @@ bool Instance::CreateDevice() {
         fault_features.pNext = const_cast<void*>(device_ci.pNext);
         device_ci.pNext = &fault_features;
     }
-    // issn-axy: ISSN_FSR4, the same splice.
+    // tlg-axy: TLG_FSR4, the same splice.
     vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR derivative_features = {
         .computeDerivativeGroupLinear = true,
     };
@@ -917,7 +917,7 @@ bool Instance::CreateDevice() {
         Dlss::DeviceCreated(*instance, physical_device, *device, queue_family_index, 0);
     }
     if (Dlss::Mode() == 3) {
-        // ISSN_FSR4: the T2x resolve is replaced once the device can run the model.
+        // TLG_FSR4: the T2x resolve is replaced once the device can run the model.
         Fsr4Aa::SetDeviceSupported(fsr4_ok);
         Dlss::g_ready.store(fsr4_ok, std::memory_order_relaxed);
         LOG_INFO(Render_Vulkan, "FSR 4: {}", fsr4_ok ? "device ready (Native AA in place of the "

@@ -28,9 +28,9 @@ constexpr vk::ImageSubresourceRange ColorRange{
 bool UpscaleWanted() {
     static const bool wanted = [] {
         const char* v = std::getenv("SHADPS4_DLSS_UPSCALE");
-        // issn-axy: FSR 4 upscales the same way (ISSN_FSR4_UPSCALE=0 keeps it at the game's size;
+        // tlg-axy: FSR 4 upscales the same way (TLG_FSR4_UPSCALE=0 keeps it at the game's size;
         // it only engages while the window is larger than the render size, SetOutputSize).
-        const char* fsr4 = std::getenv("ISSN_FSR4_UPSCALE");
+        const char* fsr4 = std::getenv("TLG_FSR4_UPSCALE");
         return (Mode() == 1 && v != nullptr && v[0] == '1') ||
                (Mode() == 3 && !(fsr4 != nullptr && fsr4[0] == '0'));
     }();
@@ -145,7 +145,7 @@ void Upscaler::SetOutputSize(u32 width, u32 height) {
     const bool on = (force || (width > game_w && height > game_h)) && g_ready.load() &&
                     instance.IsDynamicColorWriteMaskSupported();
     if (on != g_hud_layer.load(std::memory_order_relaxed)) {
-        // issn-axy: a warning (the port's log level), and FSR 4 named when it is the upscaler.
+        // tlg-axy: a warning (the port's log level), and FSR 4 named when it is the upscaler.
         LOG_WARNING(Render_Vulkan, "{} upscale: {} (game {}x{}, output {}x{}{})",
                     Mode() == 3 ? "FSR 4" : "DLSS", on ? "on" : "off", game_w, game_h,
                     output_size.width, output_size.height, force ? ", forced" : "");

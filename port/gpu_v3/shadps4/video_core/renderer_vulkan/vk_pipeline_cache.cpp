@@ -32,7 +32,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/native_census.h"
-#include "video_core/renderer_vulkan/issn_shader_report.h"
+#include "video_core/renderer_vulkan/tlg_shader_report.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_bindless.h"
@@ -347,7 +347,7 @@ struct PipelineCache::AsyncJob {
 
 // FIFO workers. vk::PipelineCache was created without the externally-synchronized flag, so the
 // driver serializes its use between these threads and the synchronous compute path.
-// issn_pc (2026-10-23): several workers (SHADPS4_ASYNC_PIPELINE_THREADS, default a quarter of the
+// tlg_pc (2026-10-23): several workers (SHADPS4_ASYNC_PIPELINE_THREADS, default a quarter of the
 // logical processors, 1-4), like the parallel boot preload that already builds GraphicsPipelines
 // on several threads at once: a new area brings dozens of new pipelines together, and one worker
 // left their draws skipped for seconds.
@@ -412,7 +412,7 @@ private:
     void Run(std::stop_token stoken, u32 index) {
         const std::string name = fmt::format("shadPS4:PipelineCompiler{}", index);
         Common::SetCurrentThreadName(name.c_str());
-        // issn_pc (2026-10-23): below the game's threads (a skipped draw can wait), and a driver
+        // tlg_pc (2026-10-23): below the game's threads (a skipped draw can wait), and a driver
         // pipeline cache of its own: one shared vk::PipelineCache is serialized by the driver,
         // so the compute compiles the frame waits for queued behind these. Nothing reads these
         // caches back (the driver cache is not saved), and a pipeline outlives its cache.
@@ -690,7 +690,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
     };
-    // issn-axy: a damaged cache entry outside the per-pipeline loop (vk_pipeline_serialization.cpp)
+    // tlg-axy: a damaged cache entry outside the per-pipeline loop (vk_pipeline_serialization.cpp)
     // ends the warm-up early instead of the game: the rest compiles while playing.
     try {
         WarmUp();

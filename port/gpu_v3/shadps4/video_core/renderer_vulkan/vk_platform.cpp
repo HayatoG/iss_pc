@@ -25,7 +25,7 @@
 #include "core/emulator_settings.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
-// issn-axy: Linux builds include Xlib here; its macros clash with the recompiler's enums.
+// tlg-axy: Linux builds include Xlib here; its macros clash with the recompiler's enums.
 #ifdef None
 #undef None
 #endif

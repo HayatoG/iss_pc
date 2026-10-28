@@ -982,7 +982,7 @@ size_t CommonPrefix(const std::vector<u16>& a, const std::vector<u16>& b) {
 std::vector<u8> PipelineCache::AnnotateVsConversions(
     const Shader::Info& cached, const std::optional<Shader::Gcn::FetchShaderData>& fetch,
     const Shader::StageSpecialization& spec, const std::vector<u32>& cached_spv) {
-    // issn_pc (2026-10-23): axylpup made vs-formats.bin offline from the cached SPIR-V (a script
+    // tlg_pc (2026-10-23): axylpup made vs-formats.bin offline from the cached SPIR-V (a script
     // not in his repository) and switched this search off; it indexed the codes by attribute while
     // RebuildStageSpv reads them by attribute SEMANTIC, so it never matched. Here: one 6-byte record
     // per semantic (conversion code, then 0xFF = the spec's number class and swizzle), each

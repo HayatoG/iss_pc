@@ -516,7 +516,7 @@ private:
     // their marked metas are not loaded. All other marked compute metas load after the unmarked
     // ones (deferred), so a live meta, never a guessed one, creates a program's shared Info.
     std::unordered_set<u64> precompile_retired;
-    // issn_pc (2026-10-24): the shader metas in the cache folder at boot (file name = permutation
+    // tlg_pc (2026-10-24): the shader metas in the cache folder at boot (file name = permutation
     // hash) plus those saved since. A new permutation never takes an index whose meta file exists:
     // a seed leaves metas the boot did not load (not stamped, differing, a key that failed at
     // another stage), and modules.size() reused their indices, so the new meta replaced one that
