@@ -56,8 +56,21 @@ static int two_ends(const PadData *d) {
     return d->touch_count==2 && d->touches[0].x==120 && d->touches[1].x==1800 && d->touches[0].id!=d->touches[1].id;
 }
 static void pump(void) { SDL_UpdateJoysticks(); SDL_UpdateGamepads(); }
+/* The virtual controller's sensors. */
+static bool SDLCALL on_sensors(void *userdata, bool enabled) { (void)userdata; (void)enabled; return true; }
+/* Rumble commands that start the motors (SDL's own stop when a duration ends is not counted). */
+static int rumbles;
+static uint16_t rumble_low, rumble_high;
+static bool SDLCALL on_rumble(void *userdata, Uint16 low, Uint16 high) {
+    (void)userdata;
+    if (low || high) { ++rumbles; rumble_low=low; rumble_high=high; }
+    return true;
+}
 
 int main(void) {
+#ifdef _WIN32
+    _set_error_mode(_OUT_TO_STDERR); /* a failed assert prints, no dialog */
+#endif
     const char *tmp=getenv("TMPDIR") ? getenv("TMPDIR") : getenv("TEMP") ? getenv("TEMP") : "/tmp";
     char path[1024];
     snprintf(path,sizeof(path),"%s/tlg-pad-test-XXXXXX",tmp);
@@ -201,11 +214,26 @@ int main(void) {
     pump();
     data=read_pad();
     assert(gamepad && data.touch_count==2 && (data.buttons & BTN_TOUCHPAD));
-    assert(data.touches[0].x==1439 && data.touches[0].y==471 && data.touches[0].id==0);
-    assert(data.touches[1].x==480 && data.touches[1].y==942 && data.touches[1].id==1);
+    assert(data.touches[0].x==1439 && data.touches[0].y==471 && data.touches[1].x==480 && data.touches[1].y==942);
+    /* DualShock 4 touch IDs: a new number (1..127) for each new finger, kept while it stays down;
+     * the held time counts from the first finger of the touch. */
+    const uint8_t first=data.touches[0].id, second=data.touches[1].id;
+    assert(first>=1 && first<=127 && second>=1 && second<=127 && first!=second);
+    usleep(20000);
+    data=read_pad();
+    assert(data.touches[0].id==first && data.touches[1].id==second && data.touch_held_time>=20000);
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,0,1,false,0,0,0));
+    pump();
+    data=read_pad();
+    assert(data.touch_count==1 && data.touches[0].id==first);
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,0,1,true,0.25f,1.0f,1.0f));
+    pump();
+    data=read_pad();
+    assert(data.touch_count==2 && data.touches[0].id==first && data.touches[1].id!=first && data.touches[1].id!=second);
+    assert(data.touch_held_time>=20000);
     capture=1;
     data=read_pad();
-    assert(data.touch_count==0 && data.buttons==0);
+    assert(data.touch_count==0 && data.buttons==0 && data.touch_held_time==0);
     capture=0;
     /* The click without a finger is played as a left click. */
     assert(SDL_SetJoystickVirtualTouchpad(joystick,0,0,false,0,0,0));
@@ -249,11 +277,119 @@ int main(void) {
     usleep(220000);
     data=read_pad();
     assert(data.buttons==0 && data.touch_count==0);
+    /* Two touchpads (Steam Controller 2026, Steam Deck): the left one is the left half of the PS4
+     * touchpad, the right one the right half; the right one's click (misc2) clicks it. */
+    SDL_CloseJoystick(joystick);
+    assert(SDL_DetachVirtualJoystick(id));
+    pump();
+    data=read_pad();
+    assert(!gamepad);
+    SDL_VirtualJoystickTouchpadDesc trackpads[2]={{.nfingers=1},{.nfingers=1}};
+    desc.ntouchpads=2;
+    desc.touchpads=trackpads;
+    SDL_VirtualJoystickSensorDesc sensors[2]={{SDL_SENSOR_GYRO,250.f},{SDL_SENSOR_ACCEL,250.f}};
+    desc.nsensors=2;
+    desc.sensors=sensors;
+    desc.SetSensorsEnabled=on_sensors;
+    desc.Rumble=on_rumble;
+    id=SDL_AttachVirtualJoystick(&desc);
+    assert(id!=0);
+    joystick=SDL_OpenJoystick(id);
+    assert(joystick);
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,0,0,true,0.5f,0.5f,1.0f));
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,1,0,true,0.5f,0.5f,1.0f));
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_MISC2,true));
+    pump();
+    data=read_pad();
+    assert(gamepad && data.touch_count==2 && (data.buttons & BTN_TOUCHPAD));
+    assert(data.touches[0].x==480 && data.touches[1].x==1439 && data.touches[0].id!=data.touches[1].id);
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,0,0,false,0,0,0));
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,1,0,false,0,0,0));
+    assert(SDL_SetJoystickVirtualButton(joystick,SDL_GAMEPAD_BUTTON_MISC2,false));
+    pump();
+    data=read_pad();
+    assert(data.buttons==0 && data.touch_count==0);
+
+    /* Trackpad haptics: a tick when a thumb lands, a pulse when it slides 2.5% of the trackpad
+     * (45 ms apart at most); none while the game rumbles. SDL skips a rumble equal to one still
+     * running, so the tick of the touch above ends first. */
+    supplied_settings.rumble=1;
+    usleep(50000);
+    pump();
+    rumbles=0;
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,1,0,true,0.5f,0.5f,1.0f));
+    pump();
+    data=read_pad();
+    assert(rumbles==1 && rumble_low==1800 && rumble_high==7000);
+    usleep(50000);
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,1,0,true,0.53f,0.5f,1.0f));
+    pump();
+    data=read_pad();
+    assert(rumbles==2 && rumble_low==4200 && rumble_high==11000);
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,1,0,false,0,0,0));
+    pump();
+    data=read_pad();
+    static const uint8_t game_rumble[2]={100,0}, motors_off[2]={0,0};
+    assert(pad_vibration(1,game_rumble)==0);
+    const int with_game=rumbles;
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,0,0,true,0.5f,0.5f,1.0f));
+    pump();
+    data=read_pad();
+    assert(data.touch_count==1 && rumbles==with_game);
+    assert(pad_vibration(1,motors_off)==0);
+    assert(SDL_SetJoystickVirtualTouchpad(joystick,0,0,false,0,0,0));
+    pump();
+    data=read_pad();
+    supplied_settings.rumble=0;
+
+    /* One round stick dead zone (0.10): a slow diagonal push past it moves on both axes (a zone
+     * per axis would hold both at the centre); a push inside it reads centred, a full one full. */
+    assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_LEFTX,2621));
+    assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_LEFTY,2621));
+    assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,1638));
+    pump();
+    data=read_pad();
+    assert(data.left_x>128 && data.left_y>128 && data.left_x==data.left_y);
+    assert(data.right_x==128 && data.right_y==128);
+    assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_LEFTX,32767));
+    assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_LEFTY,0));
+    pump();
+    data=read_pad();
+    assert(data.left_x==255 && data.left_y==128);
+    assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_LEFTX,0));
+    assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,0));
+    pump();
+
+    /* scePadResetOrientation: the pose the controller has now becomes the reference. Held on its
+     * side (gravity along x) it reads turned away from upright; after the reset, upright, and it
+     * stays so (the gravity correction does not undo the reset). */
+    const float no_turn[3]={0,0,0}, on_side[3]={SDL_STANDARD_GRAVITY,0,0};
+    assert(SDL_SendJoystickVirtualSensorData(joystick,SDL_SENSOR_GYRO,1,no_turn,3));
+    assert(SDL_SendJoystickVirtualSensorData(joystick,SDL_SENSOR_ACCEL,1,on_side,3));
+    pump();
+    for (int i=0;i<400;++i) data=read_pad();
+    assert(fabsf(data.orientation[3])<0.8f);
+    assert(pad_reset_orientation(1)==0);
+    data=read_pad();
+    assert(fabsf(data.orientation[3])>0.999f);
+    for (int i=0;i<50;++i) data=read_pad();
+    assert(fabsf(data.orientation[3])>0.999f && fabsf(data.acceleration[0]-1.f)<0.01f);
+
+    /* A Valve controller's shake clips at 2 g: the part beyond gravity is doubled, within 4 g;
+     * held still it reads as measured. */
+    float gravity[3], still[3]={0,1,0}, shake[3]={0,2,0}, hard[3]={0,4,0};
+    accel_boost(still,gravity,2,0);
+    assert(still[1]==1);
+    accel_boost(shake,gravity,2,0.01f);
+    assert(shake[1]>2.9f && shake[1]<3.f);
+    accel_boost(hard,gravity,2,0.01f);
+    assert(hard[1]==4);
+
     SDL_CloseJoystick(joystick);
     if (gamepad) SDL_CloseGamepad(gamepad);
     gamepad=NULL;
     assert(SDL_DetachVirtualJoystick(id));
     SDL_Quit();
     unlink(path);
-    puts("PASS: pad ABI, staged left/right clicks, L1 chord, SDL touch coordinates, overlay capture");
+    puts("PASS: pad ABI, staged left/right clicks, L1 chord, SDL touch coordinates, two trackpads, trackpad haptics, touch IDs, orientation reset, accel gain, overlay capture");
 }
