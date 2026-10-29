@@ -1489,6 +1489,10 @@ struct SaveMessageWords {
 SaveMessageWords SaveMessageFor(int kind, int code, u64 value, const std::string& text) {
     const bool pt = UiPortuguese();
     switch (code) {
+    case 102:
+        return {TL("Start a new game?", "Iniciar um novo jogo?"),
+                TL("Starting a new game will replace the automatic saves of your current playthrough. Continue?",
+                   "Iniciar um novo jogo vai substituir os saves automáticos da partida atual. Continuar?"), 3, true};
     case 1:
         return {TL("No saved data", "Nenhum save encontrado"),
                 TL("There is no saved data to load.", "Não há nenhum save para carregar."), 0, false};
@@ -2384,7 +2388,7 @@ void BeginSaveMessage(int kind, int code, u64 value, const std::string& text, in
     message_text = text;
     message_buttons = buttons;
     // Deleting starts on "No"; everything else on the answer the player came for.
-    message_focus = kind == 3 ? 0 : 1;
+    message_focus = kind == 3 || code == 102 ? 0 : 1;
     save_button_rects[0] = save_button_rects[1] = ImRect();
     message_result = -1;
     choice_active = false;
