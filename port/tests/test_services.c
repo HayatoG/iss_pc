@@ -12,10 +12,11 @@ int64_t runtime_file_close(int fd) { (void)fd; return 0; }
 // Native resolution is off in these tests: the full 16:9 frame is safe (runtime_native_resolution.c).
 float runtime_native_safe_area(void) { return 1.0f; }
 static int choice_next=-1, message_next=-1, message_code=0, progress_shown=0, toasts=0;
+static int message_available=1;
 int tlggpu_save_list_begin(int kind, const TlgSaveEntry *entries, int count, int focus) { (void)kind; (void)entries; (void)focus; return count>0; }
 int tlggpu_save_list_poll(void) { return choice_next; }
 int tlggpu_save_message_begin(int kind, int code, uint64_t value, const char *text, int buttons, const TlgSaveEntry *entry) {
-    (void)kind; (void)value; (void)text; (void)buttons; (void)entry; message_code=code; return 1;
+    (void)kind; (void)value; (void)text; (void)buttons; (void)entry; message_code=code; return message_available;
 }
 int tlggpu_save_message_poll(void) { return message_next; }
 void tlggpu_save_dialog_close(void) {}
@@ -61,6 +62,40 @@ int main(void) {
     assert(save_open(param)==0 && save_status()==DIALOG_FINISHED && save_result(result)==0);
     memcpy(&value,result+8,4); assert(value==1);
     assert(save_term()==0);
+
+    /* A new-game request first asks for consent, then preserves the original save question. */
+    {
+        unsigned char usermsg[48]={0}, *usermsg_ptr=usermsg, user[128]={0}, out[256]={0};
+        const char *usertext; uint32_t value;
+        user[52]=2; memcpy(user+80,&usermsg_ptr,8);
+        assert(save_init()==0);
+        usertext="Do you want to save before starting a new game?";
+        memcpy(usermsg+8,&usertext,8); usermsg[0]=1;
+        message_next=-1;
+        assert(save_open(user)==0 && message_code==102 && save_status()==DIALOG_RUNNING);
+        message_next=2;
+        assert(save_status()==DIALOG_FINISHED && save_result(out)==0);
+        memcpy(&value,out+4,4); assert(value==SAVE_RESULT_CANCELED);
+        assert(message_code==102); /* Cancel never opens the original save question. */
+        message_next=-1;
+        assert(save_open(user)==0 && message_code==102);
+        message_next=1;
+        assert(save_status()==DIALOG_RUNNING && message_code==100);
+        message_next=2;
+        assert(save_status()==DIALOG_FINISHED && save_result(out)==0);
+        memcpy(&value,out+4,4); assert(value==0); /* The original "No" is not cancellation. */
+        memcpy(&value,out+8,4); assert(value==SAVE_BUTTON_NO);
+        message_available=0;
+        assert(save_open(user)==0 && save_status()==DIALOG_FINISHED && save_result(out)==0);
+        memcpy(&value,out+4,4); assert(value==SAVE_RESULT_CANCELED);
+        message_available=1; message_next=-1;
+        assert(save_open(user)==0 && save_status()==DIALOG_RUNNING);
+        assert(save_close()==0 && !save_dialog.confirming_new_game);
+        usertext="Do you want to save before loading?";
+        memcpy(usermsg+8,&usertext,8);
+        assert(save_open(user)==0 && message_code==100 && !save_dialog.confirming_new_game);
+        assert(save_term()==0);
+    }
 
     /* Save list: the player's choice comes back as the save directory. */
     char names[2][32]={"SAVE0001","SAVE0002"}, chosen[32];
