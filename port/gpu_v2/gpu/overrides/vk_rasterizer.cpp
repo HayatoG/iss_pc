@@ -71,6 +71,7 @@ namespace iss::diagnostics {void RecordFeedbackBinding(u64 address,u64 size,u64 
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "stencil_face.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -6296,60 +6297,8 @@ void Rasterizer::UpdateDepthStencilState() const {
         regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid();
     dynamic_state.SetStencilTestEnabled(stencil_test_enabled);
     if (stencil_test_enabled) {
-        const StencilOps front_ops{
-            .fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_fail_front),
-            .pass_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zpass_front),
-            .depth_fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zfail_front),
-            .compare_op = LiverpoolToVK::CompareOp(regs.depth_control.stencil_ref_func),
-        };
-        const StencilOps back_ops = regs.depth_control.backface_enable ? StencilOps{
-            .fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_fail_back),
-            .pass_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zpass_back),
-            .depth_fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zfail_back),
-            .compare_op = LiverpoolToVK::CompareOp(regs.depth_control.stencil_bf_func),
-        } : front_ops;
-        dynamic_state.SetStencilOps(front_ops, back_ops);
-
-        const bool stencil_clear = regs.depth_render_control.stencil_clear_enable;
-        const auto front = regs.stencil_ref_front;
-        const auto back =
-            regs.depth_control.backface_enable ? regs.stencil_ref_back : regs.stencil_ref_front;
-        // GCN REPLACE_OP writes DB_STENCILREFMASK.STENCILOPVAL, so a face whose stencil ops
-        // include ReplaceOp takes its Vulkan reference from op_val.
-        const auto& sc = regs.stencil_control;
-        const auto uses_op_val = [](AmdGpu::StencilFunc fail, AmdGpu::StencilFunc zpass,
-                                    AmdGpu::StencilFunc zfail) {
-            return fail == AmdGpu::StencilFunc::ReplaceOp ||
-                   zpass == AmdGpu::StencilFunc::ReplaceOp ||
-                   zfail == AmdGpu::StencilFunc::ReplaceOp;
-        };
-        const bool front_op =
-            uses_op_val(sc.stencil_fail_front, sc.stencil_zpass_front, sc.stencil_zfail_front);
-        const bool back_op =
-            regs.depth_control.backface_enable
-                ? uses_op_val(sc.stencil_fail_back, sc.stencil_zpass_back, sc.stencil_zfail_back)
-                : front_op;
-        const auto ref_conflict = [](AmdGpu::CompareFunc func, const AmdGpu::StencilRefMask& ref) {
-            return func != AmdGpu::CompareFunc::Always && func != AmdGpu::CompareFunc::Never &&
-                   ref.stencil_test_val != ref.stencil_op_val;
-        };
-        if ((front_op && ref_conflict(regs.depth_control.stencil_ref_func, front)) ||
-            (back_op && regs.depth_control.backface_enable &&
-             ref_conflict(regs.depth_control.stencil_bf_func, back))) {
-            // This limitation can occur on hundreds of draws per frame. Preserve the diagnostic
-            // without formatting and enqueueing the same warning on every affected draw.
-            static std::atomic_flag warned = ATOMIC_FLAG_INIT;
-            if (!warned.test(std::memory_order_relaxed) &&
-                !warned.test_and_set(std::memory_order_relaxed)) {
-                LOG_WARNING(Render_Vulkan, "Stencil test requires test_val while ReplaceOp requires "
-                                           "op_val; the stencil test will use op_val (reported once)");
-            }
-        }
-        dynamic_state.SetStencilReferences(front_op ? front.stencil_op_val : front.stencil_test_val,
-                                           back_op ? back.stencil_op_val : back.stencil_test_val);
-        dynamic_state.SetStencilWriteMasks(!stencil_clear ? front.stencil_write_mask : 0U,
-                                           !stencil_clear ? back.stencil_write_mask : 0U);
-        dynamic_state.SetStencilCompareMasks(front.stencil_mask, back.stencil_mask);
+        // iss: GCN's test and replace values on Vulkan's single reference (stencil_face.h).
+        IssStencil::Apply(regs, dynamic_state);
     }
 }
 

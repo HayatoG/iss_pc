@@ -145,15 +145,26 @@ Id EmitFPSqrt(EmitContext& ctx, Id value) {
     return ctx.OpSqrt(ctx.F32[1], value);
 }
 
+// iss: BP05 of this port's renderer (shadPS4 #5257): NaN saturates to 0 like HLSL/DX10_CLAMP.
+// OpFClamp is undefined for NaN, and NVIDIA's driver lets it through: on inFAMOUS a NaN that
+// reached the G-buffer drew wet ground burned to white and decals and foliage black with
+// renderer v2, while this port's renderer (BP05 hit ~28k times in one session) drew them right.
+// NClamp(x, lo, hi) == NMin(NMax(x, lo), hi). Profile::saturate_nan (ISS_SATURATE_NAN=0) for A/B.
 Id EmitFPSaturate32(EmitContext& ctx, Id value) {
     const Id zero{ctx.ConstF32(f32{0.0})};
     const Id one{ctx.ConstF32(f32{1.0})};
+    if (ctx.profile.saturate_nan) {
+        return ctx.OpNMin(ctx.F32[1], ctx.OpNMax(ctx.F32[1], value, zero), one);
+    }
     return ctx.OpFClamp(ctx.F32[1], value, zero, one);
 }
 
 Id EmitFPSaturate64(EmitContext& ctx, Id value) {
     const Id zero{ctx.Constant(ctx.F64[1], f64{0.0})};
     const Id one{ctx.Constant(ctx.F64[1], f64{1.0})};
+    if (ctx.profile.saturate_nan) {
+        return ctx.OpNMin(ctx.F64[1], ctx.OpNMax(ctx.F64[1], value, zero), one);
+    }
     return ctx.OpFClamp(ctx.F64[1], value, zero, one);
 }
 
