@@ -55,6 +55,9 @@ struct Profile {
     /// stores of their uniform loops (see WaveMemoryBarrierPass), for code exchanging data
     /// through memory within a GCN wave.
     bool wave_memory_barriers{};
+    /// S_WQM_B64 grows its mask to whole quads instead of doing nothing (ISS_WQM / TLG_WQM = 0
+    /// turns it off). Part of the profile, so the pipeline cache changes with it.
+    bool whole_quad_mode{};
     bool needs_buffer_offsets{};
     bool needs_unorm_fixup{};
     bool needs_clip_distance_emulation{};

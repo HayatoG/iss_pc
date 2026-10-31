@@ -1281,6 +1281,16 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
             Common::Perf::GetTuning().lds_barriers_multi_wave.load(std::memory_order_relaxed),
         .wave_memory_barriers =
             Common::Perf::GetTuning().wave_memory_barriers.load(std::memory_order_relaxed),
+        // ISS_WQM=0 (or TLG_WQM=0): S_WQM_B64 back to the old no-op, for A/B comparisons.
+        .whole_quad_mode =
+            [] {
+                for (const char* name : {"ISS_WQM", "TLG_WQM"}) {
+                    if (const char* v = std::getenv(name); v && *v) {
+                        return std::atoi(v) != 0;
+                    }
+                }
+                return true;
+            }(),
         .needs_buffer_offsets = instance.StorageMinAlignment() > 4,
         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
@@ -1302,8 +1312,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                             (Shader::dynamic_buffer_stride ? 4u : 0u));
     LOG_INFO(Render_Vulkan,
              "Compute shader LDS barriers for multi wave workgroups: {}, buffer memory barriers "
-             "within split GCN waves: {}",
-             lds_multi_wave, profile.wave_memory_barriers);
+             "within split GCN waves: {}, whole quad mode (S_WQM_B64): {}",
+             lds_multi_wave, profile.wave_memory_barriers, profile.whole_quad_mode);
     // Populate the actual Vulkan cache before preloading known pipelines, so both the
     // preload and later new variations can reuse driver compilation data.
     driver_cache_path = Common::FS::GetUserPath(Common::FS::PathType::CacheDir) /
