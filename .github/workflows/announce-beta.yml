@@ -1,0 +1,92 @@
+# Announce an already published pre-release in the beta Discord channels (#beta-tester and
+# #beta-teste-chat), the same way beta.yml announces the betas it builds. Nothing is built, changed
+# or uploaded: the release (for example a hand-uploaded community beta) stays exactly as published.
+#
+# Actions > Announce beta > Run workflow, type the release tag (for example sunny-beta-2026.11.07).
+# Only pre-releases are announced, never the stable release, and never in #chat-geral.
+#
+# Who may announce (checked before anything is posted):
+#   - only the GitHub accounts in ANNOUNCERS below (the repository owner adds names here);
+#   - each of them only their own releases (the release's author must be the person running it);
+#   - HayatoG, the repository owner, may announce anyone's pre-release.
+# Running a manual workflow already needs write access to this repository, and forks never
+# receive the Discord secrets.
+name: Announce beta
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag of the published pre-release to announce'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  # GitHub user names allowed to announce, separated by spaces.
+  ANNOUNCERS: 'HayatoG sunnyGeezy'
+
+jobs:
+  announce:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check who is announcing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          lower() { tr '[:upper:]' '[:lower:]' <<<"$1"; }
+          allowed=0
+          for name in $ANNOUNCERS; do [[ $(lower "$name") == $(lower "$ACTOR") ]] && allowed=1; done
+          (( allowed )) || { echo "::error::@$ACTOR is not in ANNOUNCERS ($ANNOUNCERS)"; exit 1; }
+          author=$(gh release view "$TAG" --json author --jq .author.login)
+          # The repository owner (HayatoG) may announce anyone's pre-release; everyone else only their own.
+          if [[ $(lower "$ACTOR") != $(lower "$OWNER") && $(lower "$ACTOR") != $(lower "$author") ]]; then
+            who="@$author"; [[ $(lower "$author") == $(lower "$OWNER") ]] || who="@$author or @$OWNER"
+            echo "::error::$TAG was published by @$author; only $who can announce it"; exit 1
+          fi
+          echo "@$ACTOR may announce $TAG (published by @$author)"
+      - name: Notify Discord (beta channels only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          BETA_WEBHOOK: ${{ secrets.DISCORD_BETA_WEBHOOK }}
+          BETA_CHAT_WEBHOOK: ${{ secrets.DISCORD_BETA_CHAT_WEBHOOK }}
+          GAME: InFamous Second Son
+        run: |
+          set -euo pipefail
+          info=$(gh release view "$TAG" --json isPrerelease,isDraft,name,url,author,body,assets)
+          [[ $(jq -r .isDraft <<<"$info") == false ]] || { echo "::error::$TAG is still a draft"; exit 1; }
+          [[ $(jq -r .isPrerelease <<<"$info") == true ]] || { echo "::error::$TAG is not a pre-release; only betas are announced here"; exit 1; }
+          url=$(jq -r .url <<<"$info"); name=$(jq -r .name <<<"$info"); author=$(jq -r .author.login <<<"$info")
+          downloads=$(jq -r '[.assets[] | select(.name | test("\\.zip$")) | "• [\(.name)](\(.url))"] | join("\n")' <<<"$info")
+          [[ -n $downloads ]] || downloads="[$TAG]($url)"
+          # The release's "## New in this release" (or "## Novidades") section, as in beta.yml.
+          news=$(jq -r .body <<<"$info" | tr -d '\r' |
+            awk '/^## (New in this release|Novidades)/ { on = 1; next } /^## / { on = 0 } on' |
+            sed -e '/./,$!d')
+          [[ -n $news ]] || news="See the release notes."
+          payload=$(jq -n \
+            --arg title "🧪 $GAME: $name" --arg url "$url" \
+            --arg intro "Community beta by @$author. It may have bugs: report everything in <#1562973344922603602>." \
+            --arg news "$news" --arg dl "$downloads" --arg foot "Beta · $TAG" '
+            (if ($news | length) > 3300
+             then ($news[:3300] | sub("\n[^\n]*$"; "")) + "\n… [full notes](\($url))"
+             else $news end) as $n
+            | {username: "Betas", allowed_mentions: {parse: []},
+               embeds: [{title: $title, url: $url, description: ($intro + "\n\n" + $n), color: 15105570,
+                fields: [{name: "Downloads", value: $dl}], footer: {text: $foot}}]}')
+          sent=0
+          for hook in "${BETA_WEBHOOK:-}" "${BETA_CHAT_WEBHOOK:-}"; do
+            [[ -n $hook ]] || continue
+            curl -fsS -H 'Content-Type: application/json' -d "$payload" "$hook" && sent=$((sent + 1))
+          done
+          (( sent > 0 )) || { echo "::error::DISCORD_BETA_WEBHOOK / DISCORD_BETA_CHAT_WEBHOOK not set"; exit 1; }
+          echo "Announced $url in $sent beta channel(s)"
