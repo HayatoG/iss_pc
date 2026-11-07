@@ -299,6 +299,8 @@ static struct {
     void *user_data;
     char dirs[32][32];
     int dir_count, has_new, choosing, asking, kind, buttons, progress;
+    int confirming_new_game, pending_buttons;
+    char pending_text[128];
 } save_dialog;
 /* One save's text, date, size and picture for the dialog (strings live in the static buffers). */
 static unsigned char save_params[33][RUNTIME_SAVE_PARAM_SIZE];
@@ -365,6 +367,20 @@ static ABI int32_t save_open(const unsigned char *p) {
         memcpy(&sub,p+80,8);
         if (!sub) break;
         uint32_t buttons; const char *text; memcpy(&buttons,sub,4); memcpy(&text,sub+8,8);
+        /* The game uses this English system-dialog text before starting a new game.
+         * Keep this narrowly scoped: load/save/delete questions retain their behavior. */
+        if (text && !strcmp(text,"Do you want to save before starting a new game?")) {
+            snprintf(save_dialog.pending_text,sizeof(save_dialog.pending_text),"%s",text);
+            save_dialog.pending_buttons=buttons>SAVE_BUTTONS_OK_CANCEL ? 0 : (int)buttons;
+            if (save_ask(102,0,NULL,SAVE_BUTTONS_OK_CANCEL)) {
+                save_dialog.confirming_new_game=1;
+            } else {
+                /* No UI must never silently authorize replacing the autosaves. */
+                save_dialog.result=SAVE_RESULT_CANCELED;
+                dialogs[2].status=DIALOG_FINISHED; dialogs[2].button=0;
+            }
+            return 0;
+        }
         if (buttons==SAVE_BUTTONS_NONE) { tlggpu_save_progress(save_dialog.kind,2,-1,text ? text : ""); break; }
         if (save_ask(100,0,text,buttons>SAVE_BUTTONS_OK_CANCEL ? 0 : (int)buttons)) return 0;
         break;
@@ -417,6 +433,14 @@ static ABI int32_t save_status(void) {
     if (save_dialog.asking) {
         int answer=tlggpu_save_message_poll();
         if (answer!=-1) {
+            if (save_dialog.confirming_new_game) {
+                save_dialog.confirming_new_game=0;
+                save_dialog.asking=0;
+                if (answer==1 && save_ask(100,0,save_dialog.pending_text,save_dialog.pending_buttons)) return DIALOG_RUNNING;
+                save_dialog.result=SAVE_RESULT_CANCELED;
+                dialogs[2].status=DIALOG_FINISHED; dialogs[2].button=0;
+                return DIALOG_FINISHED;
+            }
             save_dialog.asking=0;
             dialogs[2].status=DIALOG_FINISHED;
             /* Yes/OK is button 1; "No" is button 2; "Cancel" of OK/Cancel cancels the dialog. */
@@ -431,6 +455,7 @@ static void save_dialog_gone(void) {
     if (save_dialog.choosing || save_dialog.asking) tlggpu_save_dialog_close();
     if (save_dialog.progress) tlggpu_save_progress(save_dialog.kind,0,0,NULL);
     save_dialog.choosing=save_dialog.asking=save_dialog.progress=0;
+    save_dialog.confirming_new_game=0;
 }
 static ABI int32_t save_term(void) { save_dialog_gone(); return dialog_term(2); }
 static ABI int32_t save_close(void) {
