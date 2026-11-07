@@ -2616,6 +2616,10 @@ const GraphicsPipeline* PipelineCache::TryReuseGraphicsState() {
     return graphics_reuse.pipeline;
 }
 
+// witness_record.inl: ISS_RECORD_WITNESSES, the descriptors of pipelines compiled in play.
+void RecordWitnesses(const std::array<const Shader::Info*, MaxShaderStages>& infos,
+                     const Shader::Gcn::FetchShaderData* fetch);
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params) {
     iss::diagnostics::Scope phase_scope(iss::diagnostics::GraphicsPipeline);
     draw_indirect_params = params;
@@ -2699,6 +2703,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
 
         RegisterPipelineData(graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
+        RecordWitnesses(infos, fetch_shader);
 
         if (EmulatorSettings.IsShaderCollect()) {
             std::scoped_lock lock{module_related_pipelines_mutex};
@@ -3823,4 +3828,5 @@ std::optional<std::vector<u32>> PipelineCache::GetShaderPatch(u64 hash, Shader::
     return code;
 }
 #include "precompile_jobs.inl"
+#include "witness_record.inl"
 } // namespace Vulkan

@@ -138,6 +138,17 @@ class Decision(PrecompileBase):
         self.assertEqual(precompile.generator_version(folder), precompile.generator_version(folder))
         self.assertTrue(precompile.generator_version())            # the real tools/xpps exists
 
+    def test_generator_version_follows_the_witness_table(self):
+        folder = Path(self.tmp.name) / 'xpps'
+        (folder / 'data').mkdir(parents=True)
+        (folder / 'a.py').write_text('x = 1')
+        first = precompile.generator_version(folder)
+        (folder / 'data' / 'CUSA00223-witnesses.json').write_text('{"format": 1, "pairs": {}}')
+        second = precompile.generator_version(folder)
+        self.assertNotEqual(first, second)
+        (folder / 'data' / 'CUSA00223-witnesses.json').write_text('{"format": 1, "pairs": {"0x1:0x2": []}}')
+        self.assertNotEqual(second, precompile.generator_version(folder))
+
 
 class Writing(PrecompileBase):
     def test_success_writes_jobs_and_json_without_leftovers(self):
