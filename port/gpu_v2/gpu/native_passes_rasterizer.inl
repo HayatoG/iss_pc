@@ -751,37 +751,8 @@ static void DrawDynamicState(const AmdGpu::Regs& regs, const Instance& instance,
     const auto stencil_test_enabled = regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid();
     dynamic_state.SetStencilTestEnabled(stencil_test_enabled);
     if (stencil_test_enabled) {
-        const StencilOps front_ops{
-            .fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_fail_front),
-            .pass_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zpass_front),
-            .depth_fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zfail_front),
-            .compare_op = LiverpoolToVK::CompareOp(regs.depth_control.stencil_ref_func),
-        };
-        const StencilOps back_ops = regs.depth_control.backface_enable ? StencilOps{
-            .fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_fail_back),
-            .pass_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zpass_back),
-            .depth_fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zfail_back),
-            .compare_op = LiverpoolToVK::CompareOp(regs.depth_control.stencil_bf_func),
-        } : front_ops;
-        dynamic_state.SetStencilOps(front_ops, back_ops);
-        const bool stencil_clear = regs.depth_render_control.stencil_clear_enable;
-        const auto front = regs.stencil_ref_front;
-        const auto back = regs.depth_control.backface_enable ? regs.stencil_ref_back : regs.stencil_ref_front;
-        const auto& sc = regs.stencil_control;
-        const auto uses_op_val = [](AmdGpu::StencilFunc fail, AmdGpu::StencilFunc zpass,
-                                    AmdGpu::StencilFunc zfail) {
-            return fail == AmdGpu::StencilFunc::ReplaceOp || zpass == AmdGpu::StencilFunc::ReplaceOp ||
-                   zfail == AmdGpu::StencilFunc::ReplaceOp;
-        };
-        const bool front_op = uses_op_val(sc.stencil_fail_front, sc.stencil_zpass_front, sc.stencil_zfail_front);
-        const bool back_op = regs.depth_control.backface_enable
-                                 ? uses_op_val(sc.stencil_fail_back, sc.stencil_zpass_back, sc.stencil_zfail_back)
-                                 : front_op;
-        dynamic_state.SetStencilReferences(front_op ? front.stencil_op_val : front.stencil_test_val,
-                                           back_op ? back.stencil_op_val : back.stencil_test_val);
-        dynamic_state.SetStencilWriteMasks(!stencil_clear ? front.stencil_write_mask : 0U,
-                                           !stencil_clear ? back.stencil_write_mask : 0U);
-        dynamic_state.SetStencilCompareMasks(front.stencil_mask, back.stencil_mask);
+        // iss: GCN's test and replace values on Vulkan's single reference (stencil_face.h).
+        IssStencil::Apply(regs, dynamic_state);
     }
 
     const auto is_list_topology = [](const AmdGpu::PrimitiveType type) {

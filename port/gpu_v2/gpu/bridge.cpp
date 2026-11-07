@@ -505,6 +505,12 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
             else if(name=="asc_yield_packets")set(tuning.asc_yield_packets,value);
             else if(name=="recorder_spin_us")set(tuning.recorder_spin_us,value);
             else if(name=="tiered_compute_pipelines")set(tuning.tiered_compute_pipelines,value);
+            // Compute shaders on hosts with 32 wide subgroups (NVIDIA): the profile reads these two
+            // at start-up (vk_pipeline_cache.cpp) and they are part of the compute shader variant,
+            // so changing them recompiles the compute shaders once. perf_sampler.cpp, which reads
+            // them from perf_tuning.ini, is not built in renderer v2, so this was the only way.
+            else if(name=="lds_barriers_multi_wave")set(tuning.lds_barriers_multi_wave,value);
+            else if(name=="wave_memory_barriers")set(tuning.wave_memory_barriers,value);
             // relaxed_site=<eboot offset> (repeatable, up to 8): reads of GPU written memory from
             // that 256 byte block of the game's code do not wait for the GPU (readback_relaxed_sites).
             else if(name=="relaxed_site"){const u32 n=tuning.num_relaxed_sites.load();if(n<Common::Perf::Tuning::MaxRelaxedSites){tuning.relaxed_sites[n]=std::strtoull(value.c_str(),nullptr,0)&~0xFFull;tuning.num_relaxed_sites.store(n+1);}}
