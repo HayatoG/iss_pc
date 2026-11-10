@@ -143,6 +143,7 @@ class RoundTripTests(Base):
             self.assertEqual(backports_table.effective(item, other_states), backports_table.effective(item, states), item.id)
         self.assertEqual(preset_share.diff(preset, other_settings, other_states), [])
 
+    @unittest.skipIf(backports_table.V1_DISABLED, "renderer 1 off: 'current' (renderer 1) and 'renderer_v2' match alike")
     def test_a_built_in_preset_exports_and_matches_again(self):
         settings, states = dict(DEFAULTS), {i.id: None for i in backports_table.ITEMS}
         gfxlogic.apply_targets(settings, states, gfxlogic.preset_targets('current'))

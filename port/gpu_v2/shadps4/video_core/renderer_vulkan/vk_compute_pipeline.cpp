@@ -118,7 +118,9 @@ void ComputePipeline::CompileVariant(bool fast) {
         .requiredSubgroupSize = 64,
     };
     const vk::PipelineShaderStageCreateInfo shader_ci = {
-        .pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
+        .pNext = instance.IsRequiredSubgroupSize64ValidFor(vk::ShaderStageFlagBits::eCompute)
+                     ? &subgroup_size_ci
+                     : nullptr,
         .stage = vk::ShaderStageFlagBits::eCompute,
         .module = module,
         .pName = "main",

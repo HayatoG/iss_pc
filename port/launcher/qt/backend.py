@@ -112,7 +112,10 @@ class FixesModel(QAbstractListModel):
                'what': what, 'tags': tags, 'shaderWarn': t('fixes_shader_warn') if item.shader else '',
                'changed': states.get(item.id) is not None, 'control': 'switch', 'on': value == '1',
                'value': value if value is not None else 'auto', 'options': [], 'index': 0,
-               'lo': 0, 'hi': 0, 'unit': ''}
+               'lo': 0, 'hi': 0, 'unit': '', 'disabled': False}
+        if item.id in logic.V1_ONLY:
+            renderer = next(i for i in backports_table.ITEMS if i.id == 'TLG_RENDERER')
+            row['disabled'] = backports_table.effective(renderer, states) == '2'
         if item.vtype == 'int':
             row['control'] = 'number'
             row['value'] = '' if states.get(item.id) is None else states[item.id]
@@ -850,6 +853,9 @@ class Backend(QObject):
         self._save_fixes()
         self.fixes.refresh_item(item_id)
         self.advanced.refresh_item(item_id)
+        if item_id == 'TLG_RENDERER':          # the renderer-1-only rows follow it
+            self.fixes.refresh_all()
+            self.advanced.refresh_all()
         self.refresh()
 
     @Slot(str)

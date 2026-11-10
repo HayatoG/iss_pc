@@ -275,6 +275,34 @@ public:
         return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
     }
 
+    /// iss: the stages the driver accepts a required subgroup size on
+    /// (VkPhysicalDeviceSubgroupSizeControlProperties::requiredSubgroupSizeStages).
+    vk::ShaderStageFlags RequiredSubgroupSizeStages() const {
+        return vk13_props.requiredSubgroupSizeStages;
+    }
+
+    /// iss: true when this stage may be created with a required subgroup size of 64: the feature
+    /// must be on, the device must support 64 lanes, and the stage must be listed in
+    /// requiredSubgroupSizeStages (VUID-VkPipelineShaderStageCreateInfo-pNext-02755). AMD's
+    /// Windows driver never lists the vertex stage: RDNA3/4 report 0xf0 (fragment, compute,
+    /// task, mesh), RDNA2 and Polaris 0x20 (compute only), so the vertex (and on RDNA2 the
+    /// fragment) stage of every graphics pipeline was invalid there. Graphics stages need no
+    /// wave64 lowering, as on NVIDIA's 32 lanes. Same rule as the first renderer (port/gpu,
+    /// b37381d).
+    bool IsRequiredSubgroupSize64ValidFor(vk::ShaderStageFlagBits stage) const {
+        return IsSubgroupSize64Supported() && bool(vk13_props.requiredSubgroupSizeStages & stage);
+    }
+
+    /// iss: the subgroup size a compute pipeline runs at: 64 when the driver takes a required size
+    /// for compute (vk_compute_pipeline.cpp), else the device default. The wave64 lowering
+    /// (lower_wave64_pass.cpp, shared_memory_barrier_pass.cpp, compute only) must assume the size
+    /// the pipeline is created with, not the device's default one.
+    u32 ComputeSubgroupSize() const {
+        return IsRequiredSubgroupSize64ValidFor(vk::ShaderStageFlagBits::eCompute)
+                   ? 64u
+                   : vk11_props.subgroupSize;
+    }
+
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
     bool IsWorkgroupMemoryExplicitLayoutSupported() const {
         return workgroup_memory_explicit_layout &&

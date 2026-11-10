@@ -20,6 +20,10 @@ import os
 from collections import namedtuple
 from pathlib import Path
 
+# Test (PR #656, 2026-10-24): renderer v2 on every card and OS, renderer 1 never starts. Saved
+# choices, presets and the Renderer switch are ignored while this is on; False restores the choice.
+V1_DISABLED = True
+
 _WINDOWS = os.name == 'nt'
 
 # group: 'menu' | 'bp' | 'ab'.  vtype: 'bool' | 'choice' | 'int' | 'float'.
@@ -274,14 +278,14 @@ DIAGNOSTICS = [
         ('Compute shaders read each buffer\'s stride from the GPU descriptor instead of compiling it in, so one compiled shader serves every stride. Stops the GPU smoke from flickering (#7, #50).',
          'Os shaders de compute leem o stride de cada buffer do descritor da GPU em vez de compilá-lo, então um shader compilado serve para todos os strides. Acaba com a fumaça da GPU piscando (#7, #50).')),
     _ab('block1d', 'TLG_BLOCK1D', None, True, False, ('BC 1D textures as 2D', 'Texturas BC 1D como 2D'),
-        ('Block-compressed 1D textures as 2D images. Automatic: on for drivers that refuse them, except NVIDIA.',
-         'Texturas 1D comprimidas como imagens 2D. Automático: ligado nos drivers que as recusam, exceto NVIDIA.')),
+        ('Block-compressed 1D textures as 2D images. Automatic: on for drivers that refuse them, except NVIDIA. Renderer 1 only: renderer v2 ignores it.',
+         'Texturas 1D comprimidas como imagens 2D. Automático: ligado nos drivers que as recusam, exceto NVIDIA. Só no renderer 1: o renderer v2 ignora.')),
     _ab('bc_tiny', 'TLG_BC_TINY', None, True, False, ('Tiny BC textures on the CPU', 'Texturas BC minúsculas na CPU'),
-        ('Decodes tiny block-compressed textures on the CPU. Automatic: on for AMD\'s proprietary driver only.',
-         'Decodifica na CPU as texturas comprimidas minúsculas. Automático: ligado só no driver proprietário da AMD.')),
+        ('Decodes tiny block-compressed textures on the CPU. Automatic: on for AMD\'s proprietary driver only. Renderer 1 only: renderer v2 ignores it.',
+         'Decodifica na CPU as texturas comprimidas minúsculas. Automático: ligado só no driver proprietário da AMD. Só no renderer 1: o renderer v2 ignora.')),
     _ab('no_msaa', 'TLG_NO_MSAA', None, True, False, ('Disable multisampling', 'Desligar multisampling'),
-        ('Single-sampled images instead of the guest\'s MSAA. Automatic: on for AMD and Intel on Windows.',
-         'Imagens sem multisampling no lugar do MSAA do jogo. Automático: ligado em AMD e Intel no Windows.')),
+        ('Single-sampled images instead of the guest\'s MSAA. Automatic: on for AMD and Intel on Windows. Renderer 1 only: renderer v2 ignores it.',
+         'Imagens sem multisampling no lugar do MSAA do jogo. Automático: ligado em AMD e Intel no Windows. Só no renderer 1: o renderer v2 ignora.')),
     _ab('async_shaders', 'TLG_ASYNC_SHADERS', False, False, True, ('Asynchronous shader compile', 'Compilação assíncrona de shaders'),
         ('Compiles pipelines off the GPU thread: fewer hitches, but a draw whose pipeline is not ready yet is skipped and the object flashes for a frame. Off by default since 2026-10-16. Also in the in-game menu.',
          'Compila pipelines fora da thread da GPU: menos engasgos, mas um draw cuja pipeline ainda não está pronta é pulado e o objeto pisca por um quadro. Desligada por padrão desde 16/10/2026. Também no menu do jogo.'),
@@ -308,7 +312,7 @@ DIAGNOSTICS = [
     # 11-20 FPS in gameplay with the previous v2 defaults, ~40-45 FPS with native passes and
     # gpu_v2/defaults.env's unified memory off). Linux keeps this port's renderer: native passes
     # crash NVIDIA's Linux driver.
-    _ab_choice('renderer', 'TLG_RENDERER', '2' if _WINDOWS else '1',
+    _ab_choice('renderer', 'TLG_RENDERER', '2' if _WINDOWS or V1_DISABLED else '1',
                (('1', '1 · This port\'s renderer', '1 · Renderer deste port'),
                 ('2', '2 · Renderer v2 (experimental)', '2 · Renderer v2 (experimental)')),
                ('Renderer', 'Renderer'),
@@ -425,6 +429,8 @@ FLOAT_STEPS = {'lod_scale': 0.05, 'region_lod': 0.05, 'region_fade': 0.05, 'near
 
 def effective(item, states):
     """The value the game will use; None for an automatic switch left on automatic."""
+    if V1_DISABLED and item.id == 'TLG_RENDERER':
+        return '2'
     value = states.get(item.id)
     return item.default if value is None else value
 

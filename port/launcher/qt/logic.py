@@ -110,6 +110,9 @@ _GROUP_OF = {
     'BP06': 'exp', 'TLG_RFL_ALL': 'exp', 'TLG_PIPELINE_BINARIES': 'exp', 'TLG_VERBOSE_LOG': 'exp',
 }
 
+# Renderer-1 workarounds: renderer v2 ignores them, so their rows are disabled while it is selected.
+V1_ONLY = frozenset({'TLG_BLOCK1D', 'TLG_BC_TINY', 'TLG_NO_MSAA', 'TLG_IMG_TRACE', 'TLG_BC1D_LOG'})
+
 
 def fix_items():
     """BPnn and A/B rows (the in-game menu options are not part of this screen)."""

@@ -218,6 +218,8 @@ class Graphics(QObject):
                        value=int(value), valueText=f'{int(value)}{item.unit}')
             if rid == 'menu:rcas_strength':
                 row['disabled'] = backports_table.effective(gfxlogic.item_by_id('menu:rcas'), states) != '1'
+        if rid == 'TLG_RENDERER' and backports_table.V1_DISABLED:
+            row['disabled'] = True          # renderer 1 is off in this build (backports_table.V1_DISABLED)
         if rid == 'TLG_NATIVE_PASSES':
             # Native passes only exist in renderer v2.
             row['disabled'] = backports_table.effective(gfxlogic.item_by_id('TLG_RENDERER'), states) != '2'
