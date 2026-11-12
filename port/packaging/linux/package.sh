@@ -62,7 +62,7 @@ cp -r patches "$dest/"
 mkdir -p "$dest/tools"
 cp -r tools/xpps "$dest/tools/"
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
-cp LICENSE packaging/README-player.md "$dest/"
+cp LICENSE packaging/README-player.md packaging/recomplauncher.json "$dest/"
 # The release name (vYYYY.MM.DD-<commit>, as the CI publishes it): the launcher shows it and compares it with the latest release.
 if [[ -n ${GITHUB_SHA:-} ]]; then printf 'v%s-%s\n' "$(date -u +%Y.%m.%d)" "${GITHUB_SHA::7}" > "$dest/VERSION"; fi
 cp packaging/linux/install_desktop.sh packaging/port.env "$dest/"

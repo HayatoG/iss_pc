@@ -989,13 +989,32 @@ def launch(settings, seconds=0, extra_env=None):
     return process, log
 
 
+def take_game_option(argv):
+    """Splits `--game PATH` (or `--game=PATH`) off argv: returns (path or None, the other arguments).
+    Lets a launcher or a shortcut name the game folder without touching the saved settings."""
+    rest = []
+    path = None
+    items = iter(argv)
+    for item in items:
+        if item == '--game':
+            path = next(items, None)
+        elif item.startswith('--game='):
+            path = item[len('--game='):]
+        else:
+            rest.append(item)
+    return path or None, rest
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    game_option, argv = take_game_option(argv)
     attach_stdio()
     seconds = int(argv[0]) if argv and argv[0].isdigit() else 0
     settings = load_settings()
     if os.environ.get('ISS_GAME_DIR'):
         settings['game_dir'] = os.environ['ISS_GAME_DIR']
+    if game_option:
+        settings['game_dir'] = game_option
     if argv[:1] == ['--clear-shader-cache']:
         freed, failures = clear_shader_cache(settings)
         print(f'Cache de shaders: {shader_cache.human_size(freed)} liberados', flush=True)
