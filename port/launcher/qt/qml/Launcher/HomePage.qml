@@ -58,7 +58,7 @@ Item {
             spacing: 6
             Text { text: Backend.heroKicker; color: page.accent; font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 700 }); font.pixelSize: 15
                    font.weight: Font.Bold; font.capitalization: Font.AllUppercase; font.letterSpacing: 4.5 }
-            Text { text: Theme.tr("hero_tagline"); color: "#fff"; font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 800 }); font.pixelSize: 64
+            Text { text: Theme.tr("hero_tagline"); color: "#fff"; font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 800 }); font.pixelSize: page.width < 800 ? 60 : 64
                    font.weight: Font.ExtraBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 3.2
                    lineHeight: 0.95; lineHeightMode: Text.ProportionalHeight }
         }
@@ -170,16 +170,12 @@ Item {
             }
             Column {   // light glare (occlusion): same file/env path as the other switches
                 width: parent.width; spacing: 6
-                Row {
-                    spacing: 12
-                    Text { text: Theme.tr("occlusion"); color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.Bold
-                           anchors.verticalCenter: parent.verticalCenter }
-                    Select {
-                        accent: page.accent; width: 262
-                        model: Backend.occlusionOptions
-                        currentIndex: Backend.occlusionIndex
-                        onActivated: (i) => Backend.setOcclusion(Backend.occlusionOptions[i].value)
-                    }
+                Text { text: Theme.tr("occlusion"); color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.Bold }
+                Select {
+                    accent: page.accent; width: parent.width
+                    model: Backend.occlusionOptions
+                    currentIndex: Backend.occlusionIndex
+                    onActivated: (i) => Backend.setOcclusion(Backend.occlusionOptions[i].value)
                 }
                 Text { width: parent.width; text: Theme.tr("occlusion_hint"); wrapMode: Text.WordWrap; color: Theme.textDim
                        font.family: Theme.fontText; font.pixelSize: 12; lineHeight: 1.25; lineHeightMode: Text.ProportionalHeight }

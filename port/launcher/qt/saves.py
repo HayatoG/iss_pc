@@ -49,11 +49,11 @@ class Saves(QObject):
     def when(self, stamp):
         if not stamp:
             return '—'
-        fmt = '%d/%m/%Y %H:%M' if self.backend.t_.pt() else '%Y-%m-%d %H:%M'
+        fmt = '%Y-%m-%d %H:%M' if self.backend.t_.key() == 'en' else '%d.%m.%Y %H:%M'
         return datetime.datetime.fromtimestamp(stamp).strftime(fmt)
 
     def count(self, n):
-        return self.t('saves_n_one' if n == 1 else 'saves_n_many', n=n)
+        return self.backend.t_.count(n)
 
     def data_dir(self):
         return tlg_run.user_dir()
@@ -431,7 +431,7 @@ class Saves(QObject):
             handlers['all'] = lambda: self._import(plan, [], target)
         buttons.append(('cancel', self.t('saves_cancel'), 'ghost'))
         self.ask(self.t('saves_import_title'),
-                 self.t('saves_import_body', new=self.count(len(new)), old=len(old)),
+                 self.t('saves_import_body', new=self.count(len(new)), old=self.count(len(old))),
                  buttons, handlers, lines)
 
     def _import(self, plan, replace, target):
@@ -443,8 +443,8 @@ class Saves(QObject):
             return
         self.backend.refresh()
         self.reload()
-        self.say(self.t('saves_imported', n=len(result['imported']), r=len(result['replaced']),
-                        s=len(result['skipped'])) + self._backup_note(result['backup']), 'good')
+        self.say(self.backend.t_.plural('saves_imported', len(result['imported']), r=len(result['replaced']),
+                                        s=len(result['skipped'])) + self._backup_note(result['backup']), 'good')
 
     # -- single saves --------------------------------------------------------------------------------------------------
     @Slot(str)

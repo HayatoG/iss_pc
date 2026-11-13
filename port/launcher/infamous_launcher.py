@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""inFAMOUS Second Son launcher (Tkinter, Linux and Windows), in pt_BR and en_US.
+"""inFAMOUS Second Son launcher (Tkinter, Linux and Windows), in ru_RU, pt_BR and en_US.
 
 Game folder, game and interface language, display, FPS overlay and VRAM budget; Play starts the
 game through infamous_run.py (the same code path as run_infamous.sh) and shows its log.
 Settings live in ~/.config/infamous-launcher/settings.json (%APPDATA% on Windows).
 """
-import locale
+import json
 import multiprocessing
 import os
 from pathlib import Path
@@ -23,6 +23,7 @@ import dlss_setup  # noqa: E402
 import infamous_run as tlg_run  # noqa: E402  (same API as the TLG core)
 import logtail  # noqa: E402
 import native_resolution  # noqa: E402
+import plural_ru  # noqa: E402
 import precompile  # noqa: E402
 import preset_share  # noqa: E402
 
@@ -170,9 +171,37 @@ GAME_LANGUAGE_NAMES = {'en': 'English', 'en_GB': 'English (UK)', 'pt_BR': 'Portu
                        'hu': 'Magyar', 'el': 'Ελληνικά', 'ro': 'Română', 'fi': 'Suomi', 'sv': 'Svenska', 'da': 'Dansk',
                        'no': 'Norsk', 'ar': 'العربية', 'ja': '日本語', 'ko': '한국어', 'zh_TW': '繁體中文',
                        'zh_CN': '简体中文', 'th': 'ไทย', 'vi': 'Tiếng Việt', 'id': 'Bahasa Indonesia'}
-UI_LANGUAGES = ['auto', 'pt_BR', 'en_US']
-UI_LANGUAGE_NAMES = {'pt_BR': 'Português (Brasil)', 'en_US': 'English (US)'}
+UI_LANGUAGES = ['auto', 'pt_BR', 'en_US', 'ru_RU']
+UI_LANGUAGE_NAMES = {'pt_BR': 'Português (Brasil)', 'en_US': 'English (US)', 'ru_RU': 'Русский'}
 DISPLAY_MODES = ['Windowed', 'Borderless', 'Fullscreen']
+
+_QT_STRINGS = None
+_QT_PAIRS = None
+
+
+def qt_strings():
+    """The Qt launcher's i18n table (i18n/strings.json). It has every TEXT key plus Russian, so the
+    classic launcher can use one table for all three languages; empty if the file is absent."""
+    global _QT_STRINGS
+    if _QT_STRINGS is None:
+        folder = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+        try:
+            _QT_STRINGS = json.loads((folder / 'qt' / 'i18n' / 'strings.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            _QT_STRINGS = {}
+    return _QT_STRINGS
+
+
+def qt_pairs():
+    """Russian for the (en, pt) tuples of backports_table/advanced_table (qt/i18n/pairs_ru.json)."""
+    global _QT_PAIRS
+    if _QT_PAIRS is None:
+        folder = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+        try:
+            _QT_PAIRS = json.loads((folder / 'qt' / 'i18n' / 'pairs_ru.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            _QT_PAIRS = {}
+    return _QT_PAIRS
 
 
 def art_path(settings, name):
@@ -183,15 +212,18 @@ def art_path(settings, name):
     return None
 
 
+def system_language():
+    """The interface language the system asks for: Russian, Portuguese or English."""
+    code = tlg_run.system_game_language()
+    if code.startswith('ru'):
+        return 'ru_RU'
+    if code.startswith('pt'):
+        return 'pt_BR'
+    return 'en_US'
+
+
 def system_is_portuguese():
-    for name in ('LC_ALL', 'LC_MESSAGES', 'LANG'):
-        value = os.environ.get(name)
-        if value:
-            return value.lower().startswith('pt')
-    try:
-        return (locale.getlocale()[0] or '').lower().startswith('pt')
-    except ValueError:
-        return False
+    return system_language() == 'pt_BR'
 
 
 class Launcher:
@@ -210,13 +242,40 @@ class Launcher:
             self.root.after(400, self.show_notice)
 
     # -- language ---------------------------------------------------------------------------
-    def pt(self):
+    def lang(self):
         choice = self.settings.get('ui_language', 'auto')
-        return system_is_portuguese() if choice == 'auto' else choice == 'pt_BR'
+        return choice if choice in ('ru_RU', 'pt_BR', 'en_US') else system_language()
+
+    def pt(self):
+        return self.lang() == 'pt_BR'
 
     def t(self, key, **fmt):
+        if self.lang() == 'ru_RU':
+            entry = qt_strings().get(key)
+            if entry and entry.get('ru'):
+                try:
+                    return entry['ru'].format(**fmt)
+                except (KeyError, IndexError):
+                    return entry['ru']
+        if key not in TEXT:
+            entry = qt_strings().get(key)
+            if entry:
+                text = entry['pt'] if self.pt() else entry['en']
+                try:
+                    return text.format(**fmt)
+                except (KeyError, IndexError):
+                    return text
+            return key
         en, pt = TEXT[key]
         return (pt if self.pt() else en).format(**fmt)
+
+    def plural(self, key, n, **fmt):
+        text = self.t(key, n=n, **fmt)
+        return plural_ru.pick(text, n) if self.lang() == 'ru_RU' else text
+
+    def count(self, n):
+        key = 'saves_n_one' if n == 1 and self.lang() != 'ru_RU' else 'saves_n_many'
+        return self.plural(key, n)
 
     # -- window -----------------------------------------------------------------------------
     def build(self):
@@ -336,7 +395,7 @@ class Launcher:
         occ_box = ttk.LabelFrame(middle, text=self.t('occlusion'), padding=8)
         occ_box.grid(sticky='ew', pady=(8, 0))
         occ_box.columnconfigure(0, weight=1)
-        occ_options = [(v, (pt if self.pt() else en) + (f' ({self.t("exp_default")})' if v == occ_item.default else ''))
+        occ_options = [(v, self.exp_name((en, pt)) + (f' ({self.t("exp_default")})' if v == occ_item.default else ''))
                        for v, en, pt in occ_item.choices]
         occ_value = backports_table.effective(occ_item, self.exp_states)
         occ_combo = ttk.Combobox(occ_box, values=[o[1] for o in occ_options], state='readonly')
@@ -359,7 +418,7 @@ class Launcher:
         ttk.Label(log_box, text=self.t('verbose_log_hint'), foreground='#777', wraplength=360,
                   justify='left').grid(row=1, column=0, sticky='w', pady=(6, 0))
 
-        log_frame = ttk.LabelFrame(main, text='Log', padding=4)
+        log_frame = ttk.LabelFrame(main, text=self.t('log_title'), padding=4)
         log_frame.grid(row=2, column=2, sticky='nsew', **pad)
         self.log = tk.Text(log_frame, wrap='none', font=('TkFixedFont', 9), state='disabled', width=60)
         scroll = ttk.Scrollbar(log_frame, command=self.log.yview)
@@ -758,7 +817,7 @@ class Launcher:
 
     def exp_status_text(self):
         n = backports_table.changes(self.exp_states)
-        return self.t('exp_profile_rec') if n == 0 else self.t('exp_profile_custom', n=n)
+        return self.t('exp_profile_rec') if n == 0 else self.plural('exp_profile_custom', n)
 
     def exp_refresh_status(self):
         label = getattr(self, 'exp_status', None)
@@ -766,6 +825,8 @@ class Launcher:
             label.configure(text=self.exp_status_text())
 
     def exp_name(self, pair):
+        if self.lang() == 'ru_RU':
+            return qt_pairs().get(pair[0], pair[0])
         return pair[1] if self.pt() else pair[0]
 
     def exp_save(self):
@@ -824,7 +885,8 @@ class Launcher:
             messagebox.showerror(title, '\n'.join(preset_share.problem_text(p, self.t) for p in problems), parent=parent)
             return
         changes = preset_share.diff(preset, self.settings, self.exp_states)
-        body, lines = preset_share.summary_lines(preset, problems, changes, self.t, self.pt())
+        body, lines = preset_share.summary_lines(preset, problems, changes, self.t, self.pt(),
+                                                 ru=qt_pairs() if self.lang() == 'ru_RU' else None)
         text = '\n'.join([body, ''] + ['• ' + line for line in lines])
         if not changes:
             messagebox.showinfo(title, text, parent=parent)
@@ -950,9 +1012,10 @@ class Launcher:
                 if item.vtype == 'bool':  # automatic
                     options = [(None, self.t('exp_auto')), ('1', self.t('exp_on')), ('0', self.t('exp_off'))]
                 else:
-                    options = [(v, (pt if self.pt() else en) + (f' ({self.t("exp_default")})' if v == item.default else ''))
+                    options = [(v, self.exp_name((en, pt)) + (f' ({self.t("exp_default")})' if v == item.default else ''))
                                for v, en, pt in item.choices]
-                box = ttk.Combobox(row, values=[o[1] for o in options], state='readonly', width=26)
+                box = ttk.Combobox(row, values=[o[1] for o in options], state='readonly',
+                                   width=min(60, max(26, max(len(o[1]) for o in options) + 2)))
                 box.current(next((i for i, o in enumerate(options) if o[0] == value), 0))
                 box.grid(row=0, column=1, padx=6)
                 box.bind('<<ComboboxSelected>>', lambda _, o=options, b=box, i=item: self.exp_set(i, o[b.current()][0]))

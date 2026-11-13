@@ -124,10 +124,9 @@ class Support(QObject):
     @Property('QVariantList', notify=changed)
     def known(self):
         gpu = self._info.get('gpu') if self._info else None
-        pt = self.backend.t_.pt()
+        lang = self.backend.t_.key()
         rows = []
         for issue in report.known_for(self._issues, gpu, self.os_key()):
-            lang = 'pt' if pt else 'en'
             rows.append({'title': issue['title'][lang], 'what': issue['what'][lang], 'matched': issue['matched'],
                          'issues': ', '.join(f'#{n}' for n in issue.get('issues', []))})
         return rows
@@ -145,14 +144,14 @@ class Support(QObject):
     # -- step 2: the log ---------------------------------------------------------------------------
     @Property('QVariantList', notify=changed)
     def logs(self):
-        pt = self.backend.t_.pt()
+        en = self.backend.t_.key() == 'en'
         rows = []
         for n, path in enumerate(self._logs[:30]):
             try:
                 stat = path.stat()
             except OSError:
                 continue
-            when = datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%d/%m/%Y %H:%M' if pt else '%Y-%m-%d %H:%M')
+            when = datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M' if en else '%d.%m.%Y %H:%M')
             rows.append({'name': path.name, 'when': when, 'size': f'{stat.st_size / 2 ** 20:.1f} MB' if stat.st_size > 2 ** 20
                          else f'{stat.st_size / 1024:.0f} KB', 'selected': n == self._log_index,
                          'latest': n == 0})
@@ -233,7 +232,7 @@ class Support(QObject):
         gpu = self._info.get('gpu') if self._info else None
         known = report.known_for(self._issues, gpu, self.os_key())
         for k in known:
-            k['title'] = k['title']['pt' if self.backend.t_.pt() else 'en']
+            k['title'] = k['title'][self.backend.t_.key()]
         if short:
             text = report.short_report(rows, summary, self.t)
             if self._description.strip():

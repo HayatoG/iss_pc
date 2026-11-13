@@ -31,7 +31,7 @@ caminho de início do jogo (`infamous_run`). `--play`, `--script` e `--clear-sha
 ## Autoteste
 
 `"inFAMOUS Second Son" --selftest` (Qt) sobe o QML na plataforma `offscreen` com o renderizador de
-software, confere QML, fontes, ícone e traduções (pt-BR e en-US completas), visita todas as telas,
+software, confere QML, fontes, ícone e traduções (pt-BR, en-US e ru-RU completas), visita todas as telas,
 renderiza um quadro e imprime `selftest ok` (código 0). Se faltar algo, imprime `selftest FAILED: ...`
 e sai com código diferente de 0. Não lê as configurações nem os saves do jogador (usa uma pasta
 temporária), não inicia o jogo. Como o `.exe` do Windows é "windowed" (sem console), o resultado

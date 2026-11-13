@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Writes the "what changed" part of the release notes (en-US, then pt-BR) to stdout: every PR
+# Writes the "what changed" part of the release notes (en-US, pt-BR, then ru-RU) to stdout: every PR
 # merged since the previous release, with the issues it fixes and who opened them.
 #
 # Each PR body carries its notes between these markers (one "- " line per change):
@@ -9,7 +9,10 @@
 #   <!-- notes:en-US -->
 #   - Fixes ... (#18)
 #   <!-- /notes -->
-# A PR without the markers falls back to its title (in both sections).
+#   <!-- notes:ru-RU -->
+#   - Исправляет ... (#18)
+#   <!-- /notes -->
+# A PR without the markers falls back to its title (in every section).
 # Usage: release_notes.sh <commit sha>   (needs GH_TOKEN and GH_REPO)
 set -euo pipefail
 sha=$1
@@ -34,17 +37,19 @@ block() {  # block <body> <lang>
   ' <<<"$1"
 }
 declare -A authors
-pt=""; en=""
+pt=""; en=""; ru=""
 for n in $prs; do
   json=$(gh pr view "$n" --json title,body,closingIssuesReferences)
   title=$(jq -r .title <<<"$json"); body=$(jq -r '.body // ""' <<<"$json")
-  p=$(block "$body" pt-BR); e=$(block "$body" en-US)
+  p=$(block "$body" pt-BR); e=$(block "$body" en-US); r=$(block "$body" ru-RU)
   [[ -n $p ]] || p="- $title"
   [[ -n $e ]] || e="- $title"
+  [[ -n $r ]] || r="- $title"
   while IFS= read -r line; do pt+="$line (PR #$n)"$'\n'; done <<<"$p"
   while IFS= read -r line; do en+="$line (PR #$n)"$'\n'; done <<<"$e"
+  while IFS= read -r line; do ru+="$line (PR #$n)"$'\n'; done <<<"$r"
   # Issues: the ones the PR closes plus every #N its notes mention.
-  for i in $(jq -r '.closingIssuesReferences[]?.number' <<<"$json") $(grep -o '#[0-9]\+' <<<"$p$e" | tr -d '#'); do
+  for i in $(jq -r '.closingIssuesReferences[]?.number' <<<"$json") $(grep -o '#[0-9]\+' <<<"$p$e$r" | tr -d '#'); do
     [[ -n ${authors[$i]:-} ]] && continue
     a=$(gh api "repos/$GH_REPO/issues/$i" --jq 'select(.pull_request == null) | .user.login' 2>/dev/null || true)
     [[ -n $a ]] && authors[$i]=$a
@@ -63,4 +68,8 @@ echo
 echo "## Novidades"
 printf '%s' "$pt"
 [[ -n $thanks ]] && echo && echo "Issues relatadas por: $thanks. Obrigado!"
+echo
+echo "## Что нового"
+printf '%s' "$ru"
+[[ -n $thanks ]] && echo && echo "Сообщили: $thanks. Спасибо!"
 echo

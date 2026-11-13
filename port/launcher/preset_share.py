@@ -269,7 +269,13 @@ def problem_text(problem, t):
     return t('ps_p_' + problem.code, detail=problem.detail)
 
 
-def _value_text(item, value, t, pt):
+def _pair(pair, pt, ru=None):
+    if ru is not None:
+        return ru.get(pair[0], pair[0])
+    return pair[1] if pt else pair[0]
+
+
+def _value_text(item, value, t, pt, ru=None):
     if value is None:
         return t('exp_auto')
     if item is None:
@@ -279,11 +285,11 @@ def _value_text(item, value, t, pt):
     if item.vtype == 'choice':
         for v, en, pt_name in item.choices:
             if v == value:
-                return pt_name if pt else en
+                return _pair((en, pt_name), pt, ru)
     return f'{value}{item.unit}'
 
 
-def change_text(change, t, pt):
+def change_text(change, t, pt, ru=None):
     kind, key, old, new = change
     if kind == 'setting':
         try:
@@ -293,13 +299,13 @@ def change_text(change, t, pt):
         if key == 'gpu_readbacks':
             old, new = t('readbacks_' + str(old)), t('readbacks_' + str(new))
             return t('ps_change', label=label, old=old, new=new)
-        return t('ps_change', label=label, old=_value_text(None, old, t, pt), new=_value_text(None, new, t, pt))
+        return t('ps_change', label=label, old=_value_text(None, old, t, pt, ru), new=_value_text(None, new, t, pt, ru))
     item = next(i for i in backports_table.ITEMS if i.id == key)
-    label = item.name[1] if pt else item.name[0]
-    return t('ps_change', label=label, old=_value_text(item, old, t, pt), new=_value_text(item, new, t, pt))
+    label = _pair(item.name, pt, ru)
+    return t('ps_change', label=label, old=_value_text(item, old, t, pt, ru), new=_value_text(item, new, t, pt, ru))
 
 
-def summary_lines(preset, problems, changes, t, pt, limit=8):
+def summary_lines(preset, problems, changes, t, pt, limit=8, ru=None):
     """(body, lines) for the import confirmation: counts, the first changes, then every problem."""
     name = preset['profile'] or preset['names']['en'] or '?'
     if changes:
@@ -308,7 +314,7 @@ def summary_lines(preset, problems, changes, t, pt, limit=8):
         body = t('ps_import_nothing', name=name)
     if preset['what']['en']:
         body += '\n' + t('ps_import_what', what=preset['what']['en'])
-    lines = [change_text(c, t, pt) for c in changes[:limit]]
+    lines = [change_text(c, t, pt, ru) for c in changes[:limit]]
     if len(changes) > limit:
         lines.append(t('ps_more', n=len(changes) - limit))
     lines += [problem_text(p, t) for p in problems]

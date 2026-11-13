@@ -164,6 +164,12 @@ class RoundTripTests(Base):
         self.assertEqual(len(lines), 4)
         self.assertTrue(any('LOD distance' in line and '2x' in line for line in lines))
 
+    def test_diff_texts_in_russian(self):
+        preset, _ = preset_share.parse_preset(self.valid(items={'menu:lod_scale': '2'}))
+        changes = preset_share.diff(preset, dict(DEFAULTS), {i.id: None for i in backports_table.ITEMS})
+        body, lines = preset_share.summary_lines(preset, [], changes, t, False, ru=logic.load_pairs())
+        self.assertTrue(any('Дальность LOD' in line for line in lines), lines)
+
 
 class ValidationTests(Base):
     def read(self, data):

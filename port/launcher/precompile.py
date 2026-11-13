@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import threading
 import time
 
@@ -306,13 +307,44 @@ TEXT = {
 }
 
 
+_RU_TEXTS = None
+
+
 def message(key, settings=None, **fmt):
     """TEXT[key] in the launcher's language (the Tk and Qt launchers merge TEXT into their own)."""
+    settings = settings or {}
+    if _russian(settings):
+        text = _russian_texts().get(key)
+        if text:
+            try:
+                return text.format(**fmt)
+            except (KeyError, IndexError):
+                return text
     pair = TEXT[key]
     try:
-        return pair[1 if _portuguese(settings or {}) else 0].format(**fmt)
+        return pair[1 if _portuguese(settings) else 0].format(**fmt)
     except (KeyError, IndexError):
         return pair[0]
+
+
+def _russian_texts():
+    """The 'ru' column of the Qt launcher's strings.json; empty when the file is absent."""
+    global _RU_TEXTS
+    if _RU_TEXTS is None:
+        try:
+            base = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
+            path = base / 'qt' / 'i18n' / 'strings.json'
+            _RU_TEXTS = {k: v['ru'] for k, v in json.loads(path.read_text(encoding='utf-8')).items() if v.get('ru')}
+        except (OSError, ValueError, KeyError):
+            _RU_TEXTS = {}
+    return _RU_TEXTS
+
+
+def _russian(settings):
+    choice = settings.get('ui_language', 'auto')
+    if choice != 'auto':
+        return choice == 'ru_RU'
+    return tlg_run.system_game_language() == 'ru'
 
 
 def _portuguese(settings):

@@ -98,20 +98,34 @@ def update_available(current, latest):
 
 
 # ----------------------------------------------------------------------------------------- notes
-_SECTION_TITLES = {'pt': ('novidades',), 'en': ("what's new", 'whats new', 'what’s new')}
+_SECTION_TITLES = {'pt': ('novidades',), 'en': ("what's new", 'whats new', 'what’s new'),
+                   'ru': ('что нового', 'новости')}
+_LANG_TAGS = {'pt': 'pt-BR', 'en': 'en-US', 'ru': 'ru-RU'}
 
 
-def extract_notes(body, portuguese):
+def extract_notes(body, portuguese, russian=False):
     """The release notes in the interface language. The body the CI writes has a "## Novidades"
-    (pt-BR) and a "## What's new" (en-US) section; <!-- notes:pt-BR --> ... <!-- /notes --> blocks
-    (the PR format of release_notes.sh) are understood too. Other text is kept only when neither
-    exists, so a hand-written release still shows something."""
+    (pt-BR), a "## What's new" (en-US) and a "## Что нового" (ru-RU) section; <!-- notes:pt-BR --> ...
+    <!-- /notes --> blocks (the PR format of release_notes.sh) are understood too. Russian falls
+    back to the English notes when the release has no Russian section. Other text is kept only when
+    neither exists, so a hand-written release still shows something."""
     body = (body or '').replace('\r\n', '\n').replace('\r', '\n')
-    lang = 'pt-BR' if portuguese else 'en-US'
-    blocks = re.findall(r'<!--\s*notes:' + lang + r'\s*-->(.*?)<!--\s*/notes\s*-->', body, re.S | re.I)
-    if blocks:
-        return _clean('\n'.join(blocks))
-    wanted = _SECTION_TITLES['pt' if portuguese else 'en']
+    for lang in (('ru', 'en') if russian else ('pt' if portuguese else 'en',)):
+        blocks = re.findall(r'<!--\s*notes:' + _LANG_TAGS[lang] + r'\s*-->(.*?)<!--\s*/notes\s*-->',
+                            body, re.S | re.I)
+        if blocks:
+            return _clean('\n'.join(blocks))
+        notes, found = _section_notes(body, lang)
+        if found and notes.strip():
+            return notes
+    if re.search(r'^#{1,3}\s*(novidades|what.s new|что нового|новости)\s*$', body, re.M | re.I):
+        return ''
+    return _clean(re.sub(r'<!--.*?-->', '', body, flags=re.S))
+
+
+def _section_notes(body, lang):
+    """(the lines under a section of that language, whether the section exists)."""
+    wanted = _SECTION_TITLES[lang]
     lines, on, found = [], False, False
     for line in body.split('\n'):
         heading = re.match(r'^#{1,3}\s*(.+?)\s*#*$', line)
@@ -125,11 +139,7 @@ def extract_notes(body, portuguese):
             continue
         if on:
             lines.append(line)
-    if found:
-        return _clean('\n'.join(lines))
-    if re.search(r'^#{1,3}\s*(novidades|what.s new)\s*$', body, re.M | re.I):
-        return ''
-    return _clean(re.sub(r'<!--.*?-->', '', body, flags=re.S))
+    return _clean('\n'.join(lines)), found
 
 
 def _clean(text):

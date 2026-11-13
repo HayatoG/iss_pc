@@ -56,12 +56,12 @@ By **HayatoG** · YouTube [@hayatog-dev](https://www.youtube.com/@hayatog-dev) �
 
 ## What's new
 
-- **New launcher (Qt Quick), now the default:** 10 screens, including **Mods / Cheats** and **Advanced**, the interface in Portuguese and English, and the game language following the system's by default. The old launcher (Tk) stays in the package as **inFAMOUS Second Son (classic)**, as a fallback. See [The launcher](#the-launcher).
+- **New launcher (Qt Quick), now the default:** 10 screens, including **Mods / Cheats** and **Advanced**, the interface in Portuguese, English and Russian, and the game language following the system's by default. The old launcher (Tk) stays in the package as **inFAMOUS Second Son (classic)**, as a fallback. See [The launcher](#the-launcher).
 - **Saves and data:** a configurable data folder, a backup before every play session, `.zip` export/import, duplicate and delete saves, and a search for saves from other installs. It fixes the "I lost my save after updating" problem. See [Saves and data](#saves-and-data).
 - **Flickering headlights and glare that showed through characters: fixed.** The occlusion counter the game reads to know how much of a light is visible was a fake; the new mode 3 (the default) answers with zero counts, and that fixed the problem, **confirmed on Windows and on Linux**. See [Lights and occlusion](#lights-and-occlusion).
 - **Experimental fixes BP01–BP12:** twelve fixes brought from other PS4 ports and from shadPS4, each with its own switch, a Recommended profile and a "Like the previous release" button to compare. See [Experimental fixes](#experimental-fixes).
 - **More useful logs:** every log starts with a `Config:` block (your options, no paths) and shows the `Backports:` lines; the **Support** screen builds the report without personal data. See [Logs and reports](#logs-and-reports).
-- **Controller guides:** ready-made images (Xbox, Switch Pro and 8BitDo, in Portuguese and English) of sensor mode and the touchpad, in [Motion sensor and touchpad](#motion-sensor-and-touchpad) and in the launcher's **Controller guides** screen.
+- **Controller guides:** ready-made images (Xbox, Switch Pro and 8BitDo, in Portuguese, English and Russian) of sensor mode and the touchpad, in [Motion sensor and touchpad](#motion-sensor-and-touchpad) and in the launcher's **Controller guides** screen.
 - **CPUs without F16C (Sandy Bridge, #51):** the game's 13 half-precision conversions (`VCVTPH2PS`/`VCVTPS2PH`) are now emulated at start, bit-exact with the CPU (rounding, denormals, Inf and NaN). The game used to stop with "13 sites use encodings the rewrite cannot emulate".
 - **Mouse:** the mouse turns the camera (right stick) and also plays the **touchpad**. Left = R2, right = L2, middle = R3. **Hold Left Ctrl (or the X1 side button)** and the mouse becomes a finger on the touchpad: left touches/clicks (hold = absorb a power), dragging with the left slides (the "Open Door" swipe, the scanner), right = two fingers (lift the car off Reggie). The window captures the mouse; Esc releases it and a click captures it again. See [Mouse](#mouse).
 - **Graffiti steps on screen:** the first time sensor mode turns on, a screen in the middle shows the steps (shake, spray, aim, leave) with your controller's buttons; "Got it" closes it. The Insert menu has a new **Controls** tab that shows it again and sets the **graffiti aiming speed** (25–200%, also `ISS_SENSOR_AIM`).
@@ -101,7 +101,7 @@ By **HayatoG** · YouTube [@hayatog-dev](https://www.youtube.com/@hayatog-dev) �
 | Stutter | 🔧 The first time each shader is compiled (cutscenes and new areas) |
 | Lights (flickering headlights, glare showing through characters) | ✅ Fixed by occlusion mode 3 (default), confirmed on Windows and on Linux; if light glare looks weak, use mode 0 |
 | Graphics | 🔧 Some fog, water and fire effects still flicker |
-| Launcher | ✅ Qt Quick (default) with the Tk one as a fallback; Portuguese and English |
+| Launcher | ✅ Qt Quick (default) with the Tk one as a fallback; Portuguese, English and Russian |
 | Saves and data | ✅ Configurable folder, backup, export/import |
 | Mouse (camera and touchpad) | 🧪 Implemented, not yet tested much in game |
 | Experimental fixes (BP01–BP12) | 🧪 The ones on by default come in the Recommended profile; BP07 and BP09 (off) are experimental; BP06 and BP08 are on by default |
@@ -175,13 +175,13 @@ The launcher is the program that opens when you run **inFAMOUS Second Son**. The
 | **Controls** | stick dead zone, graffiti aiming speed, mouse (camera and touchpad mode), keyboard map and remapping |
 | **Fixes** | BP01–BP12, diagnostic (A/B) switches and Insert menu options; Recommended profile and "Like the previous release" |
 | **Saves & data** | data folder, list of saves, backups, `.zip` export/import; see [Saves and data](#saves-and-data) |
-| **Controller guides** | Xbox, Switch Pro and 8BitDo images (Portuguese and English): save, copy, open the folder |
+| **Controller guides** | Xbox, Switch Pro and 8BitDo images (Portuguese, English and Russian): save, copy, open the folder |
 | **Support** | known problems for your GPU, links and the problem report; see [Logs and reports](#logs-and-reports) |
 | **Mods / Cheats** | enables cheat XML files and the optional boot logo movie skip (story cutscenes remain unchanged) |
 | **Advanced** | additional launcher and port settings |
 | **Updates** | shows the installed version and checks the latest release (see below) |
 
-**Interface language:** Portuguese (Brazil) or English (US), which the launcher picks from the system language and you can change. When you pick one, the launcher passes it to the game (`ISS_UI_LANG`) for the overlay.
+**Interface language:** Portuguese (Brazil), English (US) or Russian, which the launcher picks from the system language and you can change. When you pick one, the launcher passes it to the game (`ISS_UI_LANG`) for the overlay.
 
 **Game language:** the first option is **Automatic (system language)**, the default, followed by the languages your dump's `sce_sys/playgo-chunk.dat` lists, out of the PS4's 30 (US and UK English, Brazilian and European Portuguese, Latin American and Spain Spanish, French and Canadian French, German, Italian, Dutch, Polish, Turkish, Russian, Japanese, Korean, Chinese and more); without that file (FTP dumps) the 6 of CUSA00223: English (1), Português (Brasil) (17), Español (Latinoamérica) (20), Français (Canada) (22), Türkçe (19) and Русский (8). Automatic follows the system's language and region (es_ES is Spain Spanish, es_MX Latin American, pt_PT European Portuguese) and, when the game lacks that language, the closest variant (Spain/Latin American Spanish, European/Brazilian Portuguese...), else English. The choice applies on the next start and becomes `ISS_LANGUAGE` (an `ISS_LANGUAGE` you set yourself wins). **It only works if your game files have that language:** Turkish and Russian, for example, only show up if your dump has them. It is separate from the interface language.
 
@@ -443,12 +443,12 @@ As capturas estão no topo da página.
 
 ## Novidades
 
-- **Launcher novo (Qt Quick), agora o padrão:** com 10 telas, incluindo **Mods / Cheats** e **Avançado**, interface em português e inglês e o idioma do jogo seguindo o do sistema por padrão. O launcher antigo (Tk) continua no pacote como **inFAMOUS Second Son (classic)**, de reserva. Veja [O launcher](#o-launcher).
+- **Launcher novo (Qt Quick), agora o padrão:** com 10 telas, incluindo **Mods / Cheats** e **Avançado**, interface em português, inglês e russo e o idioma do jogo seguindo o do sistema por padrão. O launcher antigo (Tk) continua no pacote como **inFAMOUS Second Son (classic)**, de reserva. Veja [O launcher](#o-launcher).
 - **Saves e dados:** pasta de dados configurável, backup antes de cada partida, exportar/importar `.zip`, duplicar e excluir saves, e a busca de saves de outras instalações. Resolve o "perdi meu save depois de atualizar". Veja [Saves e dados](#saves-e-dados).
 - **Faróis piscando e brilho que atravessava personagens: corrigido.** O contador de oclusão que o jogo lê para saber quanto de uma luz está visível era falso; o novo modo 3 (o padrão) devolve contagem zero, e isso corrigiu o problema, **confirmado no Windows e no Linux**. Veja [Luzes e oclusão](#luzes-e-oclusão).
 - **Correções experimentais BP01–BP12:** doze correções trazidas de outros ports de PS4 e do shadPS4, com chave individual, perfil Recomendado e o "Como a release anterior" para comparar. Veja [Correções experimentais](#correções-experimentais).
 - **Logs mais úteis:** todo log começa com um bloco `Config:` (suas opções, sem caminhos) e mostra as linhas `Backports:`; a tela **Suporte** monta o relatório sem dados pessoais. Veja [Logs e relatórios](#logs-e-relatórios).
-- **Guias de controle:** imagens prontas (Xbox, Switch Pro e 8BitDo, em português e inglês) do modo sensor e do touchpad, na seção [Sensor de movimento e touchpad](#sensor-de-movimento-e-touchpad) e na tela **Guias de controle** do launcher.
+- **Guias de controle:** imagens prontas (Xbox, Switch Pro e 8BitDo, em português, inglês e russo) do modo sensor e do touchpad, na seção [Sensor de movimento e touchpad](#sensor-de-movimento-e-touchpad) e na tela **Guias de controle** do launcher.
 - **Processadores sem F16C (Sandy Bridge, #51):** as 13 conversões de meia precisão do jogo (`VCVTPH2PS`/`VCVTPS2PH`) passam a ser emuladas na partida, com o mesmo resultado bit a bit do processador (arredondamento, denormais, Inf e NaN). Antes o jogo parava com "13 sites use encodings the rewrite cannot emulate".
 - **Mouse:** o mouse gira a câmera (analógico direito) e também faz o papel do **touchpad**. Esquerdo = R2, direito = L2, do meio = R3. **Segure Ctrl esquerdo (ou o botão lateral X1)** e o mouse vira um dedo no touchpad: esquerdo toca/clica (segurar = absorver poder), arrastar com o esquerdo desliza (porta "Open Door", scanner), direito = dois dedos (levantar o carro do Reggie). A janela prende o mouse; Esc solta e um clique prende de novo. Veja [Mouse](#mouse-1).
 - **Explicação do grafite na tela:** na primeira vez que o modo sensor liga, uma tela no meio mostra os passos (sacudir, pintar, mirar, sair) com os botões do seu controle; fecha com "Entendi". O menu Insert ganhou a aba **Controle**, que mostra essa tela de novo e ajusta a **velocidade da mira do grafite** (25–200%, também `ISS_SENSOR_AIM`).
@@ -473,6 +473,38 @@ As capturas estão no topo da página.
 - **Leitura precisa da GPU por padrão:** a fumaça do dreno de energia, os drones e outras partículas calculadas na GPU aparecem. O modo rápido continua no launcher ("Precisão da GPU").
 - **Cache de shaders automático:** fica em `user/cache/`, junto dos saves (em Linux e Windows; o cache antigo de `~/.local/share/shadPS4` ou `user/user/` é trazido sozinho na primeira partida). A pasta leva a versão do tradutor de shaders, e o cache antigo é apagado sozinho depois de uma atualização. Para recompilar tudo, o launcher tem o botão **Limpar cache de shaders** (ou `./run_infamous.sh --clear-shader-cache`); ele apaga só os shaders compilados deste jogo, nunca saves ou configurações.
 
+## Что нового
+
+- **Новый лаунчер (Qt Quick), теперь по умолчанию:** 10 экранов, включая **Моды / Читы** и **Дополнительно**, интерфейс на португальском, английском и русском, а язык игры по умолчанию следует за системным. Старый лаунчер (Tk) остаётся в пакете как **inFAMOUS Second Son (classic)**, на случай отката. См. [Лаунчер](#the-launcher).
+- **Сохранения и данные:** настраиваемая папка данных, резервная копия перед каждой игровой сессией, экспорт/импорт `.zip`, дублирование и удаление сохранений, а также поиск сохранений из других установок. Это исправляет проблему «потерял сохранение после обновления». См. [Сохранения и данные](#saves-and-data).
+- **Мигающие фары и блики, просвечивающие сквозь персонажей: исправлено.** Счётчик окклюзии, по которому игра определяет, насколько виден источник света, был фиктивным; новый режим 3 (по умолчанию) отвечает нулевыми значениями, и это исправило проблему, **подтверждено на Windows и на Linux**. См. [Свет и окклюзия](#lights-and-occlusion).
+- **Экспериментальные исправления BP01–BP12:** двенадцать исправлений, перенесённых из других портов PS4 и из shadPS4, каждое со своим переключателем, профилем «Рекомендуемый» и кнопкой «Как в прошлом релизе» для сравнения. См. [Экспериментальные исправления](#experimental-fixes).
+- **Более полезные логи:** каждый лог начинается с блока `Config:` (ваши параметры, без путей) и показывает строки `Backports:`; экран **Поддержка** собирает отчёт без личных данных. См. [Логи и отчёты](#logs-and-reports).
+- **Руководства по контроллерам:** готовые изображения (Xbox, Switch Pro и 8BitDo, на португальском, английском и русском) режима датчика и тачпада — в разделе [Датчик движения и тачпад](#motion-sensor-and-touchpad) и на экране **Руководства по контроллерам** в лаунчере.
+- **Процессоры без F16C (Sandy Bridge, #51):** 13 преобразований половинной точности игры (`VCVTPH2PS`/`VCVTPS2PH`) теперь эмулируются при запуске, бит в бит как на процессоре (округление, денормали, Inf и NaN). Раньше игра останавливалась с «13 sites use encodings the rewrite cannot emulate».
+- **Мышь:** мышь вращает камеру (правый стик) и также играет роль **тачпада**. Левая = R2, правая = L2, средняя = R3. **Удерживайте левый Ctrl (или боковую кнопку X1)**, и мышь становится пальцем на тачпаде: левая касается/кликает (удержание = поглотить силу), перетаскивание левой скользит («Open Door», сканер), правая = два пальца (поднять машину с Реджи). Окно захватывает мышь; Esc освобождает её, а клик захватывает снова. См. [Мышь](#mouse).
+- **Шаги граффити на экране:** когда режим датчика включается впервые, по центру экрана показываются шаги (встряхнуть, распылить, прицелиться, уйти) с кнопками вашего контроллера; «Понятно» закрывает. В меню Insert появилась новая вкладка **Управление**, которая показывает это снова и задаёт **скорость прицеливания в граффити** (25–200%, также `ISS_SENSOR_AIM`).
+- **Более простое граффити (режим датчика):** режим датчика теперь работает как баллончик с краской для граффити: при включении (L3+R3) контроллер держится на боку, как просит игра («Hold Wireless Controller Sideways»); **крест/A встряхивает**, **R2 распыляет**, а **левый стик наводит** курсор влево/вправо и вверх/вниз (раньше он двигался только вверх и вниз), медленнее при слабом отклонении, для обводки трафарета. На клавиатуре, пока T или G держат контроллер на боку, **стрелки** наводят.
+- **Тестируется: мигающий дым и частицы на GPU (#7, #50).** Исправления компилятора шейдеров, частью из нативного порта [Shadow of the Colossus](https://github.com/AjncSystem/ShadowOfTheColossus-PC):
+  - барьеры разделяемой памяти (LDS) в вычислительных шейдерах любого размера рабочей группы, включая не кратные 64 (96, 192...): `ISS_LDS_SMALL` (меньше 64 потоков), `ISS_LDS_MULTI` (больше 64; на 32-полосных GPU барьер охватывает всю рабочую группу, потому что каждая 64-полосная волна PS4 занимает две подгруппы), `ISS_LDS_READLANE`;
+  - `ISS_LANE_DIVERGENCE`: ветвления, зависящие от `v_mbcnt`, номера полосы или значения, возвращённого atomic, считаются расходящимися, чтобы барьер не оказался внутри ветки, которую проходит только одна полоса;
+  - `S_WQM_B64`, который ничего не делал (`ISS_WQM`).
+  - Всё включено по умолчанию в inFAMOUS; `0` отключает каждое, для сравнений. В логе на каждый переключатель приходится одна строка `shader switch`.
+  - Эксперимент, выключен: `ISS_RFL_ALL=1` заставляет `ReadFirstLane` читать первую полосу всей 64-полосной волны в каждом широком вычислительном шейдере (не только в тех, что используют ballot).
+  - Кэш шейдеров перестраивается сам для каждой комбинации.
+- **Исправления из [shadPS4-Infamous-FixBuild](https://github.com/rayhlancaner-png/shadPS4-Infamous-FixBuild):**
+  - **Свечение Делсина при высасывании энергии исправлено:** трафарет теперь учитывает и значение проверки, и значение записи, которые на PS4 раздельные.
+  - **Больше FPS:** когда игра читает результаты GPU, ждёт только поток, который их запросил, а не весь GPU (`ISS_DEFERRED_READBACK`, включено по умолчанию), и работа отправляется на GPU частями (`ISS_SUBMIT_DRAWS`, по умолчанию 1024).
+  - **Меньше рывков при появлении нового эффекта:** вычислительные шейдеры компилируются вне потока GPU (`ISS_COMPUTE_ASYNC_BUILD`), а создание пайплайна повторяется, когда драйвер падает.
+  - **VRAM:** когда видеопамяти не хватает, порт освобождает старые текстуры и пробует снова, вместо того чтобы закрыться. Огромные загрузки, например при загрузке сохранения, идут частями, а драйвер может выгрузить память в RAM.
+  - **Атомарные операции с float** исправлены на GPU без нативной поддержки, например NVIDIA.
+- **Датчик движения:** гироскоп DualShock 4/DualSense работает как есть. На контроллерах без него касание L3+R3 (или Share на Xbox Series) переключает «режим датчика» — баллончик с краской для граффити: контроллер держится на боку, крест/A встряхивает, R2 распыляет, а левый стик наводит. На клавиатуре T/G поворачивают его на бок (стрелки наводят, пока они удерживаются), а Y встряхивает. Именно это позволяет пройти граффити («Hold Wireless Controller Sideways»).
+- **Стики:** мёртвая зона 10% против дрейфа (`ISS_STICK_DEADZONE`, также в лаунчере), и учитывается последний использованный контроллер.
+- **Тачпад без тачпада:** удерживайте View/Select (или Tab) и двигайте правый стик (или стрелки), чтобы провести пальцем, как в «Open Door»; быстрое касание по-прежнему кликает.
+- **Производительность:** FPS больше не падает со временем (за 2 минуты падало с 60 до 6: варианты шейдеров никогда не переиспользовались), а повторяющиеся частичные переходы изображения пропускаются.
+- **Точное чтение GPU по умолчанию:** дым от высасывания энергии, дроны и другие частицы, вычисляемые на GPU, появляются. Быстрый режим по-прежнему в лаунчере («Точность GPU»).
+- **Автоматический кэш шейдеров:** он лежит в `user/cache/`, рядом с сохранениями (Linux и Windows; старый кэш в `~/.local/share/shadPS4` или `user/user/` переносится при первом запуске). Папка привязана к версии компилятора шейдеров, и старый кэш удаляется сам после обновления. Чтобы пересобрать всё, в лаунчере есть кнопка **Очистить кэш шейдеров** (или `./run_infamous.sh --clear-shader-cache`); она удаляет только скомпилированные шейдеры этой игры, никогда сохранения или настройки.
+
 ## Status
 
 | Área | Estado |
@@ -488,7 +520,7 @@ As capturas estão no topo da página.
 | Engasgos | 🔧 Na primeira vez que cada shader é compilado (cutscenes e áreas novas) |
 | Luzes (faróis piscando, brilho atravessando personagens) | ✅ Corrigido pelo modo de oclusão 3 (padrão), confirmado no Windows e no Linux; se o brilho das luzes ficar fraco, use o modo 0 |
 | Imagem | 🔧 Alguns efeitos de névoa, água e fogo ainda piscam |
-| Launcher | ✅ Qt Quick (padrão) com o Tk de reserva; português e inglês |
+| Launcher | ✅ Qt Quick (padrão) com o Tk de reserva; português, inglês e russo |
 | Saves e dados | ✅ Pasta configurável, backup, exportar/importar |
 | Mouse (câmera e touchpad) | 🧪 Implementado, ainda pouco testado em jogo |
 | Correções experimentais (BP01–BP12) | 🧪 As de padrão ligado vêm no perfil Recomendado; BP07 e BP09 (desligadas) são experimentais; BP06 e BP08 ligadas por padrão |
@@ -562,13 +594,13 @@ O launcher é o programa que abre ao executar **inFAMOUS Second Son**. O novo (Q
 | **Controles** | zona morta dos analógicos, velocidade da mira do grafite, mouse (câmera e modo touchpad), mapa do teclado e remapeamento |
 | **Correções** | BP01–BP12, chaves de diagnóstico (A/B) e opções do menu Insert; perfil Recomendado e "Como a release anterior" |
 | **Saves e dados** | pasta de dados, lista de saves, backups, exportar/importar `.zip`; veja [Saves e dados](#saves-e-dados) |
-| **Guias de controle** | imagens Xbox, Switch Pro e 8BitDo (português e inglês): salvar, copiar, abrir a pasta |
+| **Guias de controle** | imagens Xbox, Switch Pro e 8BitDo (português, inglês e russo): salvar, copiar, abrir a pasta |
 | **Suporte** | problemas conhecidos para a sua GPU, links e o relatório de problema; veja [Logs e relatórios](#logs-e-relatórios) |
 | **Mods / Cheats** | ativa cheats XML e o patch opcional para pular o vídeo inicial de logos (não pula cutscenes da história) |
 | **Avançado** | configurações adicionais do launcher e do port |
 | **Atualizações** | mostra a versão instalada e verifica a última release (veja abaixo) |
 
-**Idioma da interface:** português (Brasil) ou inglês (EUA), que o launcher escolhe pelo idioma do sistema e dá para trocar. Quando você escolhe um, o launcher passa a escolha ao jogo (`ISS_UI_LANG`) para o overlay.
+**Idioma da interface:** português (Brasil), inglês (EUA) ou russo, que o launcher escolhe pelo idioma do sistema e dá para trocar. Quando você escolhe um, o launcher passa a escolha ao jogo (`ISS_UI_LANG`) para o overlay.
 
 **Idioma do jogo:** a primeira opção é **Automático (idioma do sistema)**, o padrão, e depois vêm os idiomas que o `sce_sys/playgo-chunk.dat` do seu dump marca, entre os 30 do PS4 (inglês dos EUA e do Reino Unido, português do Brasil e de Portugal, espanhol latino e da Espanha, francês e francês do Canadá, alemão, italiano, holandês, polonês, turco, russo, japonês, coreano, chinês e outros); sem esse arquivo (dumps por FTP) vêm os 6 do CUSA00223: English (1), Português (Brasil) (17), Español (Latinoamérica) (20), Français (Canada) (22), Türkçe (19) e Русский (8). O automático segue o idioma e a região do sistema (es_ES vira espanhol da Espanha, es_MX vira latino, pt_PT vira português de Portugal) e, se o jogo não tiver esse idioma, usa a variante mais próxima (espanhol ↔ latino, português ↔ brasileiro...), senão o inglês. A escolha vale na próxima partida e vira `ISS_LANGUAGE` (um `ISS_LANGUAGE` definido por você vence). **Só funciona se os arquivos do seu jogo tiverem o idioma:** turco e russo, por exemplo, só aparecem se o seu dump tiver esses idiomas. É separado do idioma da interface.
 

@@ -163,6 +163,16 @@ class Writing(PrecompileBase):
         self.assertTrue(any('Indexando os arquivos do jogo' in line for line in lines), lines)
         self.assertTrue(any('Lista de shaders pronta' in line for line in lines), lines)
 
+    def test_russian_texts(self):
+        _, lines = self.run_once({**self.settings, 'ui_language': 'ru_RU'})
+        self.assertTrue(any('Индексация файлов игры' in line for line in lines), lines)
+        self.assertTrue(any('Список шейдеров готов' in line for line in lines), lines)
+
+    def test_russian_auto_follows_the_system_game_language(self):
+        with mock.patch.object(precompile.tlg_run, 'system_game_language', return_value='ru'):
+            _, lines = self.run_once({**self.settings, 'ui_language': 'auto'})
+        self.assertTrue(any('Индексация файлов игры' in line for line in lines), lines)
+
     def test_atomic_write_keeps_the_old_file_when_the_write_fails(self):
         path = Path(self.tmp.name) / 'x.bin'
         precompile.atomic_write(path, b'old')
@@ -282,6 +292,10 @@ class QtScreens(PrecompileBase):
         self.assertEqual('Compilar shaders na primeira abertura', graphics.model.get('s:precompile_shaders')['label'])
         strings = json.loads((ROOT / 'launcher' / 'qt' / 'i18n' / 'strings.json').read_text(encoding='utf-8'))
         self.assertTrue(strings['gfx_what_precompile_shaders']['pt'])
+
+    def test_option_texts_in_russian(self):
+        backend, graphics = self.make(ui_language='ru_RU')
+        self.assertEqual('Компилировать шейдеры при первом запуске', graphics.model.get('s:precompile_shaders')['label'])
 
     def test_progress_text_and_bar(self):
         backend, _ = self.make()

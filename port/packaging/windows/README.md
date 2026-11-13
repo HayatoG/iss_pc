@@ -46,7 +46,7 @@ renderer v2 needs two files the base package does not contain: NVIDIA's `nvngx_d
 NVIDIA's signature) and the optional bridge `tlg_dlss.dll`, built with MSVC and the player's copy of the
 SDK by `packaging/windows/build_dlss.sh`. Both go in `<user data>/dlss`; without them FSR 3.1 is used.
 
-The launcher texts are in Portuguese (Brazil) and English (`launcher/qt/i18n/strings.json`, plus the
+The launcher texts are in Portuguese (Brazil), English and Russian (`launcher/qt/i18n/strings.json`, plus the
 Tk launcher's own table). The icon (`launcher/infamous.ico`/`.png`) is original art drawn by
 `packaging/windows/make_icon.py` and built into the executables and `tlg-probe.exe` (the game
 window).
