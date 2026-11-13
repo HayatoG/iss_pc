@@ -232,7 +232,8 @@ class KnownIssuesTests(unittest.TestCase):
         self.assertEqual(by_id['maxwell-quadro']['issues'], [70])
         self.assertIn('ISS_BP09=1', by_id['polaris-windows']['what']['en'])
         for i in self.issues:
-            self.assertTrue(i['title']['en'] and i['title']['pt'] and i['what']['en'] and i['what']['pt'])
+            for lang in ('en', 'pt', 'ru'):
+                self.assertTrue(i['title'][lang] and i['what'][lang], (i['id'], lang))
 
     def test_polaris_only_on_windows(self):
         for name in ('AMD Radeon RX 580 Series', 'AMD Radeon(TM) RX 570', 'Radeon RX 480 Graphics', 'AMD Radeon RX 550'):
@@ -454,7 +455,7 @@ class FetchTests(unittest.TestCase):
 
 
 class StringsTests(unittest.TestCase):
-    def test_python_side_keys_exist_in_both_languages(self):
+    def test_python_side_keys_exist_in_every_language(self):
         keys = set()
         for name in ('report.py', 'support.py', 'updates.py'):
             keys |= set(re.findall(r"""\bt\(\s*'((?:rep|sup|upd)_\w+)'""", (ROOT / 'launcher' / 'qt' / name).read_text()))
@@ -463,7 +464,7 @@ class StringsTests(unittest.TestCase):
         self.assertGreater(len(keys), 25)
         for key in keys:
             self.assertIn(key, STRINGS, key)
-            self.assertTrue(STRINGS[key]['en'] and STRINGS[key]['pt'], key)
+            self.assertTrue(all(STRINGS[key][lang] for lang in ('en', 'pt', 'ru')), key)
 
 
 @unittest.skipUnless(HAVE_QT, 'PySide6 not installed')

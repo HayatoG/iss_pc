@@ -380,7 +380,8 @@ class Graphics(QObject):
             self._ask(title, '', close, {}, [preset_share.problem_text(p, self.t) for p in problems])
             return
         changes = preset_share.diff(preset, self.settings, self.backend.fix_states)
-        body, lines = preset_share.summary_lines(preset, problems, changes, self.t, self.backend.t_.pt())
+        body, lines = preset_share.summary_lines(preset, problems, changes, self.t, self.backend.t_.pt(),
+                                                 ru=self.backend.t_.pairs)
         if not changes:
             self._ask(title, body, close, {}, lines)
             return

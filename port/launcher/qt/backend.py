@@ -77,7 +77,8 @@ class FixesModel(QAbstractListModel):
             items = [i for i in backports_table.ADVANCED if i.tab == area and self._matches(i, words, t)]
             if not items:
                 continue
-            rows.append({'kind': 'header', 'id': 'hdr-' + area, 'title': title_pt if t.pt() else title_en, 'note': ''})
+            rows.append({'kind': 'header', 'id': 'hdr-' + area,
+                         'title': t.pair((title_en, title_pt)), 'note': ''})
             rows += [self.item_row(i, states) for i in items]
         self.beginResetModel()
         self.rows = rows
@@ -122,7 +123,7 @@ class FixesModel(QAbstractListModel):
             if item.vtype == 'bool':  # automatic: the GPU code decides
                 options = [('auto', t('exp_auto')), ('1', t('exp_on')), ('0', t('exp_off'))]
             else:
-                options = [(v, (pt if t.pt() else en)) for v, en, pt in item.choices]
+                options = [(v, t.pair((en, pt))) for v, en, pt in item.choices]
             row['control'] = 'combo'
             row['options'] = [{'value': v, 'label': label} for v, label in options]
             row['index'] = next((n for n, (v, _) in enumerate(options) if v == row['value']), 0)
@@ -168,7 +169,7 @@ class Backend(QObject):
         self.settings = tlg_run.load_settings() if settings is None else settings
         self.t_ = translator or logic.Translator(self.settings)
         self.probes = probes or {}
-        self.fonts = ('sans-serif', 'sans-serif')  # app.py puts the loaded families here
+        self.fonts = ('sans-serif',) * 4  # app.py puts the loaded families here
         self.fix_states = tlg_run.experimental_states(self.settings)
         self._gpu = 'checking'
         self._pad = None
@@ -204,13 +205,18 @@ class Backend(QObject):
         self.updates = Updates(self, self.probes.get('updates'))
 
     # -- fonts and motion (set by app.py) ------------------------------------------------------
-    @Property(str, constant=True)
+    @Property(str, notify=langChanged)
     def fontDisplay(self):
-        return self.fonts[0]
+        return self.fonts[2] if self.t_.ru() and len(self.fonts) > 2 else self.fonts[0]
+
+    @Property(str, notify=langChanged)
+    def fontText(self):
+        return self.fonts[3] if self.t_.ru() and len(self.fonts) > 3 else self.fonts[1]
 
     @Property(str, constant=True)
-    def fontText(self):
-        return self.fonts[1]
+    def fontBrand(self):
+        """The Latin logo keeps the display font in every language."""
+        return self.fonts[0]
 
     @Property(bool, constant=True)
     def reducedMotion(self):
@@ -266,7 +272,7 @@ class Backend(QObject):
             self._pad = self.probes['pad']()
         self.measure_cache()
         self._compute_chips()
-        self._news = self.probe('news', lambda: logic.news(self.t_, self.t_.pt()))
+        self._news = self.probe('news', lambda: logic.news(self.t_, self.t_.pt(), russian=self.t_.ru()))
         savedata = tlg_run.user_dir() / 'savedata'
         self._save = self.probe('save', lambda: logic.last_save_title(savedata))
         self.chipsChanged.emit()
@@ -335,9 +341,14 @@ class Backend(QObject):
     def tf(self, key, args):
         return self.t_(key, **args)
 
+    @Slot(str, int, result=str)
+    def countText(self, key, n):
+        """A counted string for QML (plural forms under ru)."""
+        return self.t_.plural(key, n)
+
     @Property(str, notify=langChanged)
     def lang(self):
-        return 'pt_BR' if self.t_.pt() else 'en_US'
+        return self.t_.lang()
 
     @Slot(str)
     def setLang(self, lang):
@@ -346,6 +357,7 @@ class Backend(QObject):
         self.langChanged.emit()
         self.guideChanged.emit()
         self.fixes.refresh_all()
+        self.advanced.refresh_all()
         self.refresh()
         if hasattr(self, 'saves'):
             self.saves.reload()   # its texts follow the language
@@ -640,7 +652,7 @@ class Backend(QObject):
     @Property(str, notify=profileChanged)
     def profileText(self):
         n = backports_table.changes(self.fix_states)
-        return self.t_('exp_profile_rec') if n == 0 else self.t_('exp_profile_custom', n=n)
+        return self.t_('exp_profile_rec') if n == 0 else self.t_.plural('exp_profile_custom', n)
 
     @Property(bool, notify=profileChanged)
     def profileIsRecommended(self):
@@ -784,7 +796,7 @@ class Backend(QObject):
         return self.t_('guides_detected', name=self._pad) if self._pad else ''
 
     def _guide_file(self):
-        return logic.guide_path(self.guideKind, self.t_.pt(), self.probes.get('guide_dir'))
+        return logic.guide_path(self.guideKind, self.t_.key(), self.probes.get('guide_dir'))
 
     @Property(str, notify=guideChanged)
     def guideSource(self):

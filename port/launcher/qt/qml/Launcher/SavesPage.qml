@@ -135,7 +135,7 @@ Item {
                     x: 18; y: 16; width: parent.width - 36; spacing: 12
                     Row {
                         spacing: 12
-                        Text { text: Theme.tr("backups_keep").replace("{n}", Saves.keep); color: Theme.text; font.family: Theme.fontText
+                        Text { text: Backend.countText("backups_keep", Saves.keep); color: Theme.text; font.family: Theme.fontText
                                font.pixelSize: 14; anchors.verticalCenter: parent.verticalCenter }
                         GhostButton { compact: true; width: 40; implicitWidth: 40; text: "−"; onClicked: Saves.setKeep(Saves.keep - 1) }
                         GhostButton { compact: true; width: 40; implicitWidth: 40; text: "+"; onClicked: Saves.setKeep(Saves.keep + 1) }

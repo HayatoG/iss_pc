@@ -96,7 +96,7 @@ Item {
                                 Tag { visible: modelData.matched; text: Theme.tr("sup_known_match"); tone: "warn"; anchors.verticalCenter: parent.verticalCenter }
                             }
                             Body { text: modelData.what; color: Theme.textSoft }
-                            Text { visible: modelData.issues !== ""; text: "Issues: " + modelData.issues; color: Theme.textFaint
+                            Text { visible: modelData.issues !== ""; text: Theme.tr("sup_issues_label") + ": " + modelData.issues; color: Theme.textFaint
                                    font.family: Theme.fontText; font.pixelSize: 12 }
                         }
                     }

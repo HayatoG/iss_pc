@@ -49,16 +49,20 @@ def run():
     here = app_mod.HERE
     check((here / 'qml' / 'Launcher' / 'qmldir').is_file(), f'missing QML module: {here / "qml" / "Launcher" / "qmldir"}')
     check(len(list((here / 'qml' / 'Launcher').glob('*.qml'))) > 5, 'QML files missing')
-    for font in ('Barlow-Regular.ttf', 'Barlow-Bold.ttf', 'BigShouldersStencilDisplay.ttf'):
+    for font in ('Barlow-Regular.ttf', 'Barlow-Bold.ttf', 'BigShouldersStencilDisplay.ttf',
+                 'PT_Sans-Regular.ttf', 'PT_Sans-Bold.ttf', 'PT_Sans-Narrow-Regular.ttf', 'PT_Sans-Narrow-Bold.ttf'):
         check((here / 'fonts' / font).is_file(), f'missing font: {font}')
     check((here.parent / 'infamous.png').is_file(), 'missing window icon: infamous.png')
     try:
         strings = logic.load_strings()
         for key, entry in strings.items():
-            if not (isinstance(entry, dict) and entry.get('pt') and entry.get('en')):
+            if not (isinstance(entry, dict) and all(entry.get(lang) for lang in ('pt', 'en', 'ru'))):
                 check(False, f'translation incomplete: {key}')
                 break
         check(len(strings) > 20, 'translations missing (i18n/strings.json)')
+        pairs = logic.load_pairs()
+        check(len(pairs) > 200, 'Russian pair translations missing (i18n/pairs_ru.json)')
+        check(all(text.strip() for text in pairs.values()), 'empty Russian pair translation')
     except Exception as error:
         check(False, f'translations did not load: {error!r}')
     if problems:
@@ -72,7 +76,7 @@ def run():
                   'saves': {'running': lambda: False, 'scan': lambda: []}}
         backend = Backend(settings=settings, probes=probes)
         app = app_mod.App(backend=backend)
-        check(app.backend.fonts[0] != 'sans-serif' and app.backend.fonts[1] != 'sans-serif',
+        check(all(family != 'sans-serif' for family in app.backend.fonts),
               f'fonts did not load: {app.backend.fonts}')
         pages = app.window.property('pages') if app.window.metaObject().indexOfProperty('pages') >= 0 else None
         count = len(pages) if pages else 7

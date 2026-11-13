@@ -126,7 +126,8 @@ class Updates(QObject):
     def notes(self):
         if not self.release:
             return ''
-        notes = releases.extract_notes(self.release.get('body', ''), self.backend.t_.pt())
+        notes = releases.extract_notes(self.release.get('body', ''), self.backend.t_.pt(),
+                                       russian=self.backend.t_.ru())
         return notes or self.t('upd_no_notes')
 
     @Property(str, notify=changed)

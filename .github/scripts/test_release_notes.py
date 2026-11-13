@@ -38,7 +38,7 @@ class ReleaseNotesTests(unittest.TestCase):
             fixture = root / 'fixture.json'
             fixture.write_text(json.dumps({'body': body, **extra}))
             return subprocess.run(
-                ['bash', str(SCRIPT), 'head'], text=True, capture_output=True,
+                ['bash', str(SCRIPT), 'head'], text=True, encoding='utf-8', capture_output=True,
                 env={**os.environ, 'PATH': folder + os.pathsep + os.environ['PATH'],
                      'FIXTURE': str(fixture), 'GH_REPO': 'owner/repo', 'PREV': 'previous'},
                 timeout=10)
@@ -49,19 +49,32 @@ class ReleaseNotesTests(unittest.TestCase):
 <!-- /notes:pt-BR -->
 <!-- notes:en-US -->
 - English (#12)
-<!-- /notes:en-US -->''')
+<!-- /notes:en-US -->
+<!-- notes:ru-RU -->
+- Русский (#12)
+<!-- /notes:ru-RU -->''')
         self.assertEqual(result.returncode, 0, result.stderr)
-        # English first, then Portuguese (#517).
-        en, pt = result.stdout.split("## Novidades")
-        self.assertNotIn('- English', pt)
-        self.assertNotIn('- Português', en)
-        self.assertIn('#12 (@reporter)', pt)
-        self.assertIn('#12 (@reporter)', en)
+        # English first, then Portuguese (#517), then Russian.
+        en, rest = result.stdout.split("## Novidades")
+        pt, ru = rest.split("## Что нового")
+        self.assertNotIn('- English', pt + ru)
+        self.assertNotIn('- Português', en + ru)
+        self.assertNotIn('- Русский', en + pt)
+        for part in (en, pt, ru):
+            self.assertIn('#12 (@reporter)', part)
+
+    def test_russian_block_lands_in_the_russian_section(self):
+        result = self.run_notes('<!-- notes:ru-RU -->\n- Русский (#9)\n<!-- /notes -->')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, rest = result.stdout.split("## Novidades")
+        _, ru = rest.split("## Что нового")
+        self.assertIn('- Русский (#9) (PR #7)', ru)
+        self.assertIn('#9 (@reporter)', ru)
 
     def test_empty_template_falls_back_and_no_reporters_is_valid(self):
         result = self.run_notes('<!-- notes:pt-BR -->\n- \n<!-- /notes -->')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.count('- Fallback title (PR #7)'), 2)
+        self.assertEqual(result.stdout.count('- Fallback title (PR #7)'), 3)
         self.assertNotIn('Issues relatadas', result.stdout)
 
     def test_every_bullet_has_a_pr_reference_and_repeated_pr_is_deduplicated(self):
@@ -73,12 +86,14 @@ class ReleaseNotesTests(unittest.TestCase):
 - Third
 <!-- /notes -->''')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.count('(PR #7)'), 3)
+        self.assertEqual(result.stdout.count('(PR #7)'), 4)
 
     def test_new_language_marker_also_ends_previous_block(self):
-        result = self.run_notes('<!-- notes:pt-BR -->\n- PT\n<!-- notes:en-US -->\n- EN')
+        result = self.run_notes('<!-- notes:pt-BR -->\n- PT\n<!-- notes:en-US -->\n- EN\n'
+                                '<!-- notes:ru-RU -->\n- RU')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('- EN', result.stdout.split("## What's new")[0])
+        self.assertNotIn('- RU', result.stdout.split("## Что нового")[0])
 
     def test_api_error_cannot_publish_partial_notes(self):
         result = self.run_notes(fail_second=True)

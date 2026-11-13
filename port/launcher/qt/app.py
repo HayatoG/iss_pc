@@ -19,19 +19,25 @@ HERE = Path(__file__).resolve().parent
 QML_ROOT = HERE / 'qml'
 FONT_DISPLAY = 'Big Shoulders Stencil Display'
 FONT_TEXT = 'Barlow'
+# Cyrillic families for the Russian interface (Barlow and Big Shoulders have no Cyrillic glyphs).
+FONT_DISPLAY_RU = 'PT Sans Narrow'
+FONT_TEXT_RU = 'PT Sans'
 
 
 def load_fonts():
-    """Loads the OFL fonts shipped in qt/fonts; returns (display family, text family), falling
-    back to the system's sans-serif when a font file is missing or does not load."""
+    """Loads the OFL fonts shipped in qt/fonts; returns (display, text, display_ru, text_ru),
+    falling back to the system's sans-serif when a font file is missing or does not load."""
     families = {}
     for path in sorted((HERE / 'fonts').glob('*.ttf')):
         ident = QFontDatabase.addApplicationFont(str(path))
         if ident >= 0:
             for name in QFontDatabase.applicationFontFamilies(ident):
                 families[name] = True
-    return (FONT_DISPLAY if FONT_DISPLAY in families else 'sans-serif',
-            FONT_TEXT if FONT_TEXT in families else 'sans-serif')
+    display = FONT_DISPLAY if FONT_DISPLAY in families else 'sans-serif'
+    text = FONT_TEXT if FONT_TEXT in families else 'sans-serif'
+    return (display, text,
+            FONT_DISPLAY_RU if FONT_DISPLAY_RU in families else display,
+            FONT_TEXT_RU if FONT_TEXT_RU in families else text)
 
 
 class HeroProvider(QQuickImageProvider):

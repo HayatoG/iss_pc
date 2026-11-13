@@ -5,7 +5,6 @@ Everything here is a thin layer over the modules the Tk launcher already uses
 (infamous_run, backports_table, shader_cache, tlg_vulkan); it never changes how the game starts.
 """
 import json
-import locale
 import os
 import re
 import subprocess
@@ -17,12 +16,15 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import backports_table  # noqa: E402
 import infamous_run as tlg_run  # noqa: E402
+import plural_ru  # noqa: E402
 import savemanager  # noqa: E402
 import userdata  # noqa: E402
 import shader_cache  # noqa: E402
 
 # ---------------------------------------------------------------------------------------- i18n
-LANGS = ('pt_BR', 'en_US')
+LANGS = ('ru_RU', 'pt_BR', 'en_US')
+# Column of i18n/strings.json used by each interface language.
+LANG_KEYS = {'ru_RU': 'ru', 'pt_BR': 'pt', 'en_US': 'en'}
 # Names of the game languages (same as GAME_LANGUAGE_NAMES of the Tk launcher, which needs tkinter to import).
 GAME_LANGUAGE_NAMES = {'en': 'English', 'en_GB': 'English (UK)', 'pt_BR': 'Português (Brasil)',
                        'pt_PT': 'Português (Portugal)', 'es_LA': 'Español (Latinoamérica)', 'es': 'Español (España)',
@@ -35,6 +37,14 @@ GAME_LANGUAGE_NAMES = {'en': 'English', 'en_GB': 'English (UK)', 'pt_BR': 'Portu
 
 def load_strings(path=HERE / 'i18n' / 'strings.json'):
     return json.loads(Path(path).read_text(encoding='utf-8'))
+
+
+def load_pairs(path=HERE / 'i18n' / 'pairs_ru.json'):
+    """Russian for the (en, pt) tuples of backports_table/advanced_table; empty if absent."""
+    try:
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
 
 
 def tk_text():
@@ -50,37 +60,68 @@ def tk_text():
         return {**preset_share.TEXT, **native_resolution.TEXT, **dlss_setup.TEXT, **tlg_run.TEXT}
 
 
+def system_language():
+    """The interface language the system asks for: Russian, Portuguese or English."""
+    code = tlg_run.system_game_language()
+    if code.startswith('ru'):
+        return 'ru_RU'
+    if code.startswith('pt'):
+        return 'pt_BR'
+    return 'en_US'
+
+
 def system_is_portuguese():
-    for name in ('LC_ALL', 'LC_MESSAGES', 'LANG'):
-        value = os.environ.get(name)
-        if value:
-            return value.lower().startswith('pt')
-    try:
-        return (locale.getlocale()[0] or '').lower().startswith('pt')
-    except ValueError:
-        return False
+    return system_language() == 'pt_BR'
+
+
+def ui_language(settings):
+    choice = settings.get('ui_language', 'auto')
+    return choice if choice in LANGS else system_language()
 
 
 def is_portuguese(settings):
-    choice = settings.get('ui_language', 'auto')
-    return system_is_portuguese() if choice == 'auto' else choice == 'pt_BR'
+    return ui_language(settings) == 'pt_BR'
+
+
+def is_russian(settings):
+    return ui_language(settings) == 'ru_RU'
 
 
 class Translator:
     """t(key): Qt strings first (i18n/strings.json), then the Tk launcher's TEXT table."""
 
-    def __init__(self, settings, strings=None, tk=None):
+    def __init__(self, settings, strings=None, tk=None, pairs=None):
         self.settings = settings
         self.strings = load_strings() if strings is None else strings
         self.tk = tk_text() if tk is None else tk
+        self.pairs = load_pairs() if pairs is None else pairs
+
+    def lang(self):
+        return ui_language(self.settings)
+
+    def key(self):
+        return LANG_KEYS[self.lang()]
 
     def pt(self):
-        return is_portuguese(self.settings)
+        return self.lang() == 'pt_BR'
+
+    def ru(self):
+        return self.lang() == 'ru_RU'
+
+    def plural(self, key, n, **fmt):
+        """A counted string: Russian picks one/few/many from the `|` forms, en/pt stay as-is."""
+        text = self(key, n=n, **fmt)
+        return plural_ru.pick(text, n) if self.ru() else text
+
+    def count(self, n):
+        """'3 saves' / '3 сохранения' (the number with its counted noun)."""
+        key = 'saves_n_one' if n == 1 and not self.ru() else 'saves_n_many'
+        return self.plural(key, n)
 
     def __call__(self, key, **fmt):
         if key in self.strings:
             entry = self.strings[key]
-            text = entry['pt'] if self.pt() else entry['en']
+            text = entry.get(self.key()) or entry['en']
         elif key in self.tk:
             en, pt = self.tk[key]
             text = pt if self.pt() else en
@@ -92,7 +133,9 @@ class Translator:
             return text
 
     def pair(self, pair):
-        """An (en, pt) tuple from backports_table."""
+        """An (en, pt) tuple from backports_table/advanced_table, in the interface language."""
+        if self.ru():
+            return self.pairs.get(pair[0], pair[0])
         return pair[1] if self.pt() else pair[0]
 
 
@@ -262,7 +305,7 @@ def compute_chips(settings, t, gpu='checking', pad=None, problems=None, states=N
         chips.append((t('chip_port_missing'), 'bad'))
     states = tlg_run.experimental_states(settings) if states is None else states
     n = backports_table.changes(states)
-    chips.append((t('chip_profile_rec') if n == 0 else t('chip_profile_custom', n=n), 'ok' if n == 0 else 'warn'))
+    chips.append((t('chip_profile_rec') if n == 0 else t.plural('chip_profile_custom', n), 'ok' if n == 0 else 'warn'))
     if cache_bytes is None and not measure_cache:
         chips.append((t('chip_cache_checking'), 'ok'))
     elif cache_bytes is None:
@@ -291,9 +334,10 @@ def _plain(text):
     return text.strip()
 
 
-def parse_news(readme_text, portuguese, count=3):
-    """The first `count` bullets of README's "Novidades" / "What's new", cut to their bold lead."""
-    heading = '## Novidades' if portuguese else "## What's new"
+def parse_news(readme_text, portuguese, count=3, russian=False):
+    """The first `count` bullets of README's "Что нового" / "Novidades" / "What's new", cut to their
+    bold lead."""
+    heading = '## Что нового' if russian else ('## Novidades' if portuguese else "## What's new")
     lines, inside = [], False
     for line in readme_text.splitlines():
         if line.startswith('## '):
@@ -313,10 +357,10 @@ def parse_news(readme_text, portuguese, count=3):
     return lines
 
 
-def news(t, portuguese, readme=None):
+def news(t, portuguese, readme=None, russian=False):
     readme = readme or tlg_run.REPO_DIR / 'README.md'
     try:
-        found = parse_news(Path(readme).read_text(encoding='utf-8'), portuguese)
+        found = parse_news(Path(readme).read_text(encoding='utf-8'), portuguese, russian=russian)
     except OSError:
         found = []
     return found or [t(key) for key in FALLBACK_NEWS]
@@ -375,8 +419,17 @@ def guide_kind(pad_name):
     return 'xbox'
 
 
-def guide_path(kind, portuguese, folder=None):
+def guide_path(kind, lang, folder=None):
     """The guide image of a controller in the launcher's language; None when the file is absent
-    (the screen then says the images are not included; they can be swapped for other files)."""
-    path = Path(folder or GUIDE_DIR) / f"inFAMOUS-controle-{kind}-{'pt-BR' if portuguese else 'en-US'}.png"
-    return path if path.is_file() else None
+    (the screen then says the images are not included; they can be swapped for other files).
+    Russian falls back to English, the language the panel art was drawn in."""
+    if lang is True:        # older callers passed the Portuguese boolean
+        lang = 'pt'
+    elif lang is False:
+        lang = 'en'
+    suffixes = {'ru': ('ru-RU', 'en-US'), 'pt': ('pt-BR',), 'en': ('en-US',)}.get(lang, ('en-US',))
+    for suffix in suffixes:
+        path = Path(folder or GUIDE_DIR) / f"inFAMOUS-controle-{kind}-{suffix}.png"
+        if path.is_file():
+            return path
+    return None

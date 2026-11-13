@@ -39,9 +39,10 @@ QtObject {
     readonly property var accents: ({ play: "#ff6a2b", graphics: "#4d8bff", controls: "#ff3d9a",
                                       fixes: "#ff6a2b", saves: "#35d07f", guides: "#ff3d9a", support: "#19e3ff",
                                       updates: "#f5c400", advanced: "#8e7bff", mods: "#2bd9c4" })
-    // type
+    // type (fontBrand keeps the Latin logo's stencil font under ru, where the other two switch to Cyrillic)
     property string fontDisplay: Backend.fontDisplay
     property string fontText: Backend.fontText
+    readonly property string fontBrand: Backend.fontBrand
     readonly property int railWidth: 236
     readonly property int heroHeight: 320
     // line icons, 24x24 viewBox (circles written as arcs)

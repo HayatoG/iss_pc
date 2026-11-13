@@ -13,11 +13,14 @@ from pathlib import Path
 from paths import ROOT
 sys.path.insert(0, str(ROOT / 'launcher'))
 from qt import logic  # noqa: E402
+import advanced_table  # noqa: E402
+import backports_table  # noqa: E402
 
 QT = ROOT / 'launcher' / 'qt'
 STRINGS = json.loads((QT / 'i18n' / 'strings.json').read_text(encoding='utf-8'))
 PT = {'ui_language': 'pt_BR'}
 EN = {'ui_language': 'en_US'}
+RU = {'ui_language': 'ru_RU'}
 
 
 def placeholders(text):
@@ -37,14 +40,28 @@ def make_sfo(entries):
 
 
 class TranslationTests(unittest.TestCase):
-    def test_every_key_has_both_languages(self):
+    def test_every_key_has_all_languages(self):
         for key, entry in STRINGS.items():
-            self.assertEqual({'en', 'pt'}, set(entry), key)
-            self.assertTrue(entry['en'].strip() and entry['pt'].strip(), key)
+            self.assertEqual({'en', 'pt', 'ru'}, set(entry), key)
+            self.assertTrue(all(entry[lang].strip() for lang in ('en', 'pt', 'ru')), key)
+
+    def test_no_text_was_double_encoded(self):
+        for key, entry in STRINGS.items():
+            for lang, text in entry.items():
+                self.assertNotIn('Ã', text, (key, lang))
+        for key, pair in logic.tk_text().items():
+            self.assertNotIn('Ã', pair[0] + pair[1], key)
+
+    def test_system_language_maps_game_language_codes(self):
+        for code, expected in (('ru', 'ru_RU'), ('pt_BR', 'pt_BR'), ('pt_PT', 'pt_BR'),
+                               ('en', 'en_US'), ('de', 'en_US')):
+            with mock.patch.object(logic.tlg_run, 'system_game_language', return_value=code):
+                self.assertEqual(expected, logic.system_language(), code)
 
     def test_placeholders_match_between_languages(self):
         for key, entry in STRINGS.items():
-            self.assertEqual(placeholders(entry['en']), placeholders(entry['pt']), key)
+            for lang in ('pt', 'ru'):
+                self.assertEqual(placeholders(entry['en']), placeholders(entry[lang]), (key, lang))
 
     def test_no_key_hides_a_tk_key_with_other_placeholders(self):
         tk = logic.tk_text()
@@ -61,12 +78,37 @@ class TranslationTests(unittest.TestCase):
         for key in (k for k in used if not k.endswith('_')):
             self.assertTrue(key in STRINGS or key in tk, key)
 
+    def test_every_pair_has_russian(self):
+        pairs = logic.load_pairs()
+        used = {title[1] for title in advanced_table.AREAS}
+        for item in backports_table.ITEMS:
+            used.add(item.name[0])
+            used.add(item.what[0])
+            used.update(choice[1] for choice in item.choices)
+        used.update(('Off', 'FSR 1 (spatial)', 'FSR 3.1 (temporal)', 'NVIDIA DLSS (temporal)'))
+        missing = sorted(text for text in used if text not in pairs)
+        self.assertEqual([], missing)
+        for text in used:
+            self.assertTrue(pairs[text].strip(), text)
+
+    def test_translator_pairs(self):
+        pt, en, ru = logic.Translator(PT), logic.Translator(EN), logic.Translator(RU)
+        pair = ('Free nested command buffers', 'Liberar buffers de comando aninhados')
+        self.assertEqual(pair[1], pt.pair(pair))
+        self.assertEqual(pair[0], en.pair(pair))
+        self.assertEqual('Освобождать вложенные командные буферы', ru.pair(pair))
+        self.assertEqual('English only', ru.pair(('English only', 'Só inglês')))   # falls back
+
     def test_translator_picks_language_and_falls_back_to_tk_text(self):
-        pt, en = logic.Translator(PT), logic.Translator(EN)
+        pt, en, ru = logic.Translator(PT), logic.Translator(EN), logic.Translator(RU)
         self.assertEqual('Jogar', pt('nav_play'))
         self.assertEqual('Play', en('nav_play'))
+        self.assertEqual('Играть', ru('nav_play'))
+        self.assertEqual('ru_RU', ru.lang())
         self.assertEqual(logic.tk_text()['exp_live'][1], pt('exp_live'))   # reused from the Tk launcher
+        self.assertEqual('в игре', ru('exp_live'))                        # merged into strings.json
         self.assertEqual('Cache de shaders: 1 MB', pt('chip_cache', size='1 MB'))
+        self.assertEqual('Кэш шейдеров: 1 MB', ru('chip_cache', size='1 MB'))
         self.assertEqual('no_such_key', en('no_such_key'))
 
 
@@ -176,6 +218,18 @@ class NewsTests(unittest.TestCase):
     def test_fallback_when_readme_is_missing(self):
         t = logic.Translator(PT)
         self.assertEqual(3, len(logic.news(t, True, readme='/no/such/README.md')))
+
+    def test_russian_readme_section_is_parsed(self):
+        t = logic.Translator(RU)
+        self.assertEqual(3, len(logic.news(t, False, russian=True)))
+        self.assertNotEqual(['Исправления света, огня и дыма', 'Окно экспериментальных исправлений',
+                             'Меньше утечек памяти'], logic.news(t, False, russian=True))
+
+    def test_russian_fallback_when_the_readme_has_no_section(self):
+        t = logic.Translator(RU)
+        self.assertEqual(['Исправления света, огня и дыма', 'Окно экспериментальных исправлений',
+                          'Меньше утечек памяти'],
+                         logic.news(t, False, readme='/no/such/README.md', russian=True))
 
     def test_the_real_readme_has_news(self):
         self.assertEqual(3, len(logic.parse_news((ROOT.parent / 'README.md').read_text(encoding='utf-8'), True)))
@@ -335,6 +389,11 @@ class BackendTests(unittest.TestCase):
             backend.setLang('en_US')
         self.assertEqual('en_US', backend.lang)
         self.assertEqual('Continue · Welcome to Seattle — 8%', backend.playSubtitle)
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.dict('os.environ', {'XDG_CONFIG_HOME': folder}):
+            backend.setLang('ru_RU')
+        self.assertEqual('ru_RU', backend.lang)
+        self.assertEqual('Продолжить · Welcome to Seattle — 8%', backend.playSubtitle)
 
     def test_fix_rows_have_groups_headers_and_controls(self):
         backend, _ = self.make()

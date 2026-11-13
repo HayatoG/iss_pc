@@ -26,13 +26,13 @@ de luzes), confirmado no Windows e no Linux.
 | Partículas da GPU (fumaça do dreno, drones) | leitura precisa da GPU por padrão; modo rápido no launcher ("Precisão da GPU") |
 | Stencil `test_val`/`op_val` | uma referência Vulkan quando as máscaras permitem |
 | Cache de shaders | pasta com a chave do tradutor; o cache antigo é apagado sozinho |
-| Launcher Qt | padrão nos pacotes, 8 telas, pt-BR/en-US, Tk de reserva ("classic"), `--selftest` no CI |
+| Launcher Qt | padrão nos pacotes, 8 telas, pt-BR/en-US/ru-RU, Tk de reserva ("classic"), `--selftest` no CI |
 | Idioma do jogo | "Automático (idioma do sistema)" por padrão e os 30 idiomas do PS4 que o dump marca (italiano, polonês, espanhol da Espanha... nos dumps europeus); sem `playgo-chunk.dat`, os 6 do CUSA00223 |
 | Saves e dados | pasta configurável (`ISS_USER_DIR`, arquivo-ponteiro), achar saves de outras instalações, backup antes de cada partida, exportar/importar `.zip` |
 | Correções experimentais | BP01–BP12 (shadPS4, SotC, bbport, Mrsuss/0xCydral, CTR) com chave individual, perfil Recomendado e `TLG_BACKPORTS=0`; log com `Config:`, `Backports:` e `Backport hits` |
 | Oclusão | modo 3 (contagem zero) por padrão: corrige faróis que piscavam e brilho que atravessava personagens (Windows e Linux) |
 | Mouse | câmera, botões e modo touchpad (`ISS_MOUSE_*`, `ISS_KEY_MAP`); falta validar em mais jogadores |
-| Guias de controle | imagens Xbox/Switch Pro/8BitDo em pt-BR e en-US |
+| Guias de controle | imagens Xbox/Switch Pro/8BitDo em pt-BR, en-US e ru-RU |
 | Suporte e Atualizações | relatório sem caminhos pessoais; verificação da última release (sem instalar nada) |
 | CPUs sem F16C | as conversões de meia precisão são emuladas na partida (#51) |
 
