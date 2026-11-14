@@ -274,13 +274,35 @@ static int host_protect(uintptr_t address, uint64_t size, int prot) {
 }
 /* Released pages read as zero when reused, like the memfd's punched holes. */
 static void host_discard(uint64_t phys, uint64_t size) { memset(backing_base+phys,0,size); }
-/* Direct memory occupies [0,POOL_SIZE) of the section, flexible memory [POOL_SIZE,+FLEX_SPAN). */
+/* Direct memory occupies [0,POOL_SIZE) of the section, flexible memory [POOL_SIZE,+FLEX_SPAN).
+ * The whole section is committed at once (the GPU imports its pages in place). A system-managed
+ * page file grows only after a commit fails, so a refused commit is tried again for a few seconds;
+ * error 1450/1455 on a 16 GB machine with a small page file (iss_pc report 2026-10-26). */
 static int pool(void) {
+    static int failed;
     if (backing_base) return 0;
+    if (failed) return -1;
     runtime_memory_reserve();
     uint64_t bytes=POOL_SIZE+FLEX_SPAN;
-    section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
-    if (!section) { fprintf(stderr,"Runtime: cannot create %" PRIu64 " MiB of guest memory (error %lu); is the page file large enough?\n",bytes>>20,GetLastError()); return -1; }
+    DWORD error=0;
+    for (int attempt=0; attempt<6; ++attempt) {
+        if (attempt) Sleep(1000);
+        section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
+        if (section) break;
+        error=GetLastError();
+        if (error!=ERROR_NO_SYSTEM_RESOURCES && error!=ERROR_COMMITMENT_LIMIT) break;
+        fprintf(stderr,"Runtime: %" PRIu64 " MiB of guest memory not available yet (error %lu), attempt %d of 6\n",bytes>>20,error,attempt+1);
+    }
+    if (!section) {
+        MEMORYSTATUSEX status={.dwLength=sizeof status};
+        GlobalMemoryStatusEx(&status);
+        fprintf(stderr,"Runtime: cannot create %" PRIu64 " MiB of guest memory (error %lu); is the page file large enough? "
+                "Commit limit %llu MiB, %llu MiB free. Set a custom page file (16384 MB initial, 24576 MB maximum) "
+                "in SystemPropertiesAdvanced > Performance > Advanced > Virtual memory and restart Windows.\n",
+                bytes>>20,error,status.ullTotalPageFile>>20,status.ullAvailPageFile>>20);
+        failed=1;
+        return -1;
+    }
     backing_base=MapViewOfFile3(section,GetCurrentProcess(),NULL,0,bytes,0,PAGE_READWRITE,NULL,0);
     return backing_base ? 0 : -1;
 }
@@ -452,6 +474,14 @@ static int direct_range_allocated(uint64_t phys, uint64_t size) {
     return 1;
 }
 
+/* Creates the guest pool at boot, before the GPU driver and the shader precompile raise the
+ * process's commit: one 6 GiB commit fits then, later it may not (Windows). */
+int runtime_memory_create_pool(void) {
+    write_lock();
+    int result=pool();
+    write_unlock();
+    return result;
+}
 static ABI uint64_t direct_size(void) { return POOL_SIZE; }
 static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
                                   uint64_t alignment, int type, int64_t *out) {

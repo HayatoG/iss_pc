@@ -396,6 +396,15 @@ TEXT = {
                   'O {detail} nÃ£o Ã© o do update 1.07: o jogo abre, mas os cheats (mods) feitos para o 1.07 nÃ£o '
                   'aparecem. Copie o param.sfo do 1.07 (no PS4: /system_data/priv/appmeta/CUSA00223/param.sfo) '
                   'para o sce_sys/ da pasta do jogo; veja "Arquivos do jogo necessÃ¡rios" no README.'),
+    'low_commit': ('Warning: Windows has {detail} MB of virtual memory free and the game commits about 6 GB at '
+                   'start (then more for the GPU driver). If it closes with "cannot create ... guest memory", set '
+                   'a custom page file: Win+R, SystemPropertiesAdvanced, Performance > Settings > Advanced > '
+                   'Virtual memory, 16384 MB initial and 24576 MB maximum on C:, Set, restart Windows.',
+                   'Aviso: o Windows tem {detail} MB de memória virtual livre e o jogo reserva uns 6 GB ao abrir '
+                   '(e mais para o driver da GPU). Se ele fechar com "cannot create ... guest memory", defina um '
+                   'arquivo de paginação personalizado: Win+R, SystemPropertiesAdvanced, Desempenho > '
+                   'Configurações > Avançado > Memória virtual, 16384 MB inicial e 24576 MB máximo no C:, '
+                   'Definir, reinicie o Windows.'),
     'unreadable': ('{detail} could not be read (damaged, incomplete or still encrypted): dump it again from the PS4.',
                    'NÃ£o deu para ler o {detail} (danificado, incompleto ou ainda criptografado): faÃ§a o dump de novo no PS4.'),
 }
@@ -618,7 +627,37 @@ def prepare(settings, log=print):
         for line in result.stdout.splitlines():
             log(line)
     isa_table(log)
+    free = free_commit_mb()
+    if free is not None and free < LOW_COMMIT_MB:
+        log(message('low_commit', detail=free))
     return modules
+
+
+# The probe commits the guest pool (5056 MiB direct + 1024 MiB flexible) in one piece at start;
+# with less than this free a small system-managed page file may refuse it (error 1450,
+# report of 2026-10-26: 16 GB RAM, 1800 MB page file).
+LOW_COMMIT_MB = 8192
+
+
+def free_commit_mb():
+    """Windows: commit (RAM + page file) still free, in MB; None elsewhere or when unknown."""
+    if os.name != 'nt':
+        return None
+    try:
+        import ctypes
+
+        class Status(ctypes.Structure):
+            _fields_ = [('length', ctypes.c_ulong), ('load', ctypes.c_ulong), ('total', ctypes.c_ulonglong),
+                        ('avail', ctypes.c_ulonglong), ('ptotal', ctypes.c_ulonglong),
+                        ('pavail', ctypes.c_ulonglong), ('vtotal', ctypes.c_ulonglong),
+                        ('vavail', ctypes.c_ulonglong), ('ext', ctypes.c_ulonglong)]
+        status = Status()
+        status.length = ctypes.sizeof(Status)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return int(status.pavail) >> 20
+    except Exception:
+        return None
 
 
 ISA_TABLE = OUT_DIR / 'isa-rewrite.bin'

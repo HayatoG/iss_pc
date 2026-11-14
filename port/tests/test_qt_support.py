@@ -119,6 +119,16 @@ class LogSummaryTests(unittest.TestCase):
         self.assertEqual(kinds, [('Fault', 2), ('FREEZE', 1), ('STOP', 1)])   # repeated line counted once
         self.assertEqual(s['event_counts'], {'Fault': 2, 'FREEZE': 1, 'STOP': 1})   # "Fault profile" is not a Fault:
 
+    def test_runtime_failure_explains_the_stop(self):
+        # 2026-10-26 report: only the STOP reached the summary; the cause was the line above it
+        s = report.summarize_log('Runtime: application heap API registered\n'
+                                 'Runtime: cannot create 6080 MiB of guest memory (error 1450); is the page file large enough?\n'
+                                 'STOP: guest raised debug exception code=0xa0020013 argument=0x0\n'
+                                 'Runtime: guest threads created=0, exited=0, joined=0\n')
+        self.assertEqual([k for k, _, _ in s['events']], ['Runtime', 'STOP'])
+        short = report.short_report([], report.summary_lines(s, T), T)
+        self.assertIn('Runtime: cannot create 6080 MiB of guest memory (error 1450)', short)
+
     def test_no_config_block_falls_back_to_the_header_lines(self):
         s = report.summarize_log('Settings: tlg.ini\nWindow: Windowed\nGPU 0: X (DiscreteGpu)\nnoise\n')
         self.assertEqual(s['config'], [])
