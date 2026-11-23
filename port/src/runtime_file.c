@@ -57,7 +57,7 @@ typedef struct { char *names; size_t count, *offsets; unsigned char *types; } Li
  * inFAMOUS say "the disc or hard disk is corrupted" at the graffiti. Reads at the position go
  * through compat_pread like pread. */
 typedef struct { int used, host; Listing *dir; size_t position; char path[512];
-                 int64_t offset; int append; pthread_mutex_t io; } File;
+                 int64_t offset; int64_t kbd_atlas_offset; int append; pthread_mutex_t io; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
 static Mount mounts[MAX_MOUNTS];
@@ -65,6 +65,101 @@ static size_t mount_count, opens, reads, writes, missing;
 static size_t bounce_reads, direct_reads; /* TLG_FILE_DIRECT: which path each chunk of a read took */
 static uint64_t bytes_read;
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
+/* Dynamic Keyboard & Mouse button prompt atlas overlay (ISS_KBD_PROMPTS_ATLAS).
+ * Only active when the player enables the Keyboard & Mouse button prompts mod.
+ * Transparently substitutes the 1 MiB 512x512 RGBA8 icon atlas inside lang_*_text.xpps reads
+ * without touching original game files on disk. */
+enum { KBD_ATLAS_BYTES = 512 * 512 * 4, KBD_KCAP_DATA_OFFSET = 0x208 };
+static pthread_mutex_t kbd_atlas_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned char *kbd_atlas_data;
+static int kbd_atlas_loaded; /* 0 = unloaded, 1 = loaded, -1 = unavailable/disabled */
+
+static const unsigned char *kbd_prompts_atlas(void) {
+    int state = __atomic_load_n(&kbd_atlas_loaded, __ATOMIC_ACQUIRE);
+    if (state != 0) return state > 0 ? kbd_atlas_data : NULL;
+    pthread_mutex_lock(&kbd_atlas_lock);
+    if (kbd_atlas_loaded == 0) {
+        const char *path = getenv("ISS_KBD_PROMPTS_ATLAS");
+        if (!path || !*path) path = getenv("TLG_KBD_PROMPTS_ATLAS");
+        if (path && *path) {
+            FILE *fp = fopen(path, "rb");
+            if (fp) {
+                unsigned char *buf = malloc(KBD_ATLAS_BYTES);
+                if (buf && fread(buf, 1, KBD_ATLAS_BYTES, fp) == KBD_ATLAS_BYTES && fgetc(fp) == EOF) {
+                    kbd_atlas_data = buf;
+                    __atomic_store_n(&kbd_atlas_loaded, 1, __ATOMIC_RELEASE);
+                } else {
+                    free(buf);
+                    printf("Mods: Keyboard prompts atlas invalid size (%s); disabled\n", path);
+                    __atomic_store_n(&kbd_atlas_loaded, -1, __ATOMIC_RELEASE);
+                }
+                fclose(fp);
+            } else {
+                printf("Mods: Keyboard prompts atlas missing (%s); disabled\n", path);
+                __atomic_store_n(&kbd_atlas_loaded, -1, __ATOMIC_RELEASE);
+            }
+        } else {
+            __atomic_store_n(&kbd_atlas_loaded, -1, __ATOMIC_RELEASE);
+        }
+    }
+    state = kbd_atlas_loaded;
+    pthread_mutex_unlock(&kbd_atlas_lock);
+    return state > 0 ? kbd_atlas_data : NULL;
+}
+
+static int kbd_is_lang_text_file(const char *guest) {
+    static const char suffix[] = "_text.xpps";
+    size_t n = strlen(guest), s = sizeof(suffix) - 1;
+    if (n < s) return 0;
+    const char *tail = guest + (n - s);
+    for (size_t i = 0; i < s; ++i) {
+        char c = tail[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != suffix[i]) return 0;
+    }
+    return 1;
+}
+
+static int64_t kbd_detect_atlas_offset(int host_fd_val, int64_t file_size, const char *guest) {
+    static const unsigned char oid[8] = {0x29, 0xc1, 0x1c, 0x0c, 0xac, 0x5b, 0x95, 0xed};
+    if (!kbd_prompts_atlas() || host_fd_val < 0 || file_size < KBD_KCAP_DATA_OFFSET + KBD_ATLAS_BYTES) return 0;
+    if (!kbd_is_lang_text_file(guest)) return 0;
+    unsigned char hdr[4096];
+    ssize_t got = pread(host_fd_val, hdr, sizeof(hdr), 0);
+    if (got < 0x30) return 0;
+    size_t limit = (size_t)got - sizeof(oid);
+    for (size_t pos = 0x20; pos <= limit; ++pos) {
+        if (memcmp(hdr + pos, oid, sizeof(oid)) != 0) continue;
+        uint32_t dw0, dw1, dw2;
+        memcpy(&dw0, hdr + pos - 0x20, 4);
+        memcpy(&dw1, hdr + pos - 0x1c, 4);
+        memcpy(&dw2, hdr + pos - 0x18, 4);
+        if (dw1 == 0x00a00000u && dw2 == 0x007fc1ffu) {
+            int64_t off = (int64_t)KBD_KCAP_DATA_OFFSET + (int64_t)dw0;
+            if (off > 0 && off + (int64_t)KBD_ATLAS_BYTES <= file_size) {
+                printf("Mods: Keyboard prompts active (%s @0x%llx)\n", guest, (unsigned long long)off);
+                return off;
+            }
+        }
+    }
+    return 0;
+}
+
+static void kbd_prompts_patch_read(const File *f, void *buffer, int64_t file_offset, ssize_t n) {
+    if (!f || f->kbd_atlas_offset <= 0 || file_offset < 0 || n <= 0) return;
+    const unsigned char *atlas = kbd_prompts_atlas();
+    if (!atlas) return;
+    const int64_t atlas_off = f->kbd_atlas_offset;
+    const int64_t start = file_offset > atlas_off ? file_offset : atlas_off;
+    const int64_t end_r = file_offset + (int64_t)n;
+    const int64_t end_a = atlas_off + (int64_t)KBD_ATLAS_BYTES;
+    const int64_t end = end_r < end_a ? end_r : end_a;
+    if (end > start) {
+        memcpy((unsigned char *)buffer + (size_t)(start - file_offset),
+               atlas + (size_t)(start - atlas_off),
+               (size_t)(end - start));
+    }
+}
 /* Save-identity research only. No buffer edits or guest save-format assumptions. */
 static int karma_save_trace(void){const char *v=getenv("ISS_KARMA_SAVE_TRACE");return v&&v[0]=='1';}
 static int karma_save_file(const File *f){return f&&!strncmp(f->path,"/savedata",9)&&strstr(f->path,"/dis.dat")&&strlen(strstr(f->path,"/dis.dat"))==8;}
@@ -269,11 +364,12 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     Listing *dir=NULL;
     if (!fstat(host,&s) && S_ISDIR(s.st_mode)) dir=list_directory(path);
 #endif
+    const int64_t kbd_off=(!dir && host>=0 && !(flags&3)) ? kbd_detect_atlas_offset(host,(int64_t)s.st_size,guest) : 0;
     pthread_mutex_lock(&lock);
     int fd=-1;
     for (int i=3;i<MAX_FILES;++i) if (!files[i].used) { fd=i; break; }
     if (fd<0) { pthread_mutex_unlock(&lock); if (host>=0) close(host); free_listing(dir); if (runtime_verbose()) log_io_problem("open (descriptor table full)",guest,-EMFILE,EMFILE); return -EMFILE; }
-    files[fd]=(File){.used=1,.host=host,.dir=dir,.append=(flags&0x8)!=0};
+    files[fd]=(File){.used=1,.host=host,.dir=dir,.kbd_atlas_offset=kbd_off,.append=(flags&0x8)!=0};
     pthread_mutex_init(&files[fd].io,NULL);
     snprintf(files[fd].path,sizeof(files[fd].path),"%s",guest);
     if(karma_save_trace()&&karma_save_file(&files[fd]))fprintf(stderr,"KARMA_SAVE_OPEN guest=%s host=%s flags=%x size=%lld\n",guest,path,flags,(long long)s.st_size);
@@ -464,39 +560,42 @@ static void trace_startup_package_read(int fd,int64_t offset,uint64_t requested,
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
-    int64_t karma_offset=-1;
-#ifdef _WIN32
+    int64_t read_offset=-1;
     File *f=fd>=3 ? get(fd) : NULL;
+#ifdef _WIN32
     ssize_t n;
     if (f) {
         pthread_mutex_lock(&f->io);
-        karma_offset=f->offset;
+        read_offset=f->offset;
         n=full_io(h,buffer,size,f->offset);
         if (n>0) f->offset+=n;
         pthread_mutex_unlock(&f->io);
     } else n=full_io(h,buffer,size,-1);
 #else
-    if(fd>=3&&karma_save_file(get(fd)))karma_offset=host_lseek(h,0,SEEK_CUR);
+    if (f && (karma_save_file(f) || f->kbd_atlas_offset>0)) read_offset=host_lseek(h,0,SEEK_CUR);
     ssize_t n=full_io(h,buffer,size,-1);
 #endif
-    if (n<0) { int e=errno; log_read_problem("read",fd,size,-1,n,e); open_trace_read(fd,"read FAILED",karma_offset,size,n); return -e; }
-    open_trace_read(fd,"read",karma_offset,size,n);
-    trace_startup_package_read(fd,karma_offset,size,n);
+    if (n<0) { int e=errno; log_read_problem("read",fd,size,-1,n,e); open_trace_read(fd,"read FAILED",read_offset,size,n); return -e; }
+    open_trace_read(fd,"read",read_offset,size,n);
+    trace_startup_package_read(fd,read_offset,size,n);
+    if (n>0 && f && f->kbd_atlas_offset>0) kbd_prompts_patch_read(f,buffer,read_offset,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
-    karma_trace_io(fd,"read",karma_offset,n);
-    if(n>0&&karma_save_file(get(fd)))iss_karma_save_part(fd,buffer,karma_offset,n,0);
+    karma_trace_io(fd,"read",read_offset,n);
+    if(n>0&&karma_save_file(f))iss_karma_save_part(fd,buffer,read_offset,n,0);
     return n;
 }
 static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
+    File *f=fd>=3 ? get(fd) : NULL;
     ssize_t n=full_io(h,buffer,size,offset);
     if (n<0) { int e=errno; log_read_problem("pread",fd,size,offset,n,e); open_trace_read(fd,"pread FAILED",offset,size,n); return -e; }
     open_trace_read(fd,"pread",offset,size,n);
     trace_startup_package_read(fd,offset,size,n);
+    if (n>0 && f && f->kbd_atlas_offset>0) kbd_prompts_patch_read(f,buffer,offset,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     karma_trace_io(fd,"pread",offset,n);
-    if(n>0&&karma_save_file(get(fd)))iss_karma_save_part(fd,buffer,offset,n,0);
+    if(n>0&&karma_save_file(f))iss_karma_save_part(fd,buffer,offset,n,0);
     return n;
 }
 #ifdef _WIN32
