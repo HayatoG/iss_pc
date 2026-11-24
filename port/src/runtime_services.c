@@ -177,7 +177,7 @@ static ABI int32_t http_request_url(int connection,int method,const char *url,ui
 }
 
 static int papertrail_evidence(const char *json,int week,int mission) {
-    char key[12];
+    char key[32];   /* room for any two ints: -Werror=format-truncation on Linux */
     snprintf(key,sizeof(key),"\"w%dm%de\"",week,mission);
     const char *field=strstr(json,key);
     if (!field) return 0;

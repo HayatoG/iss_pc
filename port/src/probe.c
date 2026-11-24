@@ -572,7 +572,6 @@ static int sfo_value(const char *path, const char *key, char *text, size_t text_
  * an EU 1.07 title as CUSA00223 (iss_feature_title); each still checks its own code signatures.
  * The save folder, crash report and window title keep the real title ID. */
 #define ISS_US107_CODE_FNV 0xff63c6e059cc595cull   /* US 1.07 executable segments, measured 2026-11-06 */
-static uint64_t iss_code_fnv;
 static int iss_us_code;
 static void iss_feature_title(const char *path, char *serial, size_t size) {
     sfo_value(path, "TITLE_ID", serial, size, NULL);
@@ -1954,7 +1953,6 @@ int main(int argc, char **argv) {
         for (uint64_t s = 0; s < ns; ++s)
             if (segments[s].flags & 1)
                 for (uint64_t k = 0; k < segments[s].size; ++k) { h ^= image[segments[s].address + k]; h *= 1099511628211ull; }
-        iss_code_fnv = h;
         iss_us_code = ISS_US107_CODE_FNV && h == ISS_US107_CODE_FNV;
         printf("Game code fingerprint: %016llx%s\n", (unsigned long long)h, iss_us_code ? " (US 1.07 executable)" : "");
         if (iss_us_code) {
