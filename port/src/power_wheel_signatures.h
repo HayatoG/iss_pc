@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#ifndef PW_CODE_BYTE
+#define PW_CODE_BYTE(at,byte) (byte)
+#endif
 /* hash: the original code; alt (0 = none): the same code with a known mod applied. */
 typedef struct { uint32_t offset, length, hash, alt; } PwCodeCheck;
 static const PwCodeCheck pw_code_checks[]={
@@ -25,7 +28,7 @@ static inline int pw_signatures(const unsigned char *image,size_t size){
         const PwCodeCheck *p=&pw_code_checks[i];
         if(p->offset>size || p->length>size-p->offset)return 0;
         uint32_t hash=2166136261u;
-        for(uint32_t j=0;j<p->length;j++)hash=(hash^image[p->offset+j])*16777619u;
+        for(uint32_t j=0;j<p->length;j++)hash=(hash^PW_CODE_BYTE(p->offset+j,image[p->offset+j]))*16777619u;
         if(hash!=p->hash && (!p->alt || hash!=p->alt))return 0;
     }
     return 1;

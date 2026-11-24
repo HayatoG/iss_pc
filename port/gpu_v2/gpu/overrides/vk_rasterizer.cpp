@@ -347,6 +347,7 @@ void Rasterizer::DumpAfter(const Pipeline* pipeline) {
                 continue;
             }
             if (!std::strcmp(what, "srt")) address = 2;
+            else if (!std::strcmp(what, "cb")) address = 3;
             else if (!std::strcmp(what, "vb")) address = 1;
             else address = std::strtoull(what, nullptr, 16);
             if (const auto slash = item.find('/'); slash != std::string::npos)
@@ -405,6 +406,32 @@ void Rasterizer::DumpAfter(const Pipeline* pipeline) {
             for (const auto& range : dump_vertex_ranges) {
                 DumpBufferToFile(fmt::format("f{}_s{}_vb{}", g_dump.frame, g_dump.seq - 1, index++),
                                  range.buffer, range.offset, range.base, range.size);
+            }
+            continue;
+        }
+        if (address == 3) {
+            // "hash:cb" (2026-11-20): every buffer the stages read, as guest memory has it (the
+            // constants the CPU wrote, e.g. the lighting settings), up to 64 KB each, to files.
+            using namespace Common::FS;
+            const auto dir = GetUserPath(PathType::LogDir) / "xray";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            u32 index = 0;
+            for (const Shader::Info* stage : pipeline->GetStages()) {
+                if (!stage) continue;
+                for (const auto& desc : stage->buffers) {
+                    if (desc.IsSpecial() || desc.is_written) continue;
+                    const auto vsharp = desc.GetSharp(*stage);
+                    const u64 size = std::min<u64>(vsharp.GetSize(), 64u << 10);
+                    if (!vsharp.base_address || !size) continue;
+                    std::vector<u8> host(size);
+                    memory->CopySparseMemory(vsharp.base_address, host.data(), size);
+                    const auto name = fmt::format("f{}_s{}_cb{}_{:x}_{}.host.raw", g_dump.frame,
+                                                  g_dump.seq - 1, index++, vsharp.base_address, size);
+                    const auto file = IOFile{dir / name, FileAccessMode::Create};
+                    file.WriteRaw<u8>(host.data(), size);
+                    LOG_INFO(Render_Vulkan, "DUMP cb {:x}+{:x} written: {}", vsharp.base_address, size, name);
+                }
             }
             continue;
         }
@@ -796,6 +823,16 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()},
       occlusion{instance, scheduler} {
     IssTemporal::Probe(instance);
+    {
+        // The card's video memory (largest device-local heap) for the huge read window
+        // (ClampHugeRead, buffer_cache.h): whole tables when it fits, the 64 MB cut below 7 GB.
+        const auto props = instance.GetPhysicalDevice().getMemoryProperties();
+        u64 vram = 0;
+        for (u32 i = 0; i < props.memoryHeapCount; ++i)
+            if (props.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal)
+                vram = std::max<u64>(vram, props.memoryHeaps[i].size);
+        VideoCore::g_iss_vram_bytes.store(vram, std::memory_order_relaxed);
+    }
     if (const char* value = std::getenv("ISS_CP_SPLIT_PREPARE_SERIAL");
         value && value[0] == '1') {
         // Exercise the thread-local queue selection and owner scratch on the existing
@@ -1452,7 +1489,7 @@ std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
     // Pause guard (pause_guard.h): in the pause every native/fast path below is off.
     // While the draws are redirected to output-size twins (IssTemporal), only the draw paths that scale their
     // own viewport and push constants (DrawRecord, DrawIndirect) may run.
-    const bool native_off = pass_learn || iss::pause_guard::Blocked() || (iss_temporal && iss_temporal->UiActive());
+    const bool native_off = pass_learn || iss::pause_guard::Blocked(iss::pause_guard::Draw) || (iss_temporal && iss_temporal->UiActive());
     if(!pipelined){DrainDrawPipe(5);SubmitFeedbackBatch(scheduler);PeriodicSubmit(scheduler);}
     iss::diagnostics::Scope phase_scope(iss::diagnostics::Draw);
     RENDERER_TRACE;
@@ -1897,6 +1934,17 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
                  }());
     }
 
+    // Use a separate profile key for this draw so it cannot be confused with a
+    // compute dispatch. Mode 2 avoids overlapping the draw and pass reports.
+    static const bool profile_lighting_draw = [] {
+        const char* value = std::getenv("ISS_PROFILE_LIGHTING_DRAW");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    const bool time_lighting_draw = profile_lighting_draw &&
+        Common::Perf::GetTuning().gpu_profile.load(std::memory_order_relaxed) == 2 &&
+        pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == 0x24DAD4BE;
+    if (time_lighting_draw) scheduler.ProfileDispatchBegin(0xD000000024DAD4BEull);
+
     if (is_indexed) {
         ASSERT(sizeof(VkDrawIndexedIndirectCommand) == stride);
 
@@ -1918,6 +1966,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         }
         DebugState.IncDrawCall();
     }
+    if (time_lighting_draw) scheduler.ProfileDispatchEnd();
     iss::feedback_join::Recorded();
 
     if (g_dump.frames_left != 0) [[unlikely]] {
@@ -4168,11 +4217,63 @@ u32 g_num_traced_writers = 0;
 #include "native_visual_probe.inl"
 #include "native_depth_run.inl"
 #include "native_shadow_rasterizer.inl"
+// Record the first shortened binding per shader and renderer path. Keep the
+// capture bounded and leave the binding policy untouched.
+static u64 TraceHugeRead(const char* path, const Shader::Info& stage, u32 slot,
+                         u64 address, u64 requested, bool written) {
+    const u64 size = VideoCore::ClampHugeRead(requested, written);
+    static const bool enabled = [] {
+        const char* value = std::getenv("ISS_HUGE_READ_TRACE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    if (!enabled || size == requested) return size;
+
+    struct Binding {
+        const char* path;
+        u64 shader;
+        u32 stage;
+        u32 slot;
+    };
+    static std::mutex mutex;
+    static std::array<Binding, 128> seen{};
+    static size_t count = 0;
+    const Binding key{path, stage.pgm_hash, u32(stage.hw_stage), slot};
+    const std::scoped_lock lock{mutex};
+    if (count == seen.size()) return size;
+    for (size_t i = 0; i < count; ++i) {
+        const auto& prior = seen[i];
+        if (prior.path == key.path && prior.shader == key.shader &&
+            prior.stage == key.stage && prior.slot == key.slot) return size;
+    }
+    seen[count++] = key;
+    std::fprintf(stderr, "HUGE_READ_BINDING path=%s shader=%016llx stage=%u slot=%u "
+                         "address=%llx requested=%llu bound=%llu\n",
+                 path, static_cast<unsigned long long>(key.shader), key.stage, key.slot,
+                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(requested),
+                 static_cast<unsigned long long>(size));
+    return size;
+}
+
 #include "native_material_rasterizer.inl"
 #include "native_recorder.inl"
 #include "native_gbuffer_rasterizer.inl"
 #include "native_passes_rasterizer.inl"
 #include "native_compute_rasterizer.inl"
+
+// RAM diagnosis (2026-11-14): how many learned native templates the two big tables hold (and the
+// ones being dropped), for the periodic VRAM_BREAKDOWN report. Shared locks only.
+void IssNativeTableSizes(unsigned long long out[5]) {
+    {
+        auto& t = NativeMaterial::State();
+        std::shared_lock lock{t.mutex};
+        out[0] = t.templates.size(); out[1] = t.dying.size(); out[2] = t.dynamics.size();
+    }
+    {
+        auto& t = NativeCompute::State();
+        std::shared_lock lock{t.mutex};
+        out[3] = t.templates.size(); out[4] = t.dying.size();
+    }
+}
 
 void Rasterizer::TraceBufferWriters(const Shader::Info& stage) {
     if (g_num_traced_ranges == 0 || g_num_traced_writers >= g_traced_writers.size()) {
@@ -4389,7 +4490,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
-                const u64 size = VideoCore::ClampHugeRead(
+                const u64 size = TraceHugeRead("translated", stage, native_index, vsharp.base_address,
                     memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()), desc.is_written);
                 // Bounded, opt-in investigation of native 4K lighting. Observe
                 // actual descriptor/clamp values; never substitute brightness

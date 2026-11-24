@@ -414,7 +414,8 @@ bool Rasterizer::NativeMaterialBind(const NativeMaterialTemplate& t) {
             continue;
         }
         const u64 size =
-            VideoCore::ClampHugeRead(memory->ClampRangeSize(sharp.base_address, sharp.GetSize()), desc.is_written);
+            TraceHugeRead("native-material", stage, slot.desc, sharp.base_address,
+                          memory->ClampRangeSize(sharp.base_address, sharp.GetSize()), desc.is_written);
         bool known_unwritten = false;
         const auto [buffer, offset] =
             buffer_cache.ObtainBuffer(sharp.base_address, u32(size), false, desc.is_formatted,
@@ -541,7 +542,24 @@ void Rasterizer::NativeMaterialLearn(u64 state_key, const GraphicsPipeline* pipe
     {
         std::unique_lock lock{tables.mutex};
         // (Not while the previous table is still being dropped: the table grows a while.)
-        if (tables.templates.size() >= 131072 && tables.dying.empty()) {
+        // ISS_NATIVE_MATERIAL_CAP (2026-11-14, default 65536, was 131072; 16384 cost ~11 fps of 82
+        // from relearning after each wipe): measured ~11 KB of RAM
+        // per template and ~500 learned a second while moving, the old cap filled in ~4 minutes
+        // to ~1.4 GB (twice that while the previous table was dropped): RAM climbing all session,
+        // out of memory on 16 GB PCs with integrated graphics (iss_pc#837).
+        static const size_t material_cap = [] {
+            const char* p = std::getenv("ISS_NATIVE_MATERIAL_CAP");
+            const unsigned long long v = p && *p ? std::strtoull(p, nullptr, 10) : 65536;
+            return size_t(std::clamp<unsigned long long>(v, 1024, 131072));
+        }();
+        // Over the cap while the previous table is still being dropped (2026-11-14: dropping, 4
+        // per ms, fell behind ~600 learns a second and the table reached 56k of a 16k cap; not
+        // learning meanwhile cost ~8-11 fps of 82): every learn then also erases two dropped
+        // entries (~9 us each), so the old table empties twice as fast as the new one grows and
+        // both together stay about one cap of RAM while learning never stops.
+        if (tables.templates.size() + tables.dying.size() >= material_cap)
+            for (int k = 0; k < 2 && !tables.dying.empty(); ++k) tables.dying.erase(tables.dying.begin());
+        if (tables.templates.size() >= material_cap && tables.dying.empty()) {
             // Freeing 131072 templates at once stalled the command processor ~400 ms (a frame
             // freeze after ~35 min of play). A thread of its own freeing them was far worse: it
             // held the process heap ~40 s against the command processor relearning (3 fps,

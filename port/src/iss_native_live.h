@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "iss_native_resolution.h"
+#include "iss_native_aspect.h"
 /* Enabled by default; explicit zero or malformed overrides fail closed. */
 static inline int iss_native_live_option(const char *value){return !value||!strcmp(value,"1");}
 enum { ISS_NATIVE_FRAME_SITE=0x1f0be0,ISS_NATIVE_FRAME_STOLEN=20,
@@ -14,15 +15,38 @@ static const unsigned char iss_native_frame_signature[]={0x55,0x48,0x89,0xe5,0x4
 static const unsigned char iss_native_target_signature[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x48,0x89,0xfb,0x48,0x8d,0xbb,0xdc,0x1e,1,0};
 static const unsigned char iss_native_safe_signature[]={0x4d,0x89,0xa5,0xa0,0xdc,1,0,0x41,0xc6,0x85,4,0x0f,0xdf,0,0};
 static const unsigned char iss_native_dim_signature[]={0x41,0x89,0x5d,0,0x41,0x89,0x4d,4,0x41,0x89,0x45,0x0c,0x41,0x89,0x55,0x10};
+/* inFAMOUS First Light 1.04 (2026-11-12): the same four hooks (frame, safe point and dimension stores are
+ * byte-identical; the target rebuild function starts with another field) on its own frame object
+ * (0x11362d0, same field offsets) and render-target object (0xf84740). */
+static const unsigned char iss_native_target_signature_fl[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x48,0x89,0xfb,0x48,0x8d,0xbb,0x68,0x26,1,0};
+typedef struct {
+ uint32_t frame_site,target_site,safe_site,dim_site;
+ const unsigned char *target_signature;
+ uint32_t frame_object,target_object;
+ const IssNativeLayout *native;
+ const IssNativeAspectLayout *aspect;
+} IssNativeLiveLayout;
+static const IssNativeLiveLayout iss_native_live_layout_ss={ISS_NATIVE_FRAME_SITE,ISS_NATIVE_TARGET_SITE,ISS_NATIVE_SAFE_SITE,ISS_NATIVE_DIM_SITE,
+ iss_native_target_signature,0xf1bcd0,0xe682b0,&iss_native_layout_ss,&iss_native_aspect_layout_ss};
+static const IssNativeLiveLayout iss_native_live_layout_fl={0x237670,0x1bc1d0,0x2376f7,0x2377fe,
+ iss_native_target_signature_fl,0x11362d0,0xf84740,&iss_native_layout_fl,&iss_native_aspect_layout_fl};
+/* The verified layout for this game's code, or NULL (wrong title/version or any byte different). */
+static inline const IssNativeLiveLayout *iss_native_live_layout_for(const unsigned char *image,size_t size,const char *title,const char *version){
+ const IssNativeLiveLayout *L=NULL;
+ if(!image||!title||!version)return NULL;
+ if(!strcmp(title,"CUSA00223")&&!strcmp(version,"01.07"))L=&iss_native_live_layout_ss;
+ else if(!strcmp(title,"CUSA00575")&&!strcmp(version,"01.04"))L=&iss_native_live_layout_fl;
+ if(!L)return NULL;
+ if(size<L->frame_site+sizeof(iss_native_frame_signature)||size<L->target_site+sizeof(iss_native_target_signature)||
+    size<L->safe_site+sizeof(iss_native_safe_signature)||size<L->dim_site+sizeof(iss_native_dim_signature))return NULL;
+ if(memcmp(image+L->frame_site,iss_native_frame_signature,sizeof(iss_native_frame_signature))||
+    memcmp(image+L->target_site,L->target_signature,sizeof(iss_native_target_signature))||
+    memcmp(image+L->safe_site,iss_native_safe_signature,sizeof(iss_native_safe_signature))||
+    memcmp(image+L->dim_site,iss_native_dim_signature,sizeof(iss_native_dim_signature)))return NULL;
+ return L;
+}
 static inline int iss_native_live_signature(const unsigned char *image,size_t size,const char *title,const char *version){
- return image&&title&&version&&!strcmp(title,"CUSA00223")&&!strcmp(version,"01.07")&&
-  size>=ISS_NATIVE_FRAME_SITE+sizeof(iss_native_frame_signature)&&size>=ISS_NATIVE_TARGET_SITE+sizeof(iss_native_target_signature)&&
-  size>=ISS_NATIVE_SAFE_SITE+sizeof(iss_native_safe_signature)&&
-  size>=ISS_NATIVE_DIM_SITE+sizeof(iss_native_dim_signature)&&
-  !memcmp(image+ISS_NATIVE_FRAME_SITE,iss_native_frame_signature,sizeof(iss_native_frame_signature))&&
-  !memcmp(image+ISS_NATIVE_TARGET_SITE,iss_native_target_signature,sizeof(iss_native_target_signature))&&
-  !memcmp(image+ISS_NATIVE_SAFE_SITE,iss_native_safe_signature,sizeof(iss_native_safe_signature))&&
-  !memcmp(image+ISS_NATIVE_DIM_SITE,iss_native_dim_signature,sizeof(iss_native_dim_signature));
+ return iss_native_live_layout_for(image,size,title,version)!=NULL;
 }
 /* Saved GPR slots in the bridge: R15,R14,R13,R12,R11,R10,R9,R8,
  * RDI,RSI,RBP,RBX,RDX,RCX,RAX,RFLAGS. Only dimension-producing GPRs change. */
@@ -30,11 +54,11 @@ static inline void iss_native_live_dimension_registers(uint64_t *saved,const Iss
  saved[11]=p->width;saved[13]=p->height;saved[14]=p->width;saved[12]=p->height;
  saved[9]=(saved[6]&1)?p->width:0;saved[8]=(saved[6]&1)?p->height:0;
 }
-static inline int iss_native_live_projection_redirect(unsigned char *image,size_t size,const IssNativePlan *plan,uintptr_t cells){
- if(!image||!plan||!cells||size<0x58030c+sizeof(iss_native_projection))return 0;
- IssNativeSite sites[ISS_NATIVE_SITE_COUNT];iss_native_changes(plan,sites);
+static inline int iss_native_live_projection_redirect_for(const IssNativeLayout *L,unsigned char *image,size_t size,const IssNativePlan *plan,uintptr_t cells){
+ if(!L||!image||!plan||!cells||size<L->projection_at+sizeof(iss_native_projection))return 0;
+ IssNativeSite sites[ISS_NATIVE_SITE_COUNT];iss_native_changes_for(L,plan,sites);
  if(memcmp(image+sites[16].offset,sites[16].after,7)||memcmp(image+sites[17].offset,sites[17].after,7)||
-    memcmp(image+0x58030c+7,iss_native_projection+7,sizeof(iss_native_projection)-7))return 0;
+    memcmp(image+L->projection_at+7,L->projection+7,sizeof(iss_native_projection)-7))return 0;
  int32_t displacements[2];
  for(unsigned i=0;i<2;i++){
   intptr_t distance=(intptr_t)(cells+i*4)-(intptr_t)(image+sites[16+i].offset+7);
@@ -44,10 +68,15 @@ static inline int iss_native_live_projection_redirect(unsigned char *image,size_
  for(unsigned i=0;i<2;i++)memcpy(image+sites[16+i].offset+3,&displacements[i],4);
  return 1;
 }
+static inline int iss_native_live_projection_redirect(unsigned char *image,size_t size,const IssNativePlan *plan,uintptr_t cells){
+ return iss_native_live_projection_redirect_for(&iss_native_layout_ss,image,size,plan,cells);
+}
 #ifdef __cplusplus
 extern "C" {
 #endif
 void runtime_native_live_attach(uintptr_t base);
+/* The same with another game's objects (First Light); runtime_native_live_attach uses Second Son's. */
+void runtime_native_live_attach_layout(uintptr_t base,const IssNativeLiveLayout *layout);
 void __attribute__((ms_abi)) runtime_native_frame_observer(const void *object,int frame);
 void __attribute__((ms_abi)) runtime_native_target_observer(const void *object,int unused);
 void __attribute__((ms_abi)) runtime_native_safe_resize(void *object);

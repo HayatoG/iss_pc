@@ -28,8 +28,12 @@ namespace ImGui::Core {
 bool MustKeepDrawing(){return iss::save_ui::Active();}
 static const Frontend::WindowSDL *window;
 static uint64_t last_tick;
+// The overlay pipeline's color format (2026-11-19): ImGui keeps a pointer to it and rewrites it when
+// the swapchain changes format (HDR on/off, OnSurfaceFormatChange). It pointed at Initialize's
+// parameter, gone once Initialize returned: switching to HDR read freed stack and crashed.
+static vk::Format overlay_format;
 void Initialize(const ::Vulkan::Instance& instance,const Frontend::WindowSDL& w,u32 count,vk::Format format){
-    window=&w;ImGui::CreateContext();auto& io=ImGui::GetIO();
+    window=&w;ImGui::CreateContext();auto& io=ImGui::GetIO();overlay_format=format;
 #ifdef IMGUI_HAS_DOCK
     io.ConfigFlags|=ImGuiConfigFlags_DockingEnable;
 #endif
@@ -39,7 +43,7 @@ void Initialize(const ::Vulkan::Instance& instance,const Frontend::WindowSDL& w,
         .instance=instance.GetInstance(),.physical_device=instance.GetPhysicalDevice(),
         .device=instance.GetDevice(),.queue_family=instance.GetPresentQueueFamilyIndex(),
         .queue=instance.GetPresentQueue(),.image_count=count,.min_allocation_size=1024*1024,
-        .pipeline_rendering_create_info{.colorAttachmentCount=1,.pColorAttachmentFormats=&format},
+        .pipeline_rendering_create_info{.colorAttachmentCount=1,.pColorAttachmentFormats=&overlay_format},
         .check_vk_result_fn=[](vk::Result r){if(r!=vk::Result::eSuccess)std::fprintf(stderr,"ImGui Vulkan error: %d\n",int(r));}
     };
     ImGui::Vulkan::Init(info);TextureManager::StartWorker();last_tick=SDL_GetPerformanceCounter();

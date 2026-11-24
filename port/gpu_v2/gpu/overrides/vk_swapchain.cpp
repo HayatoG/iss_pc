@@ -385,6 +385,17 @@ void Swapchain::FindPresentFormat() {
             return format == SURFACE_FORMAT_HDR;
         }) != formats.end();
     // Also make sure that user allowed us to use HDR
+    {
+        // HDR diagnosis (2026-11-19): whether the display offers HDR10 (Windows HDR on) and
+        // whether BB_HDR=1 allows it; the game's own HDR option is selectable only when both are.
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            std::fprintf(stderr, "HDR: display offers HDR10 (BT.2020 PQ)=%d, BB_HDR allows it=%d -> game sees HDR=%d\n",
+                         int(supports_hdr), int(EmulatorSettings.IsHdrAllowed()),
+                         int(supports_hdr && EmulatorSettings.IsHdrAllowed()));
+        }
+    }
     supports_hdr &= EmulatorSettings.IsHdrAllowed();
 
     // If there is a single undefined surface format, the device doesn't care, so we'll just use

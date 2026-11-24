@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <span>
@@ -72,10 +74,28 @@ struct QueueContext {
 /// ISS_HUGE_READ_WINDOW_MB (default 64: 32M 16-bit entries); reads past it return zero (robust
 /// buffer access). The onion one stays whole: its residency is what lets the native paths find
 /// the per-frame buffers there (cut too, they missed 93% of their draws: 48 -> 33 fps).
+/// The window when ISS_HUGE_READ_WINDOW_MB is not set (2026-11-22), by the card's video memory
+/// (largest device-local heap, recorded by the Rasterizer at startup):
+///  - 7 GB or more: 0, the whole table. The night baked lighting is stored past its first 64 MB:
+///    cut there, far buildings were floodlit and near roofs and Delsin dark (tested 2026-11-04).
+///    Cost measured then: about 1 fps and +2.5 GB of VRAM (6.5 GB in total at 2560x1440).
+///  - less: 64 MB. The whole table does not fit on 4 GB cards (ErrorOutOfDeviceMemory in Seattle
+///    combat, HayatoG/iss_pc#855); these cards get the night lighting limitation instead of a crash.
+/// Unknown video memory (0) keeps the old default, 64.
+inline std::atomic<u64> g_iss_vram_bytes{0};
+inline u64 HugeReadAutoWindow(u64 vram) {
+    return vram >= (u64{7} << 30) ? 0 : u64{64} << 20;
+}
 inline u64 ClampHugeRead(u64 size, bool written) {
     static const u64 window = [] {
         const char* p = std::getenv("ISS_HUGE_READ_WINDOW_MB");
-        return u64(p ? std::strtoull(p, nullptr, 10) : 64) << 20;
+        const u64 vram = g_iss_vram_bytes.load(std::memory_order_relaxed);
+        const u64 w = p && *p ? u64(std::strtoull(p, nullptr, 10)) << 20 : HugeReadAutoWindow(vram);
+        std::fprintf(stderr, "HUGE_READ_WINDOW %s: %llu MB (%s), video memory %llu MB\n",
+                     p && *p ? "set" : "auto", (unsigned long long)(w >> 20),
+                     w ? "large read-only tables cut to this size" : "whole tables, night lighting intact",
+                     (unsigned long long)(vram >> 20));
+        return w;
     }();
     static const u64 limit = [] {
         const char* p = std::getenv("ISS_HUGE_READ_LIMIT_MB");

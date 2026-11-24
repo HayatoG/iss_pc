@@ -40,6 +40,8 @@
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
+namespace Vulkan { void IssNativeTableSizes(unsigned long long out[5]); } // vk_rasterizer.cpp
+
 namespace VideoCore {
 
 static bool NativeResizeTargetFix() {
@@ -245,6 +247,48 @@ void TextureCache::RefreshGcLimits() {
     // In image budget mode the limits apply to the images alone and the guard above to the
     // device; otherwise both are the device's usage.
     if (!ImageBudgetMode()) critical_gc_memory = std::min(critical_gc_memory, device_guard_memory);
+    // RAM guard (2026-11-14, automatic and fixed budgets): the texture cache costs system RAM as
+    // well (and is system RAM on integrated GPUs, iss_pc#837: out of memory after ~6 min on a
+    // 780M). When the PC's available RAM falls under the low mark the textures above what they
+    // hold now are collected (pressure), under half of it aggressively (critical); 512 MB stay.
+    // Normal limits come back once RAM is available again. ISS_RAM_LOW_MB sets the mark (default
+    // max(1536 MB, 10% of the RAM), 0 = off).
+#ifndef ISS_RAM_LOW_MB_DEFAULT
+#define ISS_RAM_LOW_MB_DEFAULT -1
+#endif
+    if (ImageBudgetMode()) {
+        static const long long low_setting = [] {
+            const char* p = std::getenv("ISS_RAM_LOW_MB");
+            return p && *p ? (long long)std::strtoll(p, nullptr, 10) : (long long)ISS_RAM_LOW_MB_DEFAULT;
+        }();
+        u64 avail = 0, total = 0;
+        static int last_state = 0;
+        static unsigned notes = 0;
+        int state = 0;
+        if (low_setting != 0 && iss::heap_census::SystemRam(avail, total)) {
+            const u64 low = low_setting > 0 ? u64(low_setting) << 20
+                                            : std::max<u64>(1536ull << 20, total / 10);
+            const u64 floor = 512ull << 20;
+            const u64 hold = std::max<u64>(image_bytes, floor);
+            if (avail < low / 2) {
+                state = 2;
+                critical_gc_memory = std::min<u64>(critical_gc_memory, hold);
+                pressure_gc_memory = std::min<u64>(pressure_gc_memory, hold);
+            } else if (avail < low) {
+                state = 1;
+                pressure_gc_memory = std::min<u64>(pressure_gc_memory, hold);
+            }
+            if (state != last_state && notes < 60) {
+                ++notes;
+                std::fprintf(stderr,
+                             "TEXTURE_GC ram_guard=%s available=%llu MB of %llu MB low_mark=%llu MB textures=%llu MB\n",
+                             state == 2 ? "critical" : state == 1 ? "low" : "off",
+                             (unsigned long long)(avail >> 20), (unsigned long long)(total >> 20),
+                             (unsigned long long)(low >> 20), (unsigned long long)(image_bytes >> 20));
+            }
+        }
+        last_state = state;
+    }
     pressure_gc_memory = std::min(pressure_gc_memory, critical_gc_memory);
     trigger_gc_memory = std::min(trigger_gc_memory, pressure_gc_memory);
 }
@@ -1877,6 +1921,12 @@ void TextureCache::GarbageCollectImages() {
                          (unsigned long long)(buffer_cache.ArenaReasonBytes(0) >> 20),
                          (unsigned long long)(buffer_cache.ArenaReasonBytes(1) >> 20),
                          (unsigned long long)(buffer_cache.ArenaReasonBytes(2) >> 20));
+        }
+        {
+            unsigned long long n[5] = {};
+            Vulkan::IssNativeTableSizes(n);
+            std::fprintf(stderr, "NATIVE_TABLES materials=%llu dying=%llu dynamic_states=%llu compute=%llu dying=%llu\n",
+                         n[0], n[1], n[2], n[3], n[4]);
         }
         // What the game holds of its GPU heaps (live) against the span it reached: the arena
         // can only shrink to the live part.

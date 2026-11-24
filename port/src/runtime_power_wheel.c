@@ -1,5 +1,9 @@
 #include "iss_power_wheel.h"
 #include "power_wheel_transaction.h"
+extern int runtime_overlay_mod_available(int);
+extern int runtime_overlay_mod_get(int);
+extern unsigned char runtime_overlay_mod_original_byte(unsigned long long,unsigned char);
+#define PW_CODE_BYTE(at,byte) runtime_overlay_mod_original_byte((at),(byte))
 #include "power_wheel_signatures.h"
 #include "power_wheel_gameplay.h"
 #include <stdatomic.h>
@@ -15,7 +19,8 @@ static unsigned pw_seen_generation;
 static uintptr_t pw_hero;
 /* Unlimited missiles mod on: the game always holds 5 missiles, so the wheel does not track or
  * restore them (it reads them as 0 and writes none); energy is tracked as usual. */
-static int pw_missiles_fixed;
+static int pw_missiles_startup;
+static int pw_missiles_fixed(void){return runtime_overlay_mod_available(4)?runtime_overlay_mod_get(4):pw_missiles_startup;}
 static PwBank pw_bank;
 static _Thread_local int pw_inside;
 static atomic_flag pw_working=ATOMIC_FLAG_INIT;
@@ -28,7 +33,7 @@ static int pw_read_game(void *context,PwSample *out){
     uintptr_t hero=pw_pointer(pw_image+0x1d0cfe0);
     if(!pw_guest(hero)||hero!=pw_hero)return 0;
     unsigned char *a=pw_image+0xefacf8,*h=(unsigned char*)hero;
-    out->native=(int)pw_u32(a+0xe4);out->missiles=pw_missiles_fixed?0:(int)pw_u32(a+0xdc);
+    out->native=(int)pw_u32(a+0xe4);out->missiles=pw_missiles_fixed()?0:(int)pw_u32(a+0xdc);
     out->capacity=(int)pw_u32(h+0x1ee4c);
     memcpy(&out->energy,h+0x1a1e8,4);memcpy(&out->maximum,h+0x1a1f0,4);
     for(int i=0;i<PW_COUNT;i++)out->unlocked[i]=pw_u32(a+0xe8+pw_family_id[i]*4);
@@ -47,7 +52,7 @@ static int pw_write_game(void *context,float energy,int missiles){
     if(!pw_read_game(context,&current)||!isfinite(energy)||energy<0||energy>current.maximum||
        missiles<0||missiles>current.capacity)return 0;
     memcpy((void*)(pw_hero+0x1a1e8),&energy,4);
-    if(!pw_missiles_fixed)((PwAmmo)(pw_image+0x1e35a0))(pw_image+0xefacf8,missiles);
+    if(!pw_missiles_fixed())((PwAmmo)(pw_image+0x1e35a0))(pw_image+0xefacf8,missiles);
     return 1;
 }
 void runtime_power_wheel_attach(unsigned char *image,size_t size){
@@ -57,8 +62,8 @@ void runtime_power_wheel_attach(unsigned char *image,size_t size){
         puts("Power wheel: disabled (game-function or pause-state signatures differ)");return;
     }
     pw_image=image;pw_reset(&pw_bank,0);pw_hero=0;
-    pw_missiles_fixed=pw_missile_cheat(image,size);
-    if(pw_missiles_fixed)puts("Power wheel: Unlimited missiles mod found; missiles stay at 5 and are not tracked per power");
+    pw_missiles_startup=pw_missile_cheat(image,size);
+    if(pw_missiles_fixed())puts("Power wheel: Unlimited missiles mod found; missiles stay at 5 and are not tracked per power");
     atomic_store(&pw_requested,0);atomic_store(&pw_ready,0);atomic_store(&pw_error,0);
     atomic_store(&pw_active,-1);atomic_store(&pw_mask,0);atomic_store(&pw_supported,1);
     puts("Power wheel: experimental game-thread switching enabled; current resources carry across every switch");

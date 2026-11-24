@@ -1783,6 +1783,14 @@ void Scheduler::CollectProfile() {
         }
         prof.pass_shader_key.clear();
     }
+    const auto lighting_draw = prof.shader_ns.find(0xD000000024DAD4BEull);
+    if (lighting_draw != prof.shader_ns.end()) {
+        const auto [ns, draws] = lighting_draw->second;
+        std::fprintf(stderr, "PERF_GPU_LIGHTING_DRAW 24dad4be: %.2f ms/s, %.1f draws/s, %.1f us avg\n",
+                     ns / 1e6 / seconds, draws / seconds,
+                     draws ? ns / 1e3 / static_cast<double>(draws) : 0.0);
+        prof.shader_ns.erase(lighting_draw);
+    }
     if (prof.shader_ns.empty()) {
         return;
     }

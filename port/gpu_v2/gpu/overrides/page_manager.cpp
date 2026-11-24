@@ -872,6 +872,27 @@ struct SignalImpl : public PageManager::Impl {
         impl.Protect(address, size, perms);
     }
 
+#ifdef _WIN64
+    // How many 8-byte words can be read upwards from rsp without leaving its memory region.
+    // A thread can fault with rsp less than 160 words below the end of its stack (First Light,
+    // 2026-11-11: read access just past the stack's end in the scans below). The region is
+    // cached per thread: VirtualQuery only runs again when rsp leaves it (the stack grew).
+    static u32 StackWordsAbove(u64 rsp) {
+        thread_local u64 region_lo = 0, region_hi = 0;
+        if (rsp < region_lo || rsp >= region_hi) {
+            MEMORY_BASIC_INFORMATION info{};
+            if (!VirtualQuery(reinterpret_cast<LPCVOID>(rsp), &info, sizeof(info)) ||
+                info.State != MEM_COMMIT) {
+                region_lo = region_hi = 0;
+                return 0;
+            }
+            region_lo = reinterpret_cast<u64>(info.BaseAddress);
+            region_hi = region_lo + info.RegionSize;
+        }
+        return static_cast<u32>(std::min<u64>((region_hi - rsp) / 8, 1024));
+    }
+#endif
+
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         const auto size = std::min<u64>(8, PageManager::GetNextPageAddr(addr) - addr);
@@ -891,7 +912,8 @@ struct SignalImpl : public PageManager::Impl {
                     // call goes through the HLE libc to the host memcpy).
                     const u64 eboot = MemoryPatcher::g_eboot_address;
                     const auto* sp = reinterpret_cast<const u64*>(ctx->Rsp);
-                    for (u32 i = 0; i < 96 && eboot; ++i) {
+                    const u32 stack_words = StackWordsAbove(ctx->Rsp);
+                    for (u32 i = 0; i < std::min<u32>(96, stack_words) && eboot; ++i) {
                         const u64 v = sp[i];
                         if (v > eboot + 0x1000 && v < eboot + 0x1000000) {
                             caller = v;
@@ -903,7 +925,7 @@ struct SignalImpl : public PageManager::Impl {
                     if (!caller && g_fault_burst.faults.size() > 1500 &&
                         dumped.fetch_add(1, std::memory_order_relaxed) < 3) {
                         std::string text;
-                        for (u32 i = 0; i < 160 && text.size() < 900; ++i) {
+                        for (u32 i = 0; i < std::min<u32>(160, stack_words) && text.size() < 900; ++i) {
                             const u64 v = sp[i];
                             HMODULE module{};
                             if (v < 0x10000 ||

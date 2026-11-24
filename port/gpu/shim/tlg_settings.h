@@ -90,6 +90,11 @@ struct Values {
     /// where a late frame is shown at once instead of waiting a whole extra refresh. For GPUs
     /// without Mailbox that run near 30/60 FPS. Live; TLG_PRESENT_MODE still overrides it.
     std::atomic<bool> vsync_relaxed{false};
+    /// HDR boost (renderer v2, 2026-11-20, off by default): lifts the game's HDR shadows and
+    /// midtones (vk_presenter.cpp / post_process.frag) by hdr_boost_strength percent (110..300).
+    /// Only acts while the game outputs HDR10. Live. ISS_HDR_BOOST still overrides both.
+    std::atomic<bool> hdr_boost{false};
+    std::atomic<int> hdr_boost_strength{150};
     /// 60 by default (2026-11-05): renderer v2 now applies it (videoout_driver.cpp), and evenly
     /// paced 60 FPS measured far steadier in fights than uncapped (3% vs 30-53% frame jumps).
     std::atomic<int> fps_limit{60};

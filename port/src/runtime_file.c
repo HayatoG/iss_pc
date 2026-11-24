@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -221,6 +222,7 @@ static int game_path(const char *p) {
 }
 /* All operations return >=0 or -(host errno); wrappers adapt the convention. */
 static void log_io_problem(const char *what,const char *detail,int64_t n,int error);
+static int open_trace_match(const char *path);
 static int64_t do_open(const char *guest,int flags,int mode) {
     if (game_path(guest) && (flags & (3|0x8|0x200|0x400|0x800))) {
         if (runtime_verbose()) log_io_problem("open (read-only game mount)",guest,-EROFS,EROFS);
@@ -284,6 +286,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         const unsigned n=__atomic_fetch_add(&verbose_opens,1,__ATOMIC_RELAXED);
         if (n<256 || !(n%1000)) printf("Verbose: file open #%u (%s) -> fd %d, flags %#x, %lld bytes%s\n",n,guest,fd,flags,(long long)s.st_size,dir ? ", directory" : "");
     }
+    if (open_trace_match(guest)) printf("OPEN_TRACE open %s -> fd %d, flags %#x, %lld bytes\n",guest,fd,flags,(long long)s.st_size);
     if (audio_trace() && strstr(guest,"sound/")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
     const char *mod_trace=getenv("TLG_MOD_TRACE"), *mod_root=getenv("TLG_MODS_DIR");
     if (mod_trace && mod_trace[0]=='1' && mod_root) {
@@ -304,6 +307,7 @@ static int64_t do_close(int fd) {
     File *f=get(fd);
     if (!f) { pthread_mutex_unlock(&lock); return -EBADF; }
     if(karma_save_trace()&&karma_save_file(f))fprintf(stderr,"KARMA_SAVE_CLOSE guest=%s\n",f->path);
+    if (open_trace_match(f->path)) printf("OPEN_TRACE close fd %d %s\n",fd,f->path);
     if (runtime_verbose()) {
         static unsigned verbose_closes;
         const unsigned n=__atomic_fetch_add(&verbose_closes,1,__ATOMIC_RELAXED);
@@ -427,6 +431,36 @@ static ssize_t full_io(int h,void *buffer,uint64_t size,int64_t offset) {
     if (stalls>=64) log_read_problem("io (gave up after 64 retries)",h,size,offset,(ssize_t)done,EFAULT);
     return (ssize_t)done;
 }
+/* TLG_OPEN_TRACE=<text> (diagnosis, 2026-11-20: the black city's time-of-day section that never
+ * finishes streaming): opens, reads and closes of game files whose path contains <text>, logged
+ * (reads: the first 400). */
+static int open_trace_match(const char *path) {
+    static const char *needle=NULL; static int init;
+    if (!init) { needle=getenv("TLG_OPEN_TRACE"); if (needle && !*needle) needle=NULL; init=1; }
+    if (!needle || !path) return 0;
+    for (const char *p=path; *p; ++p) {   /* case-insensitive: the game may spell names in any case */
+        size_t i=0;
+        while (needle[i] && p[i] && tolower((unsigned char)p[i])==tolower((unsigned char)needle[i])) ++i;
+        if (!needle[i]) return 1;
+    }
+    return 0;
+}
+static void open_trace_read(int fd,const char *what,int64_t offset,uint64_t requested,ssize_t actual) {
+    static int logged;
+    const File *f=fd>=3 ? get(fd) : NULL;
+    if (!f || !open_trace_match(f->path) || __atomic_fetch_add(&logged,1,__ATOMIC_RELAXED)>=400) return;
+    printf("OPEN_TRACE %s fd %d %s @%lld want %llu got %lld\n",what,fd,f->path,(long long)offset,
+           (unsigned long long)requested,(long long)actual);
+}
+static void trace_startup_package_read(int fd,int64_t offset,uint64_t requested,ssize_t actual) {
+    if (!runtime_verbose()) return;
+    const File *f=get(fd);
+    if (!f || (strcmp(f->path,"/app0/art/cache/all_shaders.xpps") &&
+               strcmp(f->path,"/app0/art/cache/core_common.sprig.xpps"))) return;
+    fprintf(stderr,"STARTUP_PACK_READ %s offset=%lld requested=%llu actual=%lld\n",
+            f->path,(long long)offset,(unsigned long long)requested,(long long)actual);
+}
+
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
@@ -445,7 +479,9 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
     if(fd>=3&&karma_save_file(get(fd)))karma_offset=host_lseek(h,0,SEEK_CUR);
     ssize_t n=full_io(h,buffer,size,-1);
 #endif
-    if (n<0) { int e=errno; log_read_problem("read",fd,size,-1,n,e); return -e; }
+    if (n<0) { int e=errno; log_read_problem("read",fd,size,-1,n,e); open_trace_read(fd,"read FAILED",karma_offset,size,n); return -e; }
+    open_trace_read(fd,"read",karma_offset,size,n);
+    trace_startup_package_read(fd,karma_offset,size,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     karma_trace_io(fd,"read",karma_offset,n);
     if(n>0&&karma_save_file(get(fd)))iss_karma_save_part(fd,buffer,karma_offset,n,0);
@@ -455,7 +491,9 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
     ssize_t n=full_io(h,buffer,size,offset);
-    if (n<0) { int e=errno; log_read_problem("pread",fd,size,offset,n,e); return -e; }
+    if (n<0) { int e=errno; log_read_problem("pread",fd,size,offset,n,e); open_trace_read(fd,"pread FAILED",offset,size,n); return -e; }
+    open_trace_read(fd,"pread",offset,size,n);
+    trace_startup_package_read(fd,offset,size,n);
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     karma_trace_io(fd,"pread",offset,n);
     if(n>0&&karma_save_file(get(fd)))iss_karma_save_part(fd,buffer,offset,n,0);

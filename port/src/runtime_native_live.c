@@ -31,9 +31,39 @@ static uint64_t pixel_capacity;
 static int changing_dimensions,rolling_back;
 static void lock_request(void){while(atomic_flag_test_and_set_explicit(&request_lock,memory_order_acquire)){} }
 static void unlock_request(void){atomic_flag_clear_explicit(&request_lock,memory_order_release);}
+/* The game's objects and camera functions (image offsets): Second Son by default, First Light's when
+ * attached with its layout (2026-11-12). */
+static uint32_t frame_object=0xf1bcd0u,target_object=0xe682b0u,main_camera_at=0x7f2d2b8u,
+ projection_fn=0x581c90u,frustum_fn=0x5821b0u,setter_fn=0x581b70u;
+/* The game's logical screen (HUD canvas) width/height cells, which the HUD and UI read as they lay out
+ * (2026-11-12): the startup patch sets them once; a live change of screen shape now updates them too, so
+ * the HUD (minimap, power bar, crosshair) keeps its proportions instead of being squeezed until a
+ * restart, wider or narrower than at startup (up to 3840, the 32:9 canvas). ISS_NATIVE_LIVE_UI=0: off. */
+static uint32_t ui_cells_at;
+static int live_ui=1;
+static uint32_t lea_target(const IssNativeSite *s){int32_t d;memcpy(&d,s->before+3,4);return (uint32_t)((int64_t)s->offset+7+d);}
 void runtime_native_live_attach(uintptr_t base){
  image_base=base;const char* trace=getenv("ISS_NATIVE_LIVE_TRACE");
  atomic_store(&diagnostics_enabled,trace&&!strcmp(trace,"1"));
+ const char *ui=getenv("ISS_NATIVE_LIVE_UI");live_ui=!(ui&&ui[0]=='0');
+}
+void runtime_native_live_attach_layout(uintptr_t base,const IssNativeLiveLayout *layout){
+ if(layout){
+  frame_object=layout->frame_object;target_object=layout->target_object;
+  main_camera_at=layout->aspect->main_camera;projection_fn=layout->aspect->projection;
+  frustum_fn=layout->aspect->frustum;setter_fn=layout->aspect->setter;
+  ui_cells_at=lea_target(&layout->native->sites[16]);
+ }
+ runtime_native_live_attach(base);
+}
+/* Writes the HUD canvas of `plan` into the game's cells (width, then height right after it). Only after
+ * the probe attached the real game with its verified layout (ui_cells_at set). */
+static void write_ui_cells(const IssNativePlan *plan){
+ if(!live_ui||!image_base||!ui_cells_at||!plan->ui_width||!plan->ui_height)return;
+ uint32_t *cells=(uint32_t*)(image_base+ui_cells_at);
+ if(cells[0]==plan->ui_width&&cells[1]==plan->ui_height)return;
+ fprintf(stderr,"NATIVE_LIVE_UI canvas %ux%u -> %ux%u\n",cells[0],cells[1],plan->ui_width,plan->ui_height);
+ cells[0]=plan->ui_width;cells[1]=plan->ui_height;
 }
 static uint32_t read32(const void *p){uint32_t value;memcpy(&value,p,4);return value;}
 /* ISS_DYNAMIC_RES_SCRIPT="40:85,70:100" (diagnostic, off by default): at 40 s after the first
@@ -61,7 +91,7 @@ static void dynamic_res_script(void){
  if(ok)next++;else if(output==0)next=count;
 }
 void __attribute__((ms_abi)) runtime_native_frame_observer(const void *object,int frame){
- if(!image_base||(uintptr_t)object!=image_base+0xf1bcd0u)return;
+ if(!image_base||(uintptr_t)object!=image_base+frame_object)return;
  dynamic_res_script();
  unsigned count=atomic_fetch_add(&frames,1)+1;
  if(!atomic_load(&diagnostics_enabled)||(count!=1&&count!=300&&count%3600))return;
@@ -70,7 +100,7 @@ void __attribute__((ms_abi)) runtime_native_frame_observer(const void *object,in
   read32(p),read32(p+4),read32(p+12),read32(p+16),p[0xdf0f04],p[0xdf0f05],atomic_load(&targets));
 }
 void __attribute__((ms_abi)) runtime_native_target_observer(const void *object,int unused){
- (void)unused;if(!image_base||(uintptr_t)object!=image_base+0xe682b0u)return;
+ (void)unused;if(!image_base||(uintptr_t)object!=image_base+target_object)return;
  unsigned count=atomic_fetch_add(&targets,1)+1;
  if(atomic_load(&diagnostics_enabled)&&count<=4)fprintf(stderr,"NATIVE_LIVE_TARGETS rebuild=%u after_frame_calls=%u\n",count,atomic_load(&frames));
 }
@@ -88,10 +118,13 @@ void __attribute__((ms_abi)) runtime_native_live_aspect_camera(void *object,int 
  (void)unused;
  if(!atomic_load(&aspect_enabled)||!runtime_native_live_enabled()||!image_base||!object)return;
  atomic_store(&aspect_camera_ready,0);
- uintptr_t main_camera;memcpy(&main_camera,(void*)(image_base+0x7f2d2b8u),sizeof(main_camera));
+ uintptr_t main_camera;memcpy(&main_camera,(void*)(image_base+main_camera_at),sizeof(main_camera));
  /* Diagnostic (ISS_CAMERA_TRACE=1): each camera seen here and every change of its aspect/FOV
   * values, to see what cutscene cameras do. Read only. */
- static int camera_trace=-1;if(camera_trace<0){const char *e=getenv("ISS_CAMERA_TRACE");camera_trace=e&&e[0]=='1';}
+#ifndef ISS_CAMERA_TRACE_DEFAULT
+#define ISS_CAMERA_TRACE_DEFAULT 0
+#endif
+ static int camera_trace=-1;if(camera_trace<0){const char *e=getenv("ISS_CAMERA_TRACE");camera_trace=e&&e[0]?e[0]=='1':ISS_CAMERA_TRACE_DEFAULT;}
  if(camera_trace){
   static uintptr_t last_object;static float last[3];static unsigned lines;
   unsigned char *c=object;float v[3];memcpy(v,c+0x59c,12);uintptr_t vt;memcpy(&vt,object,8);
@@ -109,7 +142,7 @@ void __attribute__((ms_abi)) runtime_native_live_aspect_camera(void *object,int 
  if(vtable<image_base||vtable-image_base>0x7f00000u-0x130u)return;
  uintptr_t projection,frustum;memcpy(&projection,(void*)(vtable+0x120),sizeof(projection));
  memcpy(&frustum,(void*)(vtable+0x128),sizeof(frustum));
- if(projection!=image_base+0x581c90u||frustum!=image_base+0x5821b0u)return;
+ if(projection!=image_base+projection_fn||frustum!=image_base+frustum_fn)return;
  unsigned char *cam=object;float old_aspect,tan_x,tan_y,aspect,next_x;
  memcpy(&old_aspect,cam+0x59c,4);memcpy(&tan_x,cam+0x5a0,4);memcpy(&tan_y,cam+0x5a4,4);
  IssNativePlan plan=*runtime_native_plan();
@@ -144,7 +177,7 @@ void __attribute__((ms_abi)) runtime_native_live_aspect_camera(void *object,int 
     const float want_x=want*aspect;
     memcpy(cam+0x5a4,&want,4);memcpy(cam+0x5a0,&want_x,4);
     typedef void (__attribute__((sysv_abi)) *AspectSetter)(void*,float);
-    ((AspectSetter)(image_base+0x581b70u))(object,aspect);
+    ((AspectSetter)(image_base+setter_fn))(object,aspect);
     static unsigned notes;if(notes++<40)fprintf(stderr,"Cutscene framing: %s (view %.4g -> %.4g)\n",cutscene?"16:9 width kept":"gameplay view restored",(double)tan_y,(double)want);
     tan_y=want;old_aspect=aspect;
    }
@@ -156,7 +189,7 @@ void __attribute__((ms_abi)) runtime_native_live_aspect_camera(void *object,int 
   * setter rebuilds projection and frustum through its original virtuals. */
  memcpy(cam+0x5a0,&next_x,4);
  typedef void (__attribute__((sysv_abi)) *AspectSetter)(void*,float);
- ((AspectSetter)(image_base+0x581b70u))(object,aspect);
+ ((AspectSetter)(image_base+setter_fn))(object,aspect);
  fprintf(stderr,"NATIVE_LIVE_ASPECT camera refreshed %.6g -> %.6g; tan_y=%.6g\n",(double)old_aspect,(double)aspect,(double)tan_y);
 }
 uint32_t runtime_native_live_purge_plan(uint32_t sizes[4]){
@@ -182,9 +215,12 @@ int runtime_native_live_request_config(IssNativeConfig config){
  IssNativePlan next;
  if(!iss_native_plan(config,&next)||next.ui_16_9!=startup_plan.ui_16_9||(next.ui_16_9!=0&&next.ui_16_9!=1)){
   atomic_store(&resize_reason,"Changing the UI layout requires restarting");return 0;}
- /* The UI canvas is fixed for the launch: with the wide canvas it keeps the startup size (a preset of
-  * another screen shape stretches the UI slightly until the next restart). */
- next.ui_width=startup_plan.ui_width;next.ui_height=startup_plan.ui_height;
+ /* The UI canvas: with the wide canvas (ui_16_9=0) it follows the new screen shape, wider or narrower
+  * (2026-11-12; every game reader of the cells only does layout math with them, none sizes memory, so
+  * growing is as safe as shrinking; 3840 = the widest preset, 32:9); the 16:9 canvas keeps its size. */
+ if(!(live_ui&&ui_cells_at&&next.ui_16_9==0&&next.ui_height==startup_plan.ui_height&&next.ui_width>=1920&&next.ui_width<=3840)){
+  next.ui_width=startup_plan.ui_width;next.ui_height=startup_plan.ui_height;
+ }
  IssNativePlan current=*runtime_native_plan();
  /* Only the HUD placement changed (2026-11-07): no rebuild is needed; the new safe area is
   * published at once and reported to the game on its next query. */
@@ -214,17 +250,18 @@ int runtime_native_live_rebuild_request(void){
  changing_dimensions=0;rolling_back=0;atomic_store(&rebuild_state,1);unlock_request();return 1;
 }
 void __attribute__((ms_abi)) runtime_native_dimension_resize(void *object,uint64_t *saved){
- if(!runtime_native_live_enabled()||(uintptr_t)object!=image_base+0xf1bcd0u||!saved)return;
+ if(!runtime_native_live_enabled()||(uintptr_t)object!=image_base+frame_object||!saved)return;
  const IssNativePlan plan=changing_dimensions&&atomic_load(&rebuild_state)==2?pending_plan:*runtime_native_plan();
  iss_native_live_dimension_registers(saved,&plan);
 }
 void __attribute__((ms_abi)) runtime_native_safe_resize(void *object){
- if(!image_base||(uintptr_t)object!=image_base+0xf1bcd0u)return;
+ if(!image_base||(uintptr_t)object!=image_base+frame_object)return;
  unsigned char *p=object;int state=atomic_load(&rebuild_state);
  if(state==2){
   if(atomic_load(&targets)>target_before&&p[0xdf0f08]<=1&&read32(p)==expected_width&&read32(p+4)==expected_height&&read32(p+12)==expected_width&&read32(p+16)==expected_height){
    if(changing_dimensions){
     atomic_store(aspect_pair,(uint64_t)pending_plan.width|((uint64_t)pending_plan.height<<32));
+    write_ui_cells(&pending_plan);
     runtime_native_publish(1,"Experimental live native rendering active",&pending_plan);
     if(!rolling_back&&(before_plan.width!=pending_plan.width||before_plan.height!=pending_plan.height)){
      lock_request();purge_sizes[0]=before_plan.width;purge_sizes[1]=before_plan.height;

@@ -9,6 +9,7 @@
 #include "common/debug.h"
 #include "../../../src/iss_native_resolution.h"
 #include "../../../src/iss_menu_aspect.h"
+#include "pause_guard.h"
 #include "../../../src/iss_power_wheel.h"
 extern "C" int runtime_pause_menu_fit_enabled(void); // runtime_hud_corners.c (ISS_PAUSE_MENU_FIT=0 turns off)
 extern "C" int runtime_pause_menu_fitted_now(void);
@@ -747,6 +748,24 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     VideoCore::ImageViewInfo view_info{};
     view_info.format = GetFrameViewFormat(attribute.attrib.pixel_format);
+    {
+        // HDR diagnosis (2026-11-20): the game's own output format, each time it changes, against the
+        // swapchain's (HDR10 or not): BT.2020 PQ passes through unchanged, anything else would not.
+        static u32 last_format = ~0u;
+        static int last_hdr = -1;
+        const u32 fmt = u32(attribute.attrib.pixel_format);
+        if (fmt != last_format || int(frame->is_hdr) != last_hdr) {
+            last_format = fmt;
+            last_hdr = int(frame->is_hdr);
+            std::fprintf(stderr, "PRESENT_FORMAT guest=0x%08x (%s) swapchain_hdr10=%d\n", fmt,
+                         fmt == 0x88740000u ? "A2R10G10B10 BT.2020 PQ" :
+                         fmt == 0x88000000u ? "A2R10G10B10 sRGB" :
+                         fmt == 0x88060000u ? "A2R10G10B10" :
+                         fmt == 0x80000000u ? "A8R8G8B8 sRGB" :
+                         fmt == 0xC1060000u ? "A16R16G16B16 float" : "other",
+                         int(frame->is_hdr));
+        }
+    }
     // Exclude alpha from output frame to avoid blending with UI.
     view_info.mapping.a = vk::ComponentSwizzle::eOne;
 
@@ -769,6 +788,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         draw_scheduler.DeferOperation([keep = std::move(ui_display.keep)] {});
     }
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
+    // The pause guard picks its mode by this shape (pause_guard.h, ISS_PAUSE_GUARD=auto).
+    iss::pause_guard::SetOutputShape(image_size.width, image_size.height);
     static vk::Extent2D native_last_size{};
     if(runtime_native_status()==1 && native_last_size!=image_size){
         std::fprintf(stderr,"NATIVE_GUEST_OUTPUT %ux%u (before host FSR/post-processing)\n",image_size.width,image_size.height);
@@ -841,6 +862,33 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
+    {
+        // HDR boost (2026-11-20, HDR only, off by default): F1 > Image > HDR boost and its strength
+        // (110..300%), live; ISS_HDR_BOOST (1..4) overrides. Lifts the game's HDR shadows and
+        // midtones, rolling off to unchanged at ISS_HDR_BOOST_WHITE nits (default 500: bright
+        // effects such as powers stay close to the game's own level; 1000 made them too bright).
+        static const float env_gain = [] {
+            const char* p = std::getenv("ISS_HDR_BOOST");
+            return p && *p ? std::clamp(float(std::atof(p)), 1.0f, 4.0f) : 0.0f;
+        }();
+        static const float white = [] {
+            const char* p = std::getenv("ISS_HDR_BOOST_WHITE");
+            const float v = p && *p ? float(std::atof(p)) : 500.0f;
+            return std::clamp(v, 200.0f, 10000.0f);
+        }();
+        const auto& tlg = TlgSettings::Get();
+        const float gain = env_gain > 0.0f ? env_gain
+                           : tlg.hdr_boost.load(std::memory_order_relaxed)
+                               ? float(tlg.hdr_boost_strength.load(std::memory_order_relaxed)) / 100.0f
+                               : 1.0f;
+        static float logged_gain = 1.0f;
+        if (frame->is_hdr && std::abs(gain - logged_gain) > 0.001f) {
+            std::fprintf(stderr, "HDR boost: shadows/midtones x%.2f (white %.0f nits)\n", gain, white);
+            logged_gain = gain;
+        }
+        pp_settings.hdr_gain = gain;
+        pp_settings.hdr_white = white;
+    }
     if (streamed) {
         draw_scheduler.Recorder().Record(
             [this, pre_barrier, image_view, image_size, frame, settings = pp_settings](
@@ -1230,6 +1278,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             ImGui::PopStyleColor();
         }
         ImGui::Core::Render(cmdbuf, swapchain_image_view, swapchain.GetExtent());
+        TlgOverlay::SetHdrOutput(swapchain.GetHDR());
         TlgOverlay::Render(cmdbuf, swapchain_image_view, swapchain.GetExtent());
 
         if (capture_with_overlays_count > 0) {

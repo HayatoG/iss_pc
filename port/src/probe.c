@@ -19,6 +19,10 @@
 #include "iss_mouse_aim.h"
 #include "iss_trophies.h"
 #include "trophy_query_hook.h"
+#include "iss_live_mods.h"
+#include "iss_gameplay_live.h"
+static IssLiveMods iss_live_mods;
+#define ISS_PITCH_LIVE_ENABLED() __atomic_load_n(&iss_live_mods.camera_enabled,__ATOMIC_RELAXED)
 #include "iss_camera_pitch_hook.h"
 #include "gpu/tlggpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
@@ -45,6 +49,7 @@ static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
 static unsigned char *native_live_cells;
+static uint32_t *native_minimap_cells;
 static size_t page_size;
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
@@ -191,6 +196,8 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
+    fprintf(stderr,"  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
+            c->R12,c->R13,c->R14,c->R15);
     /* x64 unwind from the faulting context through code without frame pointers (the GPU driver,
      * the C/C++ runtime), using the modules' unwind tables: shows which host call reached the
      * fault. Code without unwind information (guest code) is treated as a leaf. */
@@ -861,9 +868,12 @@ int iss_temporal_get_frame(uint32_t seq, IssTemporalFrame *out) { return iss_tem
 #include "iss_karma_signatures.h"
 #include "iss_native_resolution.h"
 #include "iss_native_live.h"
+#include "iss_native_minimap.h"
+#include "iss_native_mapview.h"
 #include "iss_native_aspect.h"
 #include "iss_hud_trace.h"
 #include "iss_energy_watch.h"
+#include "iss_tod_watch.h"
 #include "iss_hud_corners.h"
 static void install_iss_hud_corners(const char *app0,Segment *segments,uint64_t count,uint64_t size){
     const char *enable=getenv("ISS_EXPERIMENTAL_HUD_CORNERS");
@@ -923,9 +933,12 @@ static void install_iss_native_live_trace(const char *app0,Segment *segments,uin
     char path[4096],title[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0?app0:".");
     iss_feature_title(path,title,sizeof(title));iss_feature_version(path,version,sizeof(version));
-    const uint32_t sites[]={ISS_NATIVE_FRAME_SITE,ISS_NATIVE_TARGET_SITE,ISS_NATIVE_SAFE_SITE,ISS_NATIVE_DIM_SITE};
+    /* Second Son 1.07 or First Light 1.04 (2026-11-12): the verified layout of this game's code. */
+    const IssNativeLiveLayout *layout=iss_native_live_layout_for(image,size,title,version);
+    if(!layout){puts("Native live observer: incompatible code; no hooks installed");return;}
+    const uint32_t sites[]={layout->frame_site,layout->target_site,layout->safe_site,layout->dim_site};
     const unsigned lengths[]={ISS_NATIVE_FRAME_STOLEN,ISS_NATIVE_TARGET_STOLEN,ISS_NATIVE_SAFE_STOLEN,ISS_NATIVE_DIM_STOLEN};
-    int valid=iss_native_live_signature(image,size,title,version);
+    int valid=1;
     for(unsigned k=0;k<4;k++){
         int executable=0;for(uint64_t i=0;i<count;i++)if((segments[i].flags&1)&&sites[k]>=segments[i].address&&
             sites[k]-segments[i].address<=segments[i].size&&lengths[k]<=segments[i].size-(sites[k]-segments[i].address))executable=1;
@@ -939,13 +952,13 @@ static void install_iss_native_live_trace(const char *app0,Segment *segments,uin
         if(n>page_size)fail("Native observer bridge overflow");
         protect(bridges[k],page_size,5);
     }
-    runtime_native_live_attach((uintptr_t)image);
+    runtime_native_live_attach_layout((uintptr_t)image,layout);
     if(native_live_cells&&runtime_native_status()==1){
         IssNativePlan startup=*runtime_native_plan();
         /* Wide UI canvas (ui_16_9=0, 2026-11-07): the two camera LEAs still hold their original
          * displacement (the UI canvas size, same shape as the output); redirecting them to the live
          * cells (render size, same shape at startup) changes nothing now and lets later changes apply live. */
-        if((startup.ui_16_9==1||startup.ui_16_9==0)&&iss_native_live_projection_redirect(image,size,&startup,(uintptr_t)native_live_cells)){
+        if((startup.ui_16_9==1||startup.ui_16_9==0)&&iss_native_live_projection_redirect_for(layout->native,image,size,&startup,(uintptr_t)native_live_cells)){
             runtime_native_live_enable((uint32_t*)native_live_cells,&startup);
             printf("Native live resize: guarded mutable projection cells; allocation ceiling %ux%u / %u lighting entries\n",startup.width,startup.height,startup.light_entries);
         }else puts("Native live resize: projection/UI check failed; startup dimensions retained");
@@ -953,19 +966,44 @@ static void install_iss_native_live_trace(const char *app0,Segment *segments,uin
     for(unsigned k=0;k<4;k++){memset(image+sites[k],0x90,lengths[k]);iss_karma_jump(image+sites[k],(uintptr_t)bridges[k]);}
     const char *aspect=getenv("ISS_NATIVE_LIVE_ASPECT");
     if(iss_native_live_option(aspect)&&runtime_native_live_enabled()){
-        int executable=0;
-        for(uint64_t i=0;i<count;i++)if((segments[i].flags&1)&&ISS_NATIVE_ASPECT_SITE>=segments[i].address&&
-            ISS_NATIVE_ASPECT_SITE-segments[i].address<=segments[i].size&&
-            ISS_NATIVE_ASPECT_STOLEN<=segments[i].size-(ISS_NATIVE_ASPECT_SITE-segments[i].address))executable=1;
-        if(executable&&iss_native_aspect_signature(image,size)){
+        int executable=0;const uint32_t aspect_site=layout->aspect->site;
+        for(uint64_t i=0;i<count;i++)if((segments[i].flags&1)&&aspect_site>=segments[i].address&&
+            aspect_site-segments[i].address<=segments[i].size&&
+            ISS_NATIVE_ASPECT_STOLEN<=segments[i].size-(aspect_site-segments[i].address))executable=1;
+        if(executable&&iss_native_aspect_signature_for(layout->aspect,image,size)){
             unsigned char *bridge=allocate(page_size);
-            unsigned n=iss_karma_bridge_ex(bridge,(uintptr_t)runtime_native_live_aspect_camera,image+ISS_NATIVE_ASPECT_SITE,
-                (uintptr_t)image+ISS_NATIVE_ASPECT_SITE+ISS_NATIVE_ASPECT_STOLEN,ISS_NATIVE_ASPECT_STOLEN,1);
+            unsigned n=iss_karma_bridge_ex(bridge,(uintptr_t)runtime_native_live_aspect_camera,image+aspect_site,
+                (uintptr_t)image+aspect_site+ISS_NATIVE_ASPECT_STOLEN,ISS_NATIVE_ASPECT_STOLEN,1);
             if(n>page_size)fail("Native aspect bridge overflow");
             protect(bridge,page_size,5);
-            memset(image+ISS_NATIVE_ASPECT_SITE,0x90,ISS_NATIVE_ASPECT_STOLEN);
-            iss_karma_jump(image+ISS_NATIVE_ASPECT_SITE,(uintptr_t)bridge);
+            memset(image+aspect_site,0x90,ISS_NATIVE_ASPECT_STOLEN);
+            iss_karma_jump(image+aspect_site,(uintptr_t)bridge);
             runtime_native_live_aspect_enable();puts("Native live aspect: guarded main-camera projection refresh enabled");
+            /* 16:9 secondary cameras (2026-11-13): every camera is created with the shape in these two
+             * cells, so the minimap camera (and other off-screen cameras) became ultrawide too and drew a
+             * smaller minimap into its 16:9 box. With the main camera kept at the screen shape by the
+             * refresh above (cutscenes use it too), the cells the constructor reads go back to the 16:9
+             * pair the game was made for. Tested in play 2026-11-13: works as designed (main camera
+             * refreshed 1.778 -> 2.389) but the minimap did not change, so it is opt-in only:
+             * ISS_NATIVE_CAMERA_16_9=1. */
+            const char *cam169=getenv("ISS_NATIVE_CAMERA_16_9");
+            if(!cam169||strcmp(cam169,"1"))puts("Secondary cameras: screen shape (ISS_NATIVE_CAMERA_16_9=1 creates them at 16:9)");
+            else{
+                int ok=1;
+                for(unsigned i=0;i<2;i++){
+                    const IssNativeSite *s=&layout->native->sites[16+i];int32_t d;memcpy(&d,image+s->offset+3,4);
+                    if(image+s->offset+7+d!=native_live_cells+i*4)ok=0;
+                }
+                if(ok){
+                    native_minimap_cells[2]=1920;native_minimap_cells[3]=1080;
+                    for(unsigned i=0;i<2;i++){
+                        const IssNativeSite *s=&layout->native->sites[16+i];
+                        int32_t d=(int32_t)((intptr_t)&native_minimap_cells[2+i]-(intptr_t)(image+s->offset+7));
+                        memcpy(image+s->offset+3,&d,4);
+                    }
+                    puts("Secondary cameras: created at 16:9 (minimap), main camera follows the screen");
+                }else puts("Secondary cameras: camera cells not as expected; unchanged");
+            }
         }else puts("Native live aspect: code check failed; different aspect ratios require restarting");
     }
     puts("Native live observer: verified frame/target hooks active; dimensions unchanged");
@@ -996,24 +1034,27 @@ static void install_iss_native_resolution(const char *app0,Segment *segments,uin
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
     iss_feature_title(path,serial,sizeof(serial));iss_feature_version(path,version,sizeof(version));
     const int grow_exposure=iss_native_exposure_entries(plan.width,plan.height)>ISS_EXPOSURE_ORIGINAL_ENTRIES;
-    for(unsigned s=0;s<ISS_NATIVE_SITE_COUNT+2+(grow_exposure?ISS_EXPOSURE_SITE_COUNT:0);s++) {
-        uint32_t at=s<ISS_NATIVE_SITE_COUNT ? iss_native_sites[s].offset : s==ISS_NATIVE_SITE_COUNT ? 0x58030c : 0x5802e6;
-        unsigned length=s<ISS_NATIVE_SITE_COUNT ? iss_native_sites[s].length : s==ISS_NATIVE_SITE_COUNT ? sizeof(iss_native_projection) : sizeof(iss_native_aspect_width);
-        if(s>=ISS_NATIVE_SITE_COUNT+2){at=iss_exposure_sites[s-ISS_NATIVE_SITE_COUNT-2].offset;length=5;}
+    /* Second Son US/EU 1.07 or First Light 1.04 (2026-11-12): each has its own code addresses. */
+    const IssNativeLayout *layout=iss_native_layout_for(serial,version);
+    if(!layout)valid=0;
+    for(unsigned s=0;valid&&s<ISS_NATIVE_SITE_COUNT+2+(grow_exposure?ISS_EXPOSURE_SITE_COUNT:0);s++) {
+        uint32_t at=s<ISS_NATIVE_SITE_COUNT ? layout->sites[s].offset : s==ISS_NATIVE_SITE_COUNT ? layout->projection_at : layout->aspect_at;
+        unsigned length=s<ISS_NATIVE_SITE_COUNT ? layout->sites[s].length : s==ISS_NATIVE_SITE_COUNT ? sizeof(iss_native_projection) : sizeof(iss_native_aspect_width);
+        if(s>=ISS_NATIVE_SITE_COUNT+2){at=layout->exposure[s-ISS_NATIVE_SITE_COUNT-2].offset;length=5;}
         int executable=0;
         for(uint64_t i=0;i<count;i++)if((segments[i].flags&1) && at>=segments[i].address &&
             at-segments[i].address<=segments[i].size && length<=segments[i].size-(at-segments[i].address))executable=1;
         if(!executable){valid=0;break;}
     }
     if(!valid || !iss_native_apply(image,size,serial,version,config)) {
-        runtime_native_publish(-1,"US 1.07 code check failed or another resolution patch conflicts; no native writes",NULL);
+        runtime_native_publish(-1,"Game code check failed (Second Son 1.07 / First Light 1.04 only) or another resolution patch conflicts; no native writes",NULL);
         printf("Native rendering: refused title=%s version=%s (signature/segment mismatch); no writes\n",serial,version);return;
     }
     const char *capacity_test=getenv("ISS_NATIVE_LIGHT_CAPACITY_TEST");
     if(capacity_test){
         int entries=0;
         if(iss_native_integer(capacity_test,0x320000,0x400000,&entries)&&
-            iss_native_raise_light_capacity(image,size,&plan,(uint32_t)entries)){
+            iss_native_raise_light_capacity_for(layout,image,size,&plan,(uint32_t)entries)){
             plan.light_entries=(uint32_t)entries;
             printf("Native lighting capacity-only test: %u entries; scene remains %ux%u\n",plan.light_entries,plan.width,plan.height);
         }else puts("Native lighting capacity-only test: override refused; verified native plan retained");
@@ -1024,6 +1065,18 @@ static void install_iss_native_resolution(const char *app0,Segment *segments,uin
         iss_native_exposure_entries(plan.width,plan.height)*4);
     printf("Native rendering: output selection %ux%u, scale %d%%, scene/output surface %ux%u, logical HUD %ux%u, light entries %u; Hor+ vertical FOV preserved\n",
         plan.output_width,plan.output_height,plan.percent,plan.width,plan.height,plan.ui_width,plan.ui_height,plan.light_entries);
+    /* Wide UI canvas: 16:9 correction of one HUD picture (2026-11-12). Tested in play 2026-11-13: it is
+     * NOT the minimap (no visible change), so it is opt-in only: ISS_NATIVE_MINIMAP_FIT=1. */
+    if(plan.ui_16_9==0){
+        const char *fit=getenv("ISS_NATIVE_MINIMAP_FIT");
+        if(!fit||strcmp(fit,"1"))puts("Minimap fit: off (ISS_NATIVE_MINIMAP_FIT=1 turns the experiment on)");
+        else if(iss_minimap_fit(image,size,serial,version,native_minimap_cells))puts("Minimap fit: 16:9 minimap on the wide HUD canvas");
+        else puts("Minimap fit: refused incompatible game code; no writes");
+        /* Pause map: its view size and zoom use a 16:9 canvas, so the map fills its frame without
+         * blurry stretched bands (iss_native_mapview.h; confirmed in play 2026-11-20). */
+        if(iss_mapview_fit(image,size,serial,version,&native_minimap_cells[4]))puts("Pause map fit: 16:9 map view on the wide HUD canvas");
+        else puts("Pause map fit: refused incompatible game code; no writes");
+    }
 }
 static void install_iss_karma(const char *app0,Segment *segments,uint64_t count,uint64_t size,int before_rewrites){
     char path[4096],serial[32]="",version[32]="";
@@ -1088,7 +1141,6 @@ static void install_iss_camera_speed(const char *app0, Segment *segments, uint64
         puts("Camera speed: disabled (scale must be a finite number from 0.25 to 4)");
         return;
     }
-    if (pan == 1.0f && tilt == 1.0f) return;
     char path[4096], serial[32] = "", version[32] = "";
     snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
     iss_feature_title(path,serial,sizeof(serial));
@@ -1103,9 +1155,16 @@ static void install_iss_camera_speed(const char *app0, Segment *segments, uint64
         puts("Camera speed: disabled (title/version or original-code signature mismatch)");
         return;
     }
-    unsigned char *stub = allocate(page_size);
+    unsigned char *stub = allocate(page_size * 2);
     iss_camera_build_stub(stub,(uintptr_t)(image+ISS_CAMERA_SITE+ISS_CAMERA_LENGTH),pan,tilt);
+    int32_t pan_disp=(int32_t)page_size-8,tilt_disp=(int32_t)page_size+4-41;
+    memcpy(stub+4,&pan_disp,4);memcpy(stub+37,&tilt_disp,4);
+    uint64_t *scales=(uint64_t*)(stub+page_size);
+    *scales=iss_live_camera_pack(pan,tilt);
     protect(stub,page_size,5);
+    protect(stub+page_size,page_size,3);
+    iss_live_mods.camera_data=scales;iss_live_mods.camera_ready=1;
+    iss_live_mods.camera_enabled=pan!=1.f||tilt!=1.f;
     iss_camera_build_jump(image+ISS_CAMERA_SITE,(uintptr_t)stub);
     printf("Camera speed: horizontal %.3gx, vertical %.3gx (angular limits; adaptive gain unchanged)\n",pan,tilt);
 }
@@ -1142,6 +1201,28 @@ static void install_iss_mouse_aim(const char *app0,Segment *segments,uint64_t co
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
     iss_feature_title(path,serial,sizeof(serial));iss_feature_version(path,version,sizeof(version));
     int executable=0,writable=0;
+    if(!strcmp(serial,"CUSA00575") && !strcmp(version,"01.04")){
+        /* First Light 1.04: the same hook at its own site (iss_mouse_aim.h). */
+        for(uint64_t i=0;i<count;i++){
+            if((segments[i].flags&1) && segments[i].address<=0x16cf6eu &&
+                0x173689u+17<=segments[i].address+segments[i].size)executable=1;
+            if((segments[i].flags&2) && segments[i].address<=ISS_MOUSE_FL_FOLLOW &&
+                ISS_MOUSE_FL_FOLLOW<segments[i].address+segments[i].size)writable=1;
+        }
+        if(!executable || !writable || !iss_mouse_signature_first_light(image,size)){
+            puts("Direct mouse: First Light code/mapping mismatch; mouse camera disabled; controller unchanged");return;
+        }
+        unsigned char *bridge=allocate(page_size);
+        unsigned n=iss_karma_bridge_ex(bridge,(uintptr_t)runtime_mouse_aim_camera,image+ISS_MOUSE_FL_SITE,
+            (uintptr_t)image+ISS_MOUSE_FL_SITE+ISS_MOUSE_STOLEN,ISS_MOUSE_STOLEN,7);
+        if(n>page_size)fail("Direct mouse bridge overflow");
+        protect(bridge,page_size,5);
+        memset(image+ISS_MOUSE_FL_SITE,0x90,ISS_MOUSE_STOLEN);
+        iss_karma_jump(image+ISS_MOUSE_FL_SITE,(uintptr_t)bridge);
+        runtime_mouse_aim_attach_at((uintptr_t)image+ISS_MOUSE_FL_FOLLOW,0x1c0,0x1d0);
+        puts("Direct mouse: guarded First Light 1.04 angle input enabled; Controls sensitivity/invert apply; controller unchanged");
+        return;
+    }
     for(uint64_t i=0;i<count;i++){
         if((segments[i].flags&1) && segments[i].address<=0x14936eu &&
             ISS_MOUSE_SITE+ISS_MOUSE_STOLEN<=segments[i].address+segments[i].size)executable=1;
@@ -1171,8 +1252,6 @@ static void report_iss_pitch(void) {
            iss_pitch_stats.last_cap,iss_pitch_stats.last_result);
 }
 static void install_iss_pitch_safeguard(const char *app0, Segment *segments, uint64_t count, uint64_t size) {
-    const char *enabled=getenv("ISS_CAMERA_PREVENT_PITCH_SLOWDOWN");
-    if (!enabled || strcmp(enabled,"1")) return;
     char path[4096],serial[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
     iss_feature_title(path,serial,sizeof(serial));
@@ -1192,13 +1271,179 @@ static void install_iss_pitch_safeguard(const char *app0, Segment *segments, uin
     if (length>ISS_PITCH_MAX_STUB || length>page_size) fail("camera pitch stub overflow");
     protect(stub,page_size,5);
     iss_pitch_build_jump(image+ISS_PITCH_SITE,(uintptr_t)stub);
+    iss_live_mods.pitch_ready=1;
     atexit(report_iss_pitch);
     puts("Camera pitch safeguard: enabled (unzoomed full diagonal at pitch limit only)");
+}
+
+/* Black city fix (2026-11-20, Second Son 1.07). The game installs from the disc in PlayGo stages;
+ * its world sections are one per chunk (71), and a section whose chunk belongs to a later stage
+ * also waits for that stage's "install package" before it counts as ready (section +0x3C from the
+ * world data, +0x46 = still loading). The time of day "dismal" lives in chunk 50, pgc_i2, gated
+ * on the package install_i2, which a PS4 loads once the Blu-ray install has finished. Here every
+ * chunk is installed from the start (PlayGo reports them all local) and nothing ever loads
+ * install_i2, so dismal never streams in, no time of day is in use and Seattle stays pitch black
+ * (saves that want dismal). Verified in play: clearing that wait on the player's black save lit
+ * the city with the grey dismal sky. The section setup (eboot 0x3c3b10) takes the wait from the
+ * data at 0x3c3bf5 (sar ax,8; cwde); "xor eax,eax" there makes it 0, as on a fully installed PS4.
+ * ISS_INSTALL_GATE_FIX=0 turns it off. Liondarkz/issn_pc 0.3.7 found the stuck section and works
+ * around it by asking for another time of day after 30 s. */
+enum { ISS_INSTALL_GATE_SITE=0x3c3bf0 };
+static const unsigned char iss_install_gate_before[]={0x66,0x41,0x8b,0x46,0x24, 0x66,0xc1,0xf8,0x08, 0x98,
+    0x89,0x43,0x3c, 0x49,0x8b,0x4e,0x20, 0x89,0x4b,0x40, 0x48,0xc1,0xe9,0x31, 0x80,0xe1,0x01, 0x66,0x85,0xc0,
+    0x88,0x4b,0x48, 0x0f,0x95,0x43,0x46};
+static void install_iss_install_gate(const char *app0,uint64_t size){
+    const char *off=getenv("ISS_INSTALL_GATE_FIX");
+    if(off&&off[0]=='0'){puts("Black city fix: off (ISS_INSTALL_GATE_FIX=0)");return;}
+    char path[4096],serial[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
+    iss_feature_title(path,serial,sizeof(serial));iss_feature_version(path,version,sizeof(version));
+    if(strcmp(serial,"CUSA00223")||strcmp(version,"01.07"))return;
+    if(size<ISS_INSTALL_GATE_SITE+sizeof(iss_install_gate_before)||
+       memcmp(image+ISS_INSTALL_GATE_SITE,iss_install_gate_before,sizeof(iss_install_gate_before))){
+        puts("Black city fix: refused (game code not as expected); no writes");return;
+    }
+    static const unsigned char after[]={0x31,0xc0,0x0f,0x1f,0x00}; /* xor eax,eax; nop dword [rax] */
+    memcpy(image+ISS_INSTALL_GATE_SITE+5,after,sizeof(after));
+    puts("Black city fix: installed world sections do not wait for the Blu-ray install packages (dismal sky streams in)");
+}
+
+/* ISS_EXPOSURE_PAGE_ALIGN=1 (test, 2026-11-20: the bright flash after unpausing at ultrawide). The
+ * exposure meter's two ping-pong result buffers (the GPU writes one while the CPU sums the other,
+ * eboot 0x171610) are 2500-byte pool allocations aligned to 4 bytes: they share a page, and at
+ * 3440x1440 (540 tiles) one of them crosses into the next page. Here each is allocated as its own
+ * whole page(s) (size rounded up to 4 KB, alignment 4 KB) at the four allocation sites. */
+static void install_iss_exposure_page_align(const char *app0,uint64_t size){
+    const char *on=getenv("ISS_EXPOSURE_PAGE_ALIGN");
+    if(!on||on[0]!='1')return;
+    char path[4096],serial[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
+    iss_feature_title(path,serial,sizeof(serial));iss_feature_version(path,version,sizeof(version));
+    if(strcmp(serial,"CUSA00223")||strcmp(version,"01.07"))return;
+    static const uint32_t sites[]={0x17132a,0x171374,0x172340,0x172387};
+    for(unsigned i=0;i<4;i++){
+        const unsigned char *p=image+sites[i];
+        if(size<sites[i]+10||p[0]!=0xbe||p[5]!=0xba||p[6]!=4||p[7]||p[8]||p[9]){
+            puts("Exposure page align: refused (game code not as expected); no writes");return;
+        }
+    }
+    for(unsigned i=0;i<4;i++){
+        unsigned char *p=image+sites[i];
+        uint32_t bytes;memcpy(&bytes,p+1,4);
+        bytes=(bytes+4095u)&~4095u;
+        const uint32_t align=4096;
+        memcpy(p+1,&bytes,4);memcpy(p+6,&align,4);
+    }
+    puts("Exposure page align: the exposure meter's result buffers each get their own page(s) (test)");
 }
 
 /* G3PATCH2 (patches.py): the patches' image base, then byte writes at image offsets, applied
  * after relocation. A write may replace a whole base-relative pointer slot (60/90 FPS++ swap
  * function pointers): the patch holds the address at the patches' base, rebased here. */
+int runtime_overlay_mod_available(int id){return iss_live_mod_available(&iss_live_mods,id);}
+int runtime_overlay_mod_get(int id){return iss_live_mod_get(&iss_live_mods,id);}
+int runtime_overlay_mod_set(int id,int enabled){return iss_live_mod_set(&iss_live_mods,id,enabled);}
+static void install_live_blur(const char* app0,Segment*segments,uint64_t count,uint64_t size){
+    char path[4096],serial[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0?app0:".");
+    iss_feature_title(path,serial,sizeof(serial));iss_feature_version(path,version,sizeof(version));
+    if(!iss_camera_title_supported(serial,version))return;
+    uint64_t site,flag;if(!iss_live_blur_find(image,size,&site,&flag))return;
+    int executable=0,writable=0;
+    for(uint64_t i=0;i<count;i++){
+        if((segments[i].flags&1)&&site>=segments[i].address&&site+22<=segments[i].address+segments[i].size)executable=1;
+        if((segments[i].flags&2)&&flag>=segments[i].address&&flag<segments[i].address+segments[i].size)writable=1;
+    }
+    if(!executable||!writable)return;
+    const unsigned char original[]={0x0f,0x85,0x8a,0x04,0,0};
+    const int enabled=image[site]==0xe9;
+    /* Startup only, before ISA rewriting or guest execution. Live toggles write
+       the engine's own boolean, never executable instructions. */
+    if(enabled)memcpy(image+site,original,sizeof(original));
+    iss_live_mods.blur_flag=image+flag;iss_live_mods.blur_original=image[flag];
+    iss_live_mod_set(&iss_live_mods,1,enabled);
+    puts("Overlay mods: verified live motion-blur control ready");
+}
+/* Every mutation here happens before ISA rewriting and before guest threads.
+ * Unknown/partial XML patches leave the entire adapter unavailable. */
+static void install_live_gameplay(const char *app0,Segment *segments,uint64_t count,uint64_t size){
+    char path[4096],serial[32]="",version[32]="";
+    snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0?app0:".");
+    iss_feature_title(path,serial,sizeof(serial));iss_feature_version(path,version,sizeof(version));
+    if(strcmp(serial,"CUSA00223")||strcmp(version,"01.07"))return;
+    for(int id=2;id<6;id++){
+        int valid=1,selected=-1;unsigned hooks=0;
+        for(unsigned i=0;i<sizeof(iss_mod_hooks)/sizeof(iss_mod_hooks[0]);i++){
+            const IssModHook *h=&iss_mod_hooks[i];if(h->id!=id)continue;++hooks;
+            if(h->length<5||h->off_length>448||h->on_length>448||h->at>size||h->length>size-h->at||!mapped(segments,count,h->at,h->length)){valid=0;break;}
+            int executable=0;for(uint64_t j=0;j<count;j++)if((segments[j].flags&1)&&h->at>=segments[j].address&&h->at+h->length<=segments[j].address+segments[j].size)executable=1;
+            if(!executable){valid=0;break;}
+            int off=!memcmp(image+h->at,h->off,h->length),on=!memcmp(image+h->at,h->on,h->length);
+            if(!off&&!on){valid=0;break;}
+            if(off!=on){int current=on;if(selected>=0&&selected!=current){valid=0;break;}selected=current;}
+        }
+        if(id==5){
+            if(0xae29a0u>size||sizeof(iss_dash_table_off)>size-0xae29a0u||!mapped(segments,count,0xae29a0,sizeof(iss_dash_table_off)))valid=0;
+            else {
+                int off=!memcmp(image+0xae29a0,iss_dash_table_off,sizeof(iss_dash_table_off));
+                int on=!memcmp(image+0xae29a0,iss_dash_table_on,sizeof(iss_dash_table_on));
+                if((!off&&!on)||(selected>=0&&selected!=on))valid=0;
+            }
+            for(unsigned r=0;r<sizeof(iss_dash_refs)/sizeof(iss_dash_refs[0]);r++){
+                const IssDashRef *ref=&iss_dash_refs[r];
+                if(ref->at>size||ref->length>size-ref->at||memcmp(image+ref->at,ref->code,ref->length))valid=0;
+            }
+        }
+        if(!valid||!hooks){printf("Overlay mods: adapter %d unavailable (signature/selection mismatch)\n",id);continue;}
+        size_t code_size=round_page(hooks*1024);unsigned char *code=allocate(code_size+page_size),*data=code+code_size;
+        *data=(unsigned char)(selected>0);unsigned slot=0;
+        unsigned char jumps[16][5],references[sizeof(iss_dash_refs)/sizeof(iss_dash_refs[0])][15];
+        if(hooks>16)continue;
+        for(unsigned i=0;i<sizeof(iss_mod_hooks)/sizeof(iss_mod_hooks[0]);i++){
+            const IssModHook *h=&iss_mod_hooks[i];if(h->id!=id)continue;
+            unsigned char *gate=code+slot*1024,*off=gate+64,*on=gate+512;
+            jumps[slot][0]=0xe9;
+            if(!iss_mod_relative(jumps[slot]+1,(uintptr_t)image+h->at+5,(uintptr_t)gate)||
+               !iss_mod_block(off,h->off_code,h->off_length,h->off_fix,h->off_count,(uintptr_t)image)||
+               !iss_mod_block(on,h->on_code,h->on_length,h->on_fix,h->on_count,(uintptr_t)image)||
+               !iss_mod_gate(gate,(uintptr_t)data,(uintptr_t)off,(uintptr_t)on))valid=0;
+            ++slot;
+        }
+        if(id==5){
+            memcpy(data+64,selected>0?iss_dash_table_on:iss_dash_table_off,sizeof(iss_dash_table_off));
+            for(unsigned r=0;r<sizeof(iss_dash_refs)/sizeof(iss_dash_refs[0]);r++){
+                const IssDashRef *ref=&iss_dash_refs[r];memcpy(references[r],ref->code,ref->length);
+                if(!iss_mod_relative(references[r]+ref->disp,(uintptr_t)image+ref->at+ref->length,(uintptr_t)data+64+ref->offset))valid=0;
+            }
+        }
+        if(!valid){printf("Overlay mods: adapter %d unavailable (relative address range)\n",id);continue;}
+        protect(code,code_size,5); /* Flag and optional speed table stay in separate RW data. */
+        slot=0;
+        for(unsigned i=0;i<sizeof(iss_mod_hooks)/sizeof(iss_mod_hooks[0]);i++){
+            const IssModHook *h=&iss_mod_hooks[i];if(h->id!=id)continue;
+            memcpy(image+h->at,jumps[slot++],5);memset(image+h->at+5,0x90,h->length-5);
+        }
+        if(id==5){
+            memcpy(image+0xae29a0,iss_dash_table_off,sizeof(iss_dash_table_off));
+            for(unsigned r=0;r<sizeof(iss_dash_refs)/sizeof(iss_dash_refs[0]);r++)memcpy(image+iss_dash_refs[r].at,references[r],iss_dash_refs[r].length);
+            iss_live_mods.dash_table=(uint32_t*)(data+64);
+            memcpy(iss_live_mods.dash_off,iss_dash_table_off,sizeof(iss_dash_table_off));
+            memcpy(iss_live_mods.dash_on,iss_dash_table_on,sizeof(iss_dash_table_on));
+        }
+        iss_live_mods.gameplay_flag[id-2]=data;iss_live_mods.gameplay_ready[id-2]=1;
+        printf("Overlay mods: adapter %d ready (%u guarded hooks, initially %s)\n",id,hooks,selected>0?"enabled":"disabled");
+    }
+}
+/* Power-wheel signature validation sees the verified original missile setter,
+ * and its resource handling reads the live state instead of caching startup bytes. */
+unsigned char runtime_overlay_mod_original_byte(unsigned long long at,unsigned char current){
+    if(!iss_live_mod_available(&iss_live_mods,4))return current;
+    for(unsigned i=0;i<sizeof(iss_mod_hooks)/sizeof(iss_mod_hooks[0]);i++){
+        const IssModHook *h=&iss_mod_hooks[i];if(h->id==4&&at>=h->at&&at-h->at<h->length)return h->off[at-h->at];
+    }
+    return current;
+}
+
 static void apply_patches(const char *path, Segment *segments, uint64_t ns, const Reloc *relocs, uint64_t nr) {
     FILE *f=fopen(path,"rb");
     char magic[8];
@@ -1645,9 +1890,12 @@ int main(int argc, char **argv) {
         if (!red_zone_area) red_zone_on = 0;
     }
     const char *live_option=getenv("ISS_NATIVE_LIVE_RESIZE");
-    size_t live_data_size=iss_native_live_option(live_option)?page_size:0;
+    /* One data page after the code: live resize cells at its start (when enabled) and the fixed
+     * minimap cells at +0x800 (2026-11-12, always). */
+    size_t live_data_size=page_size;
     image = allocate(round_page(size) + stub_area + red_zone_area + live_data_size);
-    if(live_data_size)native_live_cells=image+round_page(size)+stub_area+red_zone_area;
+    if(iss_native_live_option(live_option))native_live_cells=image+round_page(size)+stub_area+red_zone_area;
+    native_minimap_cells=(uint32_t*)(image+round_page(size)+stub_area+red_zone_area+0x800);
     unsigned char *stubs = image + round_page(size);
 #ifndef _WIN32
     guest_code_end = (uintptr_t)image + round_page(size) + stub_area + red_zone_area;
@@ -1709,6 +1957,17 @@ int main(int argc, char **argv) {
         iss_code_fnv = h;
         iss_us_code = ISS_US107_CODE_FNV && h == ISS_US107_CODE_FNV;
         printf("Game code fingerprint: %016llx%s\n", (unsigned long long)h, iss_us_code ? " (US 1.07 executable)" : "");
+        if (iss_us_code) {
+            /* The first log line shows param.sfo's APP_VER, which EU dumps keep at 01.00 after the
+             * 1.07 update (2026-11-20: a player read "01.00" while the launcher said 1.07). */
+            char path[4096], app_ver[32] = "";
+            snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
+            sfo_value(path, "APP_VER", app_ver, sizeof(app_ver), NULL);
+            if (strcmp(app_ver, "01.07"))
+                printf("Game version: the game code is 1.07 (all 1.07 features apply); the game folder's "
+                       "param.sfo says APP_VER %s, which EU dumps keep after the 1.07 update\n",
+                       app_ver[0] ? app_ver : "?");
+        }
     }
     for (uint64_t i = 0; i < nr; ++i) {
         uintptr_t value = relocs[i].kind == 2 ? (uintptr_t)(data_traps + page_size * relocs[i].value + relocs[i].addend)
@@ -1745,14 +2004,22 @@ int main(int argc, char **argv) {
         fflush(NULL);
         _exit(missing ? 1 : 0); /* no destructors: GPU threads are running */
     }
-    if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+    /* ISS_VANILLA=1 (diagnosis, 2026-11-20: the black world after the Space Needle): none of the
+     * port's game-code features or patch files are applied, only what the game needs to run. */
+    const char *vanilla_env = getenv("ISS_VANILLA");
+    const int vanilla = vanilla_env && vanilla_env[0] == '1';
+    if (vanilla) puts("VANILLA: game-code features and patch files off (ISS_VANILLA=1)");
+    if (patch_file && !vanilla) apply_patches(patch_file, segments, ns, relocs, nr);
     const int karma_before_runtime_rewrites=iss_karma_signatures(image,size);
-    if (gpu_enabled) install_orb_multiplier(app0, segments, ns, size);
-    if (gpu_enabled) install_cheats(app0, segments, ns, size);
-    if (gpu_enabled) install_actor_watch(app0, segments, ns, size);
-    if (gpu_enabled) install_stat_multipliers(app0, segments, ns, size);
-    if (gpu_enabled) install_view_tuning(segments, ns, size);
-    if (gpu_enabled) install_iss_temporal(app0, segments, ns, size);
+    const int features = gpu_enabled && !vanilla;
+    if(features)install_live_blur(app0,segments,ns,size);
+    if(features)install_live_gameplay(app0,segments,ns,size);
+    if (features) install_orb_multiplier(app0, segments, ns, size);
+    if (features) install_cheats(app0, segments, ns, size);
+    if (features) install_actor_watch(app0, segments, ns, size);
+    if (features) install_stat_multipliers(app0, segments, ns, size);
+    if (features) install_view_tuning(segments, ns, size);
+    if (features) install_iss_temporal(app0, segments, ns, size);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
@@ -1782,15 +2049,18 @@ int main(int argc, char **argv) {
         protect(stubs, stub_area + red_zone_area, 5);
     }
     if (gpu_enabled) install_iss_native_resolution(app0, segments, ns, size);
-    if (gpu_enabled) install_iss_native_live_trace(app0, segments, ns, size);
-    if (gpu_enabled) install_iss_hud_corners(app0, segments, ns, size);
-    if (gpu_enabled) install_iss_hud_trace(app0, segments, ns, size);
-    if (gpu_enabled) install_iss_camera_speed(app0, segments, ns, size);
-    if (gpu_enabled) install_iss_pitch_safeguard(app0, segments, ns, size);
-    if (gpu_enabled) install_iss_mouse_aim(app0, segments, ns, size);
-    if (gpu_enabled) install_iss_trophies(app0, segments, ns, size);
-    if (gpu_enabled) install_iss_karma(app0, segments, ns, size, karma_before_runtime_rewrites);
-    install_controller_event_trace(size);
+    if (features) install_iss_native_live_trace(app0, segments, ns, size);
+    if (features) install_iss_hud_corners(app0, segments, ns, size);
+    if (features) install_iss_hud_trace(app0, segments, ns, size);
+    if (features) install_iss_camera_speed(app0, segments, ns, size);
+    if (features) install_iss_pitch_safeguard(app0, segments, ns, size);
+    if (features) install_iss_mouse_aim(app0, segments, ns, size);
+    if (features) install_iss_trophies(app0, segments, ns, size);
+    if (features) install_iss_karma(app0, segments, ns, size, karma_before_runtime_rewrites);
+    /* Not a feature: the game cannot light the city without it, so it stays on with ISS_VANILLA. */
+    if (gpu_enabled) install_iss_install_gate(app0, size);
+    if (gpu_enabled) install_iss_exposure_page_align(app0, size); /* after the native exposure sizes */
+    if (!vanilla) install_controller_event_trace(size);
     protect(traps, round_page((import_count + 1) * 32), 5);
     if (trace_stubs) protect(trace_stubs, round_page((import_count + 1) * TRACE_STUB_SIZE), 5);
     protect(image, round_page(size), 0);
@@ -1833,6 +2103,7 @@ int main(int argc, char **argv) {
     }
     tlggpu_set_guest_image((uintptr_t)image, round_page(size));
     iss_energy_watch_start(image);
+    iss_tod_watch_start(image);
     boot_step("entering the game");
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
 #ifdef _WIN32

@@ -58,12 +58,13 @@ static inline int ds_bt_sink_thread(void *argument) {
         if (SDL_hid_write(s->hid,report,sizeof(report))<0) {
             if (++s->failures==1 || s->failures==100)
                 fprintf(stderr,"Controller feedback: Bluetooth speaker report failed (%u): %s\n",s->failures,SDL_GetError());
+            if (s->failures>=100) SDL_SetAtomicInt(&s->stop,1);
         } else if (s->failures) {printf("Controller feedback: Bluetooth speaker writes resumed\n");s->failures=0;}
     }
     return 0;
 }
 /* Exactly one Bluetooth DualSense (or DualSense Edge) must be present; ambiguity falls back. */
-static inline DsBtSink *ds_bt_sink_open(void) {
+static inline DsBtSink *ds_bt_sink_open(int quiet) {
     SDL_hid_device_info *list=SDL_hid_enumerate(0x054c,0);
     char *path=NULL;int matches=0;
     for (SDL_hid_device_info *d=list;d;d=d->next)
@@ -72,7 +73,7 @@ static inline DsBtSink *ds_bt_sink_open(void) {
         }
     SDL_hid_free_enumeration(list);
     if (matches!=1) {
-        printf("Controller feedback: Bluetooth speaker: %s DualSense over Bluetooth\n",matches ? "more than one" : "no");
+        if (!quiet) printf("Controller feedback: Bluetooth speaker: %s DualSense over Bluetooth\n",matches ? "more than one" : "no");
         SDL_free(path);return NULL;
     }
     DsBtSink *s=(DsBtSink *)SDL_calloc(1,sizeof(*s));
@@ -89,7 +90,7 @@ static inline DsBtSink *ds_bt_sink_open(void) {
     }
     if (s && s->lock) s->thread=SDL_CreateThread(ds_bt_sink_thread,"ds-bt-speaker",s);
     if (!s || !s->thread) {
-        fprintf(stderr,"Controller feedback: Bluetooth speaker unavailable (%s)\n",
+        if (!quiet) fprintf(stderr,"Controller feedback: Bluetooth speaker unavailable (%s)\n",
                 !s ? "out of memory" : !s->hid ? SDL_GetError() : !s->encoder ? opus_strerror(error) : SDL_GetError());
         if (s) {
             if (s->lock) SDL_DestroyMutex(s->lock);
@@ -108,6 +109,7 @@ static inline void ds_bt_sink_push(DsBtSink *s, const float *mono, int n) {
     ds_bt_framer_push(&s->framer,mono,n,ds_bt_sink_enqueue,s);
     SDL_UnlockMutex(s->lock);
 }
+static inline int ds_bt_sink_failed(DsBtSink *s) {return s && SDL_GetAtomicInt(&s->stop);}
 static inline void ds_bt_sink_close(DsBtSink *s) {
     if (!s) return;
     SDL_SetAtomicInt(&s->stop,1);
@@ -119,11 +121,13 @@ static inline void ds_bt_sink_close(DsBtSink *s) {
     SDL_free(s);
 }
 #else
-static inline DsBtSink *ds_bt_sink_open(void) {
+static inline DsBtSink *ds_bt_sink_open(int quiet) {
+    (void)quiet;
     puts("Controller feedback: Bluetooth speaker not built into this version (no Opus)");
     return NULL;
 }
 static inline void ds_bt_sink_push(DsBtSink *s, const float *mono, int n) {(void)s;(void)mono;(void)n;}
 static inline void ds_bt_sink_close(DsBtSink *s) {(void)s;}
+static inline int ds_bt_sink_failed(DsBtSink *s) {(void)s;return 0;}
 #endif
 #endif

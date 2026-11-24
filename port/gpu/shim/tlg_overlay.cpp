@@ -26,6 +26,7 @@ inline bool Mark(unsigned) { return false; }
 
 #include <SDL3/SDL.h>
 #include "tlg_settings.h"
+#include "tlg_quality.h"
 #include "tlg_orbs.h"
 #include "tlg_actors.h"
 #include "tlg_graphics.h"
@@ -40,6 +41,11 @@ extern "C" void runtime_restart(void); // src/probe.c: starts run.py again, ends
 #include "shader_recompiler/recompiler_toggles.h"
 #endif
 #include "imgui.h"
+#include "overlay_design.h"
+#include "shader_loading.h"
+#ifdef TLG_RENDERER_V2
+#include "overlay_mods.h"
+#endif
 #include "tlg_overlay_scale.h"
 #ifdef TLG_RENDERER_V2
 #include "../../src/iss_native_resolution.h"
@@ -108,6 +114,7 @@ std::mutex imgui_mutex; // the ImGui context: window thread (input) and present 
 bool initialized = false;
 std::atomic<bool> menu_open{false};
 bool r3_down = false, l2_down = false;
+ImFont* loading_title_font=nullptr;
 std::atomic<bool> loading{false};
 std::atomic<u32> loading_done{0}, loading_total{0};
 std::atomic<bool> loading_compile{false}; // first-run shader compilation (SetLoadingCompile)
@@ -271,7 +278,7 @@ void Help(const char* text) {
 
 // Two-column rows: the name on the left, the control on the right.
 bool BeginRows(const char* id) {
-    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp)) {
+    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
         return false;
     }
     ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 0.52f);
@@ -280,10 +287,10 @@ bool BeginRows(const char* id) {
 }
 
 void Row(const char* label) {
-    ImGui::TableNextRow();
+    ImGui::TableNextRow(ImGuiTableRowFlags_None, ImGui::GetFrameHeight() + ImGui::GetStyle().CellPadding.y * 2);
     ImGui::TableNextColumn();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(label);
+    ImGui::TextWrapped("%s", label);
     ImGui::TableNextColumn();
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::PushID(label);
@@ -338,7 +345,7 @@ void FloatRow(const char* label, std::atomic<float>& value, float lo, float hi, 
 
 void InfoRow(const char* label, const char* text) {
     Row(label);
-    ImGui::TextDisabled("%s", text);
+    OverlayDesign::Hint(text);
     ImGui::PopID();
 }
 
@@ -420,7 +427,7 @@ void DisplayModeRow() {
 void ImageTab() {
     namespace G = TlgGraphics;
     auto& s = TlgSettings::Get();
-    ImGui::SeparatorText(TL("Display", "Tela"));
+    OverlayDesign::Section(TL("Display", "Tela"));
     if (BeginRows("##display")) {
         static const char* const modes[] = {TL("Windowed", "Janela"), TL("Borderless window", "Janela sem borda"), TL("Fullscreen", "Tela cheia")};
         ChoiceRow(TL("Display mode", "Modo de exibição"), s.display_mode, G::DisplayModeCount == 3 ? modes : G::DisplayModeNames.data(),
@@ -430,6 +437,13 @@ void ImageTab() {
         CheckRow(TL("Adaptive VSync (weaker PCs)", "VSync adaptativo (PCs mais fracos)"), s.vsync_relaxed,
                  TL("For PCs running near 30 or 60 FPS: a late frame is shown at once (may tear a little) instead of waiting a whole extra refresh, so the frame rate stops dropping in steps (30 -> 20 -> 15). Applies right away. Has no effect if your display does not offer it.",
                     "Para PCs perto de 30 ou 60 FPS: um quadro atrasado aparece na hora (pode ter um pouco de tearing) em vez de esperar mais uma atualização inteira, e o FPS para de cair em degraus (30 -> 20 -> 15). Vale na hora. Sem efeito se a tela não oferecer."));
+        CheckRow(TL("HDR boost", "Reforço do HDR"), s.hdr_boost,
+                 TL("Only while the game is in HDR: brightens the game's dark and middle tones, leaving very bright parts as they are. Off shows the game's own HDR picture. Applies right away.",
+                    "Só com o jogo em HDR: clareia os tons escuros e médios do jogo, deixando as partes muito claras como estão. Desligado mostra a imagem HDR do próprio jogo. Vale na hora."));
+        if (s.hdr_boost)
+            SliderRow(TL("HDR boost strength", "Intensidade do reforço do HDR"), s.hdr_boost_strength, 110, 300, "%d%%",
+                      TL("How much brighter dark and middle tones get (150% = one and a half times).",
+                         "Quanto os tons escuros e médios clareiam (150% = uma vez e meia)."));
 #endif
         ImGui::EndTable();
     }
@@ -439,7 +453,7 @@ void ImageTab() {
     const bool rcas_blocked = s.rcas && !s.rcas_applied;
     // tlg: only spatial filters on the final image. The temporal upscalers (FSR 3/4, TAA, DLSS) were
     // built for GoW3's pipeline and make TLG's image shake, so they are not offered here.
-    ImGui::SeparatorText(TL("Scaling and sharpening", "Escala e nitidez"));
+    OverlayDesign::Section(TL("Scaling and sharpening", "Escala e nitidez"));
     if (BeginRows("##scaling")) {
 #ifdef TLG_RENDERER_V2
         // One selector for every upscaler: the spatial FSR 1 on the final image, or one temporal upscaler
@@ -488,7 +502,7 @@ void ImageTab() {
 #endif
         ImGui::EndTable();
     }
-    ImGui::SeparatorText(TL("Draw distance and detail", "Distância de visão e detalhe"));
+    OverlayDesign::Section(TL("Draw distance and detail", "Distância de visão e detalhe"));
     if (BeginRows("##view")) {
         ImGui::BeginDisabled(!s.view_supported);
         FloatRow(TL("LOD distance", "Distância do LOD"), s.lod_scale, 0.25f, 4.0f, "%.2fx",
@@ -531,11 +545,12 @@ void ImageTab() {
                                         "Sobe o nível mínimo de qualidade enquanto a taxa de quadros fica abaixo do alvo e devolve quando "
                                         "há folga (menus e carregamentos são ignorados). O mínimo abaixo continua valendo.")
                                    : TL(Unsupported, "Indisponível: versão do jogo ou assinatura do código diferente."));
-        SliderRow(TL("Minimum dynamic quality level", "Nível mínimo da qualidade dinâmica"), s.quality_floor, 0, 14, "%d",
-                  s.view_supported ? TL("The game steps its quality level (0 best, 14 lowest: shorter LOD, fewer shadow cascades, fewer "
+        SliderRow(TL("Minimum dynamic quality level", "Nível mínimo da qualidade dinâmica"), s.quality_floor, 0,
+                  TlgQuality::MaxLevel, "%d", // capped at 12 on 2026-11-23: higher levels unload textures for minutes
+                  s.view_supported ? TL("The game steps its quality level (0 best, 12 lightest here: shorter LOD, fewer shadow cascades, fewer "
                                         "objects) up in heavy scenes and back down in light ones. Raising the minimum keeps the "
                                         "lighter levels: more FPS on weak hardware, less detail.",
-                                        "O jogo sobe o nível de qualidade (0 melhor, 14 mais baixo: LOD mais curto, menos cascatas de sombra, "
+                                        "O jogo sobe o nível de qualidade (0 melhor, 12 o mais leve aqui: LOD mais curto, menos cascatas de sombra, "
                                         "menos objetos) em cenas pesadas e desce nas leves. Subir o mínimo mantém os níveis mais leves: "
                                         "mais FPS em máquina fraca, menos detalhe.")
                                    : TL(Unsupported, "Indisponível: versão do jogo ou assinatura do código diferente."));
@@ -568,7 +583,7 @@ void ImageTab() {
         ImGui::PopID();
         ImGui::EndTable();
     }
-    ImGui::SeparatorText(TL("Information", "Informações"));
+    OverlayDesign::Section(TL("Information", "Informações"));
     if (BeginRows("##image_info")) {
         char text[96];
         std::snprintf(text, sizeof(text), "%d x %d", iw, ih);
@@ -585,7 +600,7 @@ void FixesSection();
 
 void PerformanceTab() {
     if (TlgPerf::Enabled()) {
-        ImGui::SeparatorText(TL("Performance capture", "Captura de desempenho"));
+        OverlayDesign::Section(TL("Performance capture", "Captura de desempenho"));
         static int category = 0;
         const char* labels[] = {TL("Absorb smoke", "Absorver fumaça"), TL("Use power", "Usar poder"),
                                 TL("Movement", "Movimentação"), TL("Other", "Outro")};
@@ -600,7 +615,7 @@ void PerformanceTab() {
     auto& s = TlgSettings::Get();
     // tlg: GoW3's render-resolution and engine-frame-rate patches and the readback shortcuts are not
     // offered: they do not apply to TLG, and the readback ones crash it (it needs precise readbacks).
-    ImGui::SeparatorText(TL("Live", "Em tempo real"));
+    OverlayDesign::Section(TL("Live", "Em tempo real"));
     if (BeginRows("##live")) {
         static const char* const fps_labels[] = {"30", "60", "120", "240", TL("Unlimited", "Sem limite")};
         static_assert(sizeof(fps_labels) / sizeof(fps_labels[0]) == G::FpsLimits.size(),
@@ -625,15 +640,13 @@ void PerformanceTab() {
 #ifdef TLG_RENDERER_V2
 // Renderer v2 has its own fixes and switches (ISS_* variables): none of this port's.
 void FixesSection() {
-    ImGui::SeparatorText(TL("Fixes", "Correções"));
-    ImGui::TextDisabled("%s", TL("This build uses renderer v2: its own fixes apply.",
-                                 "Esta versão usa o renderer v2: valem as correções dele."));
+    // Renderer-specific fixes have no controls here; don't add a redundant note.
 }
 #else
 void FixesSection() {
     namespace B = Common::Backports;
     auto& s = TlgSettings::Get();
-    ImGui::SeparatorText(TL("Fixes", "Correções"));
+    OverlayDesign::Section(TL("Fixes", "Correções"));
     ImGui::TextDisabled("%s", TL("Marked (next start) are saved now and apply the next time the game starts.",
                                  "As marcadas (próxima partida) são gravadas agora e valem na próxima vez que o jogo abrir."));
     const ImVec4 amber(0.85f, 0.72f, 0.45f, 1.0f);
@@ -682,7 +695,7 @@ void FixesSection() {
     }
 
     // A/B switches read once at start (recompiler or device creation): next start only.
-    ImGui::SeparatorText(TL("A/B switches (next start)", "Chaves A/B (próxima partida)"));
+    OverlayDesign::Section(TL("A/B switches (next start)", "Chaves A/B (próxima partida)"));
     struct Extra { const char* name; bool (*current)(); };
     static const Extra extras[] = {
         {"WQM", Shader::Toggles::WholeQuadMode},
@@ -1005,7 +1018,7 @@ void BindingsWindow() {
         };
         auto group = [&](const char* title, int first, int count) {
             ImGui::PushStyleColor(ImGuiCol_Text, green);
-            ImGui::SeparatorText(title);
+            OverlayDesign::Section(title);
             ImGui::PopStyleColor();
             if (ImGui::BeginTable(title, 3, ImGuiTableFlags_SizingStretchProp)) {
                 ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.0f);
@@ -1029,7 +1042,7 @@ void BindingsWindow() {
             group(TL("Menus", "Menus"), 11, 3);
             // The power wheel shortcuts (keyboard keys; tlg.ini iss_power_key_*).
             ImGui::PushStyleColor(ImGuiCol_Text, green);
-            ImGui::SeparatorText(TL("Power wheel", "Roda de poderes"));
+            OverlayDesign::Section(TL("Power wheel", "Roda de poderes"));
             ImGui::PopStyleColor();
             if (ImGui::BeginTable("##powerkeys", 2, ImGuiTableFlags_SizingStretchProp)) {
                 ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.0f);
@@ -1064,7 +1077,7 @@ void BindingsWindow() {
                                                "Teclas do teclado; segure Direcional baixo para a roda."));
             ImGui::Dummy(ImVec2(0, fs * 0.5f));
             ImGui::PushStyleColor(ImGuiCol_Text, green);
-            ImGui::SeparatorText(TL("Not changed here", "Não mudam aqui"));
+            OverlayDesign::Section(TL("Not changed here", "Não mudam aqui"));
             ImGui::PopStyleColor();
             ImGui::PushStyleColor(ImGuiCol_Text, muted);
             const char* fixed[][2] = {
@@ -1093,7 +1106,7 @@ void BindingsWindow() {
             ImGui::EndTable();
         }
         ImGui::PushStyleColor(ImGuiCol_Text, green);
-        ImGui::SeparatorText(TL("Your layout", "Seu layout"));
+        OverlayDesign::Section(TL("Your layout", "Seu layout"));
         ImGui::PopStyleColor();
         ImGui::TextColored(muted, "%s", TL("Green: a key in use, with what it does. Amber: one key used for two controls.",
                                            "Verde: tecla em uso, com o que ela faz. Âmbar: uma tecla usada em dois controles."));
@@ -1127,19 +1140,21 @@ extern "C" int runtime_mouse_aim_installed(void);
 void ControlsTab() {
     auto& s = TlgSettings::Get();
     {
-        ImGui::SeparatorText(TL("Controller speaker","Alto-falante do controle"));
+        OverlayDesign::Section(TL("Controller speaker","Alto-falante do controle"));
         bool speaker=s.iss_pad_speaker;
         if(ImGui::Checkbox(TL("Play controller-speaker sounds","Tocar sons do alto-falante do controle"),&speaker)){
             s.iss_pad_speaker=speaker;TlgSettings::Save();
         }
-        ImGui::TextWrapped(TL("The sounds the game plays through the controller (on the DualSense speaker, or the PC speakers without one). Turning this off mutes only those; game sound and the lightbar are unchanged. Applies at once.",
-            "Os sons que o jogo toca pelo controle (no alto-falante do DualSense, ou nas caixas do PC sem ele). Desligar silencia apenas esses; o som do jogo e a barra de luz continuam. Vale na hora."));
+        Help(TL("Mutes controller-speaker effects only. Game audio and the lightbar are unchanged.", "Silencia apenas os efeitos do alto-falante do controle. O áudio do jogo e a barra de luz continuam."));
     }
 #ifdef TLG_RENDERER_V2
     IssPowerWheelStatus power_status{};runtime_power_wheel_status(&power_status);
+#ifdef TLG_OVERLAY_PREVIEW
+    power_status.supported=1;power_status.ready=1;power_status.unlocked_mask=15;
+#endif
     if(power_status.supported){
-        ImGui::SeparatorText("Power switching test");
-        ImGui::TextWrapped("Switches apply after closing the menu (F1). Every switch carries the current energy percentage and missile count, capped to the new power's capacity. Switching never refills resources.");
+        OverlayDesign::Section(TL("Power switching", "Troca de poderes"));
+        OverlayDesign::Hint(TL("Only unlocked powers. Switching preserves your remaining energy and missiles.", "Apenas poderes desbloqueados. A troca preserva sua energia e seus mísseis restantes."));
         static const char *names[]={"Smoke","Neon","Video","Concrete"};
         bool power_enabled=s.iss_power_switch_enabled;
         if(ImGui::Checkbox("Enable quick power switching",&power_enabled)){
@@ -1150,14 +1165,13 @@ void ControlsTab() {
         if(ImGui::Checkbox("Switch immediately on stick direction",&instant)){
             s.iss_power_instant=instant;runtime_power_wheel_request(-1);TlgSettings::Save();
         }
-        ImGui::TextWrapped(instant?"D-pad Down + a quick stick flick switches immediately. Keep holding to open the wheel; release D-pad Down to confirm its final highlight. Left Smoke, up Neon, right Video, down Concrete.":
-            "Hold D-pad Down for the wheel, choose with the right stick, then release. Hold the stick centered briefly to cancel. A quick tap keeps the normal D-pad action.");
+        Help(instant ? "Hold D-pad Down and flick the right stick to switch. Keep holding for the wheel; release to confirm." : "Hold D-pad Down, choose with the right stick, then release. Center the stick briefly to cancel.");
         float wheel_glow=s.iss_power_glow;
         if(ImGui::SliderFloat("Wheel glow",&wheel_glow,0.5f,3.0f,"%.2fx")){
             s.iss_power_glow=wheel_glow;
         }
         if(ImGui::IsItemDeactivatedAfterEdit())TlgSettings::Save();
-        ImGui::TextWrapped("With the wheel open, use the right stick, arrow keys or mouse to highlight a power. Keyboard/mouse: hold K (the default D-pad Down binding) to open it.");
+        Help("With the wheel open, use the right stick, arrow keys or mouse. Hold your D-pad Down binding (default K) to open it.");
         for(int i=0;i<4;i++){
             if(i)ImGui::SameLine();
             ImGui::BeginDisabled(!power_enabled||!power_status.ready||!(power_status.unlocked_mask&(1<<i)));
@@ -1168,14 +1182,13 @@ void ControlsTab() {
         ImGui::Text("Shortcut keys: %s / %s / %s / %s",SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[0].load())),
             SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[1].load())),SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[2].load())),
             SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[3].load())));
-        if(ImGui::Button("Change in Keyboard & mouse bindings...")){binds_open=true;binds_capture=-1;binds_problem="";}
         if(power_status.error)ImGui::Text("Switching stopped after verification error %d. Reload the copied save.",power_status.error);
         else if(power_status.pending)ImGui::TextUnformatted("Switch queued for gameplay.");
     }
 #endif
     // Mouse (src/runtime_pad.c): the camera settings apply at once. The buttons and the touchpad
     // mode are fixed unless TLG_KEY_MAP / TLG_MOUSE_PAD_* (or tlg.ini key_map) change them.
-    ImGui::SeparatorText(TL("Keyboard & mouse bindings", "Teclado e mouse"));
+    OverlayDesign::Section(TL("Keyboard & mouse bindings", "Teclado e mouse"));
     if (ImGui::Button(TL("Change keyboard & mouse bindings...", "Mudar teclas e botões do mouse..."))) {
         binds_open = true;
         binds_capture = -1;
@@ -1183,7 +1196,7 @@ void ControlsTab() {
     }
     Help(TL("Shows a keyboard and mouse with every control; click one and press the key or button you want.",
             "Mostra um teclado e um mouse com cada controle; clique um e aperte a tecla ou o botão que quiser."));
-    ImGui::SeparatorText(TL("Mouse", "Mouse"));
+    OverlayDesign::Section(TL("Mouse", "Mouse"));
     if (BeginRows("##mouse")) {
         CheckRow(TL("Mouse turns the camera", "Mouse gira a câmera"), s.mouse_enabled,
                  TL("The game window takes the mouse while it has focus. Esc releases it; a click in the window takes it back.",
@@ -1196,11 +1209,6 @@ void ControlsTab() {
         const bool direct_mouse=runtime_mouse_aim_installed()!=0;
         InfoRow(TL("Camera input", "Entrada da câmera"),direct_mouse?"Direct mouse":"Direct mouse unavailable - see run log");
         ImGui::EndDisabled();
-        InfoRow(TL("Left / right / middle", "Esquerdo / direito / do meio"), "R2 / L2 / R3");
-        InfoRow(TL("Touchpad mode", "Modo touchpad"), TL("hold Left Ctrl or Mouse X1", "segure Ctrl esquerdo ou botão X1 do mouse"));
-        InfoRow(TL("In touchpad mode", "No modo touchpad"),
-                TL("left touch/click/drag, middle touch, right two fingers", "esquerdo toca/clica/arrasta, do meio toca, direito dois dedos"));
-        InfoRow(TL("Release the mouse", "Soltar o mouse"), "Esc");
         const char* env = std::getenv("TLG_KEY_MAP");
         const std::string remap = env && env[0] ? std::string(env) : s.key_map;
         if (!remap.empty()) {
@@ -1208,14 +1216,17 @@ void ControlsTab() {
         }
         ImGui::EndTable();
     }
-    ImGui::SeparatorText(TL("Controller", "Controle"));
+    if (ImGui::CollapsingHeader(TL("Mouse and touchpad shortcuts", "Atalhos do mouse e touchpad"))) {
+        OverlayDesign::Hint(TL("Mouse buttons: R2 / L2 / R3. Hold Left Ctrl or Mouse X1 for touchpad mode. Esc releases the mouse.", "Botões do mouse: R2 / L2 / R3. Segure Ctrl esquerdo ou Mouse X1 para o modo touchpad. Esc solta o mouse."));
+    }
+    OverlayDesign::Section(TL("Controller", "Controle"));
     if (BeginRows("##controller")) {
         CheckRow(TL("Vibration", "Vibração"), s.rumble,
                  TL("The controller vibrates with the game. Turn it off if you do not want vibration or if it makes the controller misbehave.",
                     "O controle vibra com o jogo. Desligue se não quiser vibração ou se ela fizer o controle se comportar mal."));
         ImGui::EndTable();
     }
-    ImGui::SeparatorText(TL("Sensor mode (graffiti)", "Modo sensor (grafite)"));
+    OverlayDesign::Section(TL("Sensor mode (graffiti)", "Modo sensor (grafite)"));
     if (BeginRows("##sensor")) {
         SliderRow(TL("Graffiti aiming speed", "Velocidade da mira do grafite"), s.sensor_aim, 25, 200, "%d%%",
                   TL("How fast the stick moves the graffiti cursor in sensor mode (100% = default).",
@@ -1238,7 +1249,7 @@ void OverlayTab() {
         ImGui::EndTable();
     }
     ImGui::BeginDisabled(!s.show_fps);
-    ImGui::SeparatorText(TL("What to show", "O que mostrar"));
+    OverlayDesign::Section(TL("What to show", "O que mostrar"));
     if (ImGui::BeginTable("##overlay_items", 2, ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableNextColumn();
         static const char* const names[] = {"FPS", TL("Frametime", "Tempo de quadro"), "Upscaler", TL("GPU (name and use)", "GPU (nome e uso)"), TL("CPU (game)", "CPU (jogo)"),
@@ -1261,7 +1272,7 @@ void OverlayTab() {
         ImGui::EndChild();
         ImGui::EndTable();
     }
-    ImGui::SeparatorText(TL("Appearance", "Aparência"));
+    OverlayDesign::Section(TL("Appearance", "Aparência"));
     if (BeginRows("##appearance")) {
         SliderRow(TL("Font size", "Tamanho da fonte"), s.overlay_scale, 50, 300, "%d%%", TL("Size of the overlay text.", "Tamanho do texto do overlay."));
         static const char* const corners[] = {TL("Top left", "Superior esquerdo"), TL("Top right", "Superior direito"), TL("Bottom left", "Inferior esquerdo"), TL("Bottom right", "Inferior direito")};
@@ -1272,12 +1283,16 @@ void OverlayTab() {
         ImGui::EndTable();
     }
     ImGui::EndDisabled();
-    ImGui::SeparatorText(TL("About", "Sobre"));
+    OverlayDesign::Section(TL("About", "Sobre"));
     if (BeginRows("##about")) {
         const auto& elf = Common::ElfInfo::Instance();
         char text[160];
+#ifdef TLG_OVERLAY_PREVIEW
+        std::snprintf(text, sizeof(text), "%s", std::getenv("OVERLAY_PREVIEW_FIRST_LIGHT") ? "CUSA00575 v1.04" : "CUSA00223 v1.07");
+#else
         std::snprintf(text, sizeof(text), "%.*s v%.*s", int(elf.GameSerial().size()), elf.GameSerial().data(),
                       int(elf.AppVer().size()), elf.AppVer().data());
+#endif
         InfoRow(TL("Game", "Jogo"), text);
         const u32 total = background_total;
         if (total) {
@@ -1307,7 +1322,8 @@ void NativeRenderingTab() {
         ImGui::EndDisabled();ImGui::Text("Rebuild check: %s",state==3?"verified":state==2?"rebuilding":state==1?"queued":state<0?"not confirmed":"not run");
     }
     const bool live_native=runtime_native_live_enabled()!=0;
-    ImGui::TextWrapped("%s",live_native?"Experimental live native rendering. Select a resolution or release the internal resolution slider to queue a safe rebuild. Larger allocations still require restarting this candidate.":"Experimental native 3D rendering for CUSA00223 update 1.07. Changes apply after closing and relaunching the game.");
+    OverlayDesign::Section(TL("Resolution", "Resolução"));
+    OverlayDesign::Hint(live_native ? TL("Supported sizes apply live. Larger allocations need a restart.", "Tamanhos compatíveis são aplicados ao vivo. Alocações maiores exigem reiniciar.") : TL("Resolution changes apply on the next launch.", "Alterações de resolução valem na próxima partida."));
     const char* outputs[]={TL("Off (original game)","Desligado (jogo original)"),"1080p  1920 x 1080","1440p  2560 x 1440",
         "3440 x 1440 (21:9)","4K  3840 x 2160","5120 x 1440 (32:9)","2560 x 1080 (21:9)","3840 x 1080 (32:9)"};
     int output=s.iss_native_output, percent=s.iss_native_percent;
@@ -1315,17 +1331,22 @@ void NativeRenderingTab() {
     // Output first; the internal resolution is a scene height (iss_native_pick in
     // iss_native_resolution.h, the same arithmetic as the launchers), stored as the percent the game reads.
     bool native_commit=false;
-    if(ImGui::Combo(TL("Output","Saída"),&output,outputs,ISS_NATIVE_PRESETS)){native_commit=true;
+    int step=-1;
+    if (BeginRows("##native_resolution")) {
+    Row(TL("Output","Saída"));
+    if(ImGui::Combo("##value",&output,outputs,ISS_NATIVE_PRESETS)){native_commit=true;
         s.iss_native_percent=percent=iss_native_retarget(s.iss_native_output,percent,output);
         s.iss_native_output=output;dirty=true;
     }
-    const int step=output?iss_native_step_for_percent(output,percent):-1;
+    ImGui::PopID();
+    step=output?iss_native_step_for_percent(output,percent):-1;
     char preview[96];
     if(!output)std::snprintf(preview,sizeof(preview),"-");
     else if(step>=0)std::snprintf(preview,sizeof(preview),"%up",iss_native_step_heights[step]);
     else std::snprintf(preview,sizeof(preview),TL("Custom (%d%%)","Personalizada (%d%%)"),percent);
+    Row(TL("Internal resolution","Resolução interna"));
     ImGui::BeginDisabled(!output);
-    if(ImGui::BeginCombo(TL("Internal resolution","Resolução interna"),preview)){
+    if(ImGui::BeginCombo("##value",preview)){
         for(int i=0;i<ISS_NATIVE_STEPS;i++){
             IssNativePick pick;const int status=iss_native_pick(output,iss_native_step_heights[i],&pick);
             char label[128];
@@ -1342,23 +1363,28 @@ void NativeRenderingTab() {
         ImGui::EndCombo();
     }
     ImGui::EndDisabled();
-    if(ImGui::SliderInt(TL("Custom scale (fine adjustment)","Escala personalizada (ajuste fino)"),&percent,25,200,"%d%%")){s.iss_native_percent=percent;dirty=true;}
+    ImGui::PopID();
+    Row(TL("Custom scale","Escala personalizada"));
+    if(ImGui::SliderInt("##value",&percent,25,200,"%d%%")){s.iss_native_percent=percent;dirty=true;}
     if(ImGui::IsItemDeactivatedAfterEdit())native_commit=true;
-    if(ImGui::Checkbox("Place HUD at screen edges",&edges)){s.iss_native_hud_edges=edges;dirty=true;native_commit=true;}
+    ImGui::PopID();
+    Row(TL("Place HUD at screen edges", "HUD nas bordas da tela"));
+    if(ImGui::Checkbox("##value",&edges)){s.iss_native_hud_edges=edges;dirty=true;native_commit=true;}
+    ImGui::PopID();
+    ImGui::EndTable();
+    }
     // Native choices can apply while the overlay stays open. Persist committed edits now: closing the
     // game directly need not pass through SetOpen(false). Slider drags still write only once, on release.
     if(native_commit)TlgSettings::Save();
     if(live_native&&native_commit)
         runtime_native_live_request_config({output,percent,int(edges),s.iss_native_ui_16_9.load(),0});
     if(live_native)ImGui::TextWrapped("%s",runtime_native_live_reason());
-    ImGui::TextWrapped("%s",TL("Pick the output (what is shown) and the internal resolution (what the 3D scene is drawn at): for example 720p inside a 1440p output renders less and shows more. The vertical field of view stays the same; wider displays show more world horizontally. Uncheck edge HUD to keep it centered within 16:9.",
-        "Escolha a saída (o que aparece) e a resolução interna (o tamanho em que a cena 3D é desenhada): por exemplo 720p dentro de uma saída 1440p desenha menos e mostra mais. O campo de visão vertical continua o mesmo; telas mais largas mostram mais mundo na horizontal. Desmarque o HUD nas bordas para manter o HUD centralizado em 16:9."));
     IssNativePlan requested{};
     const bool requested_valid=output && iss_native_plan({output,percent,int(edges),s.iss_native_ui_16_9.load(),0},&requested);
     if(!output)ImGui::TextWrapped("%s",TL("Original game rendering. Pick an output to render natively.","Renderização do jogo original. Escolha uma saída para renderizar nativamente."));
     else if(requested_valid){
-        ImGui::Text(TL("Next launch: scene %u x %u -> output %u x %u (%d%%), %u lighting entries","Próxima partida: cena %u x %u -> saída %u x %u (%d%%), %u entradas de iluminação"),
-                    requested.width,requested.height,requested.output_width,requested.output_height,percent,requested.light_entries);
+        ImGui::TextWrapped(TL("Selected: %u x %u scene · %u x %u output · %d%%", "Selecionado: cena %u x %u · saída %u x %u · %d%%"),
+                    requested.width,requested.height,requested.output_width,requested.output_height,percent);
         if(step>=0){
             IssNativePick pick;iss_native_pick(output,iss_native_step_heights[step],&pick);
             if(pick.error){
@@ -1373,11 +1399,9 @@ void NativeRenderingTab() {
         }
     }else ImGui::TextWrapped("%s",TL("This scale is over the 4K pixel limit: the game would refuse it at startup and run unchanged. Pick a lower internal resolution.",
         "Esta escala passa do limite de pixels de 4K: o jogo a recusaria na partida e abriria sem mudança. Escolha uma resolução interna menor."));
-    ImGui::TextWrapped("%s",TL("Takes effect the next time the game starts.","Vale na próxima vez que o jogo iniciar."));
-    ImGui::Separator();
-    ImGui::TextWrapped("%s",runtime_native_reason());
+    OverlayDesign::Section(TL("Status", "Estado"));
+    if (runtime_native_status() != 1) ImGui::TextWrapped("%s",runtime_native_reason());
     const int exclusive=s.exclusive_status;
-    ImGui::Text("Exclusive presentation: %s",exclusive==2?"acquired":exclusive==1?"waiting for driver / focus":exclusive<0?"unavailable":"off");
     if(const char* problem=s.exclusive_problem.load())ImGui::TextWrapped("%s",problem);
     if(runtime_native_status()==1){
         const auto* p=runtime_native_plan();
@@ -1389,12 +1413,16 @@ void NativeRenderingTab() {
                 "Selected size is NOT active. Saved for next launch; restart required or choose a supported size.");
         }
     }
+    OverlayDesign::Section(TL("Display", "Tela"));
+    if (BeginRows("native_display")) { DisplayModeRow(); ImGui::EndTable(); }
+    if (ImGui::CollapsingHeader(TL("Technical details and help", "Detalhes técnicos e ajuda"))) {
+    OverlayDesign::Hint(TL("Output is the displayed size; internal resolution controls 3D detail and performance. Wider outputs retain the vertical field of view. Disable external resolution patches.", "A saída define o tamanho exibido; a resolução interna controla os detalhes 3D e o desempenho. Saídas largas mantêm o campo de visão vertical. Desative patches de resolução externos."));
+    ImGui::TextWrapped("Exclusive presentation: %s",exclusive==2?"acquired":exclusive==1?"waiting for driver / focus":exclusive<0?"unavailable":"off");
     uint32_t capacity_w{},capacity_h{},capacity_lights{};
     if(live_native && runtime_native_live_capacity(&capacity_w,&capacity_h,&capacity_lights))
         ImGui::TextWrapped("Startup allocation: %u x %u, %u lighting entries. Exceeding either dimension or the lighting budget requires restarting.",capacity_w,capacity_h,capacity_lights);
-    ImGui::Text("Presented game image: %d x %d; window: %d x %d",s.image_width.load(),s.image_height.load(),s.window_width.load(),s.window_height.load());
-    ImGui::TextWrapped("Use a matching display resolution and Borderless for native output. Disable external resolution patches. Startup movies and some post-processing still need visual validation.");
-    if(ImGui::BeginTable("native_display",2)){DisplayModeRow();ImGui::EndTable();}
+    ImGui::TextWrapped("Presented image: %d x %d · window: %d x %d",s.image_width.load(),s.image_height.load(),s.window_width.load(),s.window_height.load());
+    }
 }
 #endif
 #ifdef TLG_RENDERER_V2
@@ -1415,124 +1443,108 @@ void PowerWheel(){
 #endif
 void Menu() {
     auto& s = TlgSettings::Get();
+    OverlayDesign::MenuStyle polished(base_scale);
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    static ImVec2 previous_menu_size{};
-    static float previous_menu_scale=0.0f;
-    const bool resized=previous_menu_size.x!=viewport->WorkSize.x ||
-                       previous_menu_size.y!=viewport->WorkSize.y || previous_menu_scale!=base_scale;
-    const ImGuiCond layout_condition=resized ? ImGuiCond_Always : ImGuiCond_Appearing;
-    previous_menu_size=viewport->WorkSize; previous_menu_scale=base_scale;
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
-                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
-                            layout_condition, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(std::min(760.0f * base_scale, viewport->WorkSize.x * 0.95f),
-                                    std::min(680.0f * base_scale, viewport->WorkSize.y * 0.9f)),
-                             layout_condition);
+    static ImVec2 previous_size{};
+    static float previous_scale = 0;
+    const bool resized = previous_size.x != viewport->WorkSize.x || previous_size.y != viewport->WorkSize.y || previous_scale != base_scale;
+    previous_size = viewport->WorkSize; previous_scale = base_scale;
+    const ImGuiCond layout = resized ? ImGuiCond_Always : ImGuiCond_Appearing;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * .5f, viewport->WorkPos.y + viewport->WorkSize.y * .5f), layout, ImVec2(.5f, .5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(1040.f * base_scale, viewport->WorkSize.x * .95f), std::min(760.f * base_scale, viewport->WorkSize.y * .92f)), layout);
     bool keep_open = true;
-    // tlg: the game's own title (param.sfo), not a fixed one.
-    static const std::string heading = [] {
-        const std::string_view title = Common::ElfInfo::Instance().Title();
-        const char* app_name = std::getenv("TLG_APP_NAME");
-        return std::string(!title.empty() ? title : app_name && *app_name ? app_name : "The Last Guardian") +
-               PadText("  (F1 / R3+L2)", "  (F1 / RS+LT)", "  (F1 / RS+ZL)");
-    }();
-    if (!ImGui::Begin(heading.c_str(), &keep_open, ImGuiWindowFlags_NoCollapse)) {
-        ImGui::End();
-        return;
-    }
-    footer_help = nullptr;
+    const char* heading = TL("Game settings###game_settings", "Configurações do jogo###game_settings");
+    if (!ImGui::Begin(heading, &keep_open, ImGuiWindowFlags_NoCollapse)) { ImGui::End(); return; }
 #ifdef TLG_RENDERER_V2
-    constexpr int TabCount = 7;
+    constexpr int TabCount = 8;
 #else
     constexpr int TabCount = 4;
 #endif
+    static const char* const tabs[TabCount] = {"Overlay", TL("Image", "Imagem"), TL("Performance", "Desempenho"), TL("Controls", "Controles")
+#ifdef TLG_RENDERER_V2
+        , "Karma", TL("Rendering", "Renderização"), TL("Trophies", "Troféus"), "Mods"
+#endif
+    };
     const ImGuiIO& io = ImGui::GetIO();
     if (!io.WantTextInput) {
-        const int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
-                         : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false)
-                             ? -1
-                             : 0;
-        if (step) {
-            requested_tab = (s.menu_tab + step + TabCount) % TabCount;
-        }
+        const int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1 :
+                         ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1 : 0;
+        if (step) requested_tab = (s.menu_tab + step + TabCount) % TabCount;
     }
-    const float footer = ImGui::GetFrameHeightWithSpacing() * 2.0f + ImGui::GetTextLineHeightWithSpacing() * 2.0f;
-    if (ImGui::BeginTabBar("##tabs")) {
-        static const char* const tabs[TabCount] = {"Overlay", TL("Image", "Imagem"), TL("Performance", "Desempenho"),
-                                                   TL("Controls", "Controle")
-#ifdef TLG_RENDERER_V2
-                                                   ,"Karma", "Native rendering", "Trophies"
-#endif
-                                                   };
+    if (requested_tab >= 0) { s.menu_tab = std::clamp(requested_tab, 0, TabCount - 1); dirty = true; requested_tab = -1; }
+    const float footer = ImGui::GetFrameHeightWithSpacing() + 58.f * base_scale;
+    const float body_height = std::max(ImGui::GetFrameHeight() * 3, ImGui::GetContentRegionAvail().y - footer);
+    const float nav_width = std::min(184.f * base_scale, ImGui::GetContentRegionAvail().x * .25f);
+    if (ImGui::BeginChild("##settings_navigation", ImVec2(nav_width, body_height), ImGuiChildFlags_Borders)) {
+        OverlayDesign::Hint(TL("SETTINGS", "CONFIGURAÇÕES"));
+        ImGui::Spacing();
         for (int tab = 0; tab < TabCount; ++tab) {
-            const ImGuiTabItemFlags flags = requested_tab == tab ? ImGuiTabItemFlags_SetSelected : 0;
-            if (!ImGui::BeginTabItem(tabs[tab], nullptr, flags)) {
-                continue;
-            }
-            if (s.menu_tab != tab && requested_tab < 0) {
-                s.menu_tab = tab;
-                dirty = true;
-            }
-            if (ImGui::BeginChild("##body", ImVec2(0, -footer))) {
-                switch (tab) {
-                case 1: ImageTab(); break;
-                case 2: PerformanceTab(); break;
-                case 3: ControlsTab(); break;
-#ifdef TLG_RENDERER_V2
-                case 4: TlgKarmaMenu(); break;
-                case 5: NativeRenderingTab(); break;
-                case 6: TlgTrophiesMenu(); break;
-#endif
-                default: OverlayTab(); break;
-                }
-            }
-            ImGui::EndChild();
-            ImGui::EndTabItem();
+            ImGui::PushID(tab);
+            if (ImGui::Selectable(tabs[tab], s.menu_tab == tab, ImGuiSelectableFlags_None, ImVec2(0, ImGui::GetFrameHeight() + 4.f * base_scale))) { s.menu_tab = tab; dirty = true; }
+            ImGui::PopID();
         }
-        if (requested_tab >= 0) {
-            s.menu_tab = requested_tab;
-            dirty = true;
-            requested_tab = -1;
-        }
-        ImGui::EndTabBar();
     }
-
-    ImGui::Separator();
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextDisabled("%s", footer_help ? footer_help
-                              : TL(PadText("L1 / R1 or Q / E: switch tabs. Settings are saved in tlg.ini.",
-                                           "LB / RB or Q / E: switch tabs. Settings are saved in tlg.ini.",
-                                           "L / R or Q / E: switch tabs. Settings are saved in tlg.ini."),
-                                   PadText("L1 / R1 ou Q / E: trocar de aba. As configurações ficam salvas em tlg.ini.",
-                                           "LB / RB ou Q / E: trocar de aba. As configurações ficam salvas em tlg.ini.",
-                                           "L / R ou Q / E: trocar de aba. As configurações ficam salvas em tlg.ini.")));
-    ImGui::PopTextWrapPos();
-    if (const int changes = RestartChanges()) {
-        ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.45f, 1.0f), "%d change%s need%s a restart (unsaved progress is lost).",
-                           changes, changes == 1 ? "" : "s", changes == 1 ? "s" : "");
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!std::getenv("TLG_RESTART_COMMAND"));
-        if (ImGui::Button(TL("Apply and restart", "Aplicar e reiniciar"))) {
-            // The new launch confirms the options once the game shows; run.py restores the
-            // previous ones if it never does (restart_unconfirmed).
-            s.restart_unconfirmed = true;
-            TlgSettings::Save();
-            runtime_restart();
+    ImGui::EndChild(); ImGui::SameLine();
+    footer_help = nullptr;
+    const int tab = std::clamp(s.menu_tab.load(), 0, TabCount - 1);
+    ImGui::PushID(tab);
+    if (ImGui::BeginChild("##settings_content", ImVec2(0, body_height), ImGuiChildFlags_Borders)) {
+        ImGui::SetWindowFontScale(1.2f);
+        ImGui::TextColored(ImVec4(.68f, .85f, 1.f, 1.f), "%s", tabs[tab]);
+        ImGui::SetWindowFontScale(1.f);
+        ImGui::Spacing();
+        switch (tab) {
+        case 1: ImageTab(); break;
+        case 2: PerformanceTab(); break;
+        case 3: ControlsTab(); break;
+#ifdef TLG_RENDERER_V2
+        case 4: TlgKarmaMenu(); break;
+        case 5: NativeRenderingTab(); break;
+        case 6: TlgTrophiesMenu(); break;
+        case 7:
+#ifdef TLG_OVERLAY_PREVIEW
+            OverlayMods::Draw(std::getenv("OVERLAY_PREVIEW_FIRST_LIGHT")?"first_light":"second_son",UiPortuguese());
+#else
+            OverlayMods::Draw(Common::ElfInfo::Instance().GameSerial()=="CUSA00575"?"first_light":"second_son",UiPortuguese());
+#endif
+            break;
+#endif
+        default: OverlayTab(); break;
         }
-        ImGui::EndDisabled();
+    }
+    ImGui::EndChild();
+    ImGui::PopID();
+    if (ImGui::BeginChild("##setting_help", ImVec2(0, 52.f * base_scale), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar)) {
+        OverlayDesign::Hint(footer_help ? footer_help : TL("Hover or focus a setting for help. Q / E or shoulder buttons switch pages.", "Passe o mouse ou selecione uma opção para ajuda. Q / E ou os botões superiores trocam de página."));
+        if (footer_help && ImGui::IsWindowHovered()) ImGui::SetTooltip("%s", footer_help);
+    }
+    ImGui::EndChild();
+    if (const int changes = RestartChanges()) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(ImVec4(1.f, .77f, .40f, 1.f), TL("%d pending · restart loses unsaved progress", "%d pendentes · reiniciar perde o progresso não salvo"), changes);
+        ImGui::SameLine(); ImGui::BeginDisabled(!std::getenv("TLG_RESTART_COMMAND"));
+        if (ImGui::Button(TL("Apply and restart", "Aplicar e reiniciar"))) { s.restart_unconfirmed = true; TlgSettings::Save(); runtime_restart(); }
+        ImGui::EndDisabled(); ImGui::SameLine();
     } else {
-        ImGui::NewLine();
+        ImGui::AlignTextToFramePadding(); OverlayDesign::Hint(TL("Settings are saved automatically.", "As configurações são salvas automaticamente.")); ImGui::SameLine();
     }
     const float close_width = ImGui::CalcTextSize(TL("Close", "Fechar")).x + ImGui::GetStyle().FramePadding.x * 2;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - close_width);
-    if (ImGui::Button(TL("Close", "Fechar"))) {
-        keep_open = false;
-    }
+    if (ImGui::GetContentRegionAvail().x > close_width) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - close_width);
+    if (ImGui::Button(TL("Close", "Fechar"))) keep_open = false;
     ImGui::End();
-    if (!keep_open) {
-        SetOpen(false);
-    }
+    if (!keep_open) SetOpen(false);
 }
+
+
+#ifdef TLG_OVERLAY_PREVIEW
+extern "C" void iss_overlay_preview_draw(int tab) {
+    base_scale = 1.f;
+    if (tab >= 0) TlgSettings::Get().menu_tab = tab;
+    requested_tab = -1;
+    Menu();
+}
+extern "C" int iss_overlay_preview_tab() { return TlgSettings::Get().menu_tab; }
+#endif
 
 // Enemy health bar from the damage hook's records (tlg_actors.cpp).
 // Only the copied values are read, never the game's memory: an actor may be gone by now.
@@ -2169,47 +2181,42 @@ void SaveDialogs() {
     }
 }
 
-void LoadingScreen() {
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
-                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x * 0.4f, 0.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.0f);
-    ImGui::Begin("##loading", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
-                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-    const u32 done = loading_done, total = loading_total;
-    const bool compile = loading_compile;
-    ImGui::SetWindowFontScale(1.6f);
-    ImGui::TextUnformatted(compile ? TL("Compiling shaders...", "Compilando shaders...")
-                           : total ? TL("Loading shader cache...", "Carregando o cache de shaders...")
-                                   : TL("Preparing graphics...", "Preparando os gráficos..."));
-    ImGui::SetWindowFontScale(1.0f);
-    if (total) {
-        char count[64];
-        std::snprintf(count, sizeof(count), "%u / %u (%u%%)", done, total,
-                      u32(u64(done) * 100 / total));
-        ImGui::ProgressBar(float(done) / float(total), ImVec2(-1.0f, 0.0f), count);
+ImTextureData* loading_art_texture=nullptr;
+bool loading_art_attempted=false;
+void UpdateLoadingArtwork() {
+    if(!loading || loading_art_attempted)return;
+    loading_art_attempted=true;
+    const char*dir=std::getenv("ISS_GAME_DIR");if(!dir||!*dir)return;
+    for(const char*name:{"pic1.png","pic0.png"}) {
+        TlgPng::Image picture;
+        const std::string path=std::string(dir)+"/sce_sys/"+name;
+        if(!TlgPng::LoadRgba(path.c_str(),picture)||picture.rgba.empty())continue;
+        loading_art_texture=IM_NEW(ImTextureData)();
+        loading_art_texture->Create(ImTextureFormat_RGBA32,picture.width,picture.height);
+        std::memcpy(loading_art_texture->GetPixels(),picture.rgba.data(),picture.rgba.size());
+        ImGui::RegisterUserTexture(loading_art_texture);
+        break;
     }
-    if (compile && total && done > 0 && done < total) {
-        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                             loading_compile_started)
-                                   .count();
-        const u32 left = u32(elapsed * double(total - done) / double(done)) + 1;
-        ImGui::Text(TL("About %u:%02u left", "Faltam cerca de %u:%02u"), left / 60, left % 60);
-    }
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextDisabled("%s", compile ? TL("Only on the first start on this computer and after updates: "
-                                           "then the game runs without compiling shaders.",
-                                           "Só na primeira abertura neste computador e depois de "
-                                           "atualizações: depois o jogo roda sem compilar shaders.")
-                                      : TL("The first start after an update takes longer.",
-                                           "A primeira abertura depois de uma atualização demora mais."));
-    ImGui::PopTextWrapPos();
-    ImGui::End();
 }
-
+void LoadingScreen() {
+    const double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-loading_compile_started).count();
+#ifdef TLG_OVERLAY_PREVIEW
+    const bool first_light=std::getenv("OVERLAY_PREVIEW_FIRST_LIGHT")!=nullptr;
+#else
+    const bool first_light=Common::ElfInfo::Instance().GameSerial()=="CUSA00575";
+#endif
+    ShaderLoading::Draw(loading_done.load(),loading_total.load(),loading_compile.load(),elapsed,UiPortuguese(),first_light,loading_title_font,loading_art_texture);
+}
+#ifdef TLG_OVERLAY_PREVIEW
+extern "C" void iss_loading_preview_draw(int stage) {
+    if(ImGui::GetIO().Fonts->Fonts.Size>1)loading_title_font=ImGui::GetIO().Fonts->Fonts[1];
+    loading_total=stage==0?0:10000;
+    loading_done=stage==0?0:stage==1?0:stage==2?3760:stage==3?9870:stage==4?7400:10000;
+    loading_compile=stage>=1&&stage<=3;
+    loading_compile_started=std::chrono::steady_clock::now()-std::chrono::seconds(94);
+    LoadingScreen();
+}
+#endif
 void FpsCounter() {
     const auto& s = TlgSettings::Get();
     const std::string text = OverlayText();
@@ -2334,6 +2341,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     font_config.FontDataOwnedByAtlas = false;
     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(tlg_font_ttf),
                                    int(tlg_font_ttf_end - tlg_font_ttf), 18.0f, &font_config);
+    loading_title_font=io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(tlg_font_ttf),int(tlg_font_ttf_end-tlg_font_ttf),54.f,&font_config);
 
     const vk::Instance vk_instance = instance.GetInstance();
     ImGui_ImplVulkan_LoadFunctions(
@@ -2736,13 +2744,14 @@ void SetMousePad(bool active, float x, float y, bool touching, bool clicking) {
 bool Visible() {
     const auto& s = TlgSettings::Get();
     const auto now = std::chrono::steady_clock::now();
-    bool power_wheel_visible=false;
+    bool power_wheel_visible=false,trophy_popup=false;
 #ifdef TLG_RENDERER_V2
     int wheel_open,wheel_choice;
     runtime_power_wheel_visual_status(&wheel_open,&wheel_choice);
     power_wheel_visible=wheel_open&&s.iss_power_switch_enabled;
+    trophy_popup=TlgTrophiesToastActive();
 #endif
-    return initialized && (power_wheel_visible || loading || background_total || menu_open || text_entry_active || choice_active ||
+    return initialized && (power_wheel_visible || trophy_popup || loading || background_total || menu_open || text_entry_active || choice_active ||
                            message_active || guide_active || progress_on || now < progress_until || now < toast_until ||
                            NoticeActive() || mouse_pad_on ||
                            choice_retiring || s.show_fps ||
@@ -2864,6 +2873,141 @@ void SetTextEntry(bool active, const std::string& prompt, const std::string& tex
     text_entry_text = text;
 }
 
+// HDR output (2026-11-20): the overlay draws SDR (sRGB) colours; on an HDR10 swapchain the display
+// reads them as PQ code values (far too saturated and bright). Each vertex colour is converted:
+// sRGB -> linear BT.709 -> BT.2020 -> nits at the reference white -> PQ. Font and solid shapes are
+// exact (white texture); colour images (icons) are multiplied after, so they stay approximate.
+static std::atomic<bool> hdr_output{false};
+void SetHdrOutput(bool hdr) { hdr_output.store(hdr, std::memory_order_relaxed); }
+static float SrgbToLinear(float v) {
+    return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+}
+static float LinearToPq(float nits) {
+    const float y = std::clamp(nits / 10000.0f, 0.0f, 1.0f);
+    const float m1 = 0.1593017578125f, m2 = 78.84375f, c1 = 0.8359375f, c2 = 18.8515625f,
+                c3 = 18.6875f;
+    const float p = std::pow(y, m1);
+    return std::pow((c1 + c2 * p) / (1.0f + c3 * p), m2);
+}
+static float HdrUiWhite() {
+    static const float white = [] {
+        const char* p = std::getenv("ISS_HDR_UI_NITS");
+        const float v = p && *p ? float(std::atof(p)) : 203.0f;
+        return std::clamp(v, 80.0f, 1000.0f);
+    }();
+    return white;
+}
+// One sRGB colour (bytes) -> PQ bytes (BT.2020 at the reference white). Tables instead of pow()
+// per pixel (2026-11-20: converting the power wheel's pictures pixel by pixel stalled the present
+// thread for about a second): sRGB -> linear by byte, and PQ by the square root of the linear
+// value (fine steps near black, where PQ is steepest).
+static void SrgbBytesToPq(const unsigned char* in, unsigned char* out) {
+    constexpr int N = 4096;
+    static float to_linear[256];
+    static unsigned char pq_by_sqrt[N + 1];
+    static bool ready = false;
+    if (!ready) {
+        const float white = HdrUiWhite();
+        for (int i = 0; i < 256; ++i) to_linear[i] = SrgbToLinear(float(i) / 255.0f);
+        for (int i = 0; i <= N; ++i) {
+            const float s = float(i) / N;
+            pq_by_sqrt[i] = (unsigned char)std::lround(LinearToPq(s * s * white) * 255.0f);
+        }
+        ready = true;
+    }
+    const float r = to_linear[in[0]], g = to_linear[in[1]], b = to_linear[in[2]];
+    const float c[3] = {0.6274f * r + 0.3293f * g + 0.0433f * b, 0.0691f * r + 0.9195f * g + 0.0114f * b,
+                        0.0164f * r + 0.0880f * g + 0.8956f * b};
+    for (int k = 0; k < 3; ++k) {
+        const float s = std::sqrt(std::clamp(c[k], 0.0f, 1.0f));
+        out[k] = pq_by_sqrt[int(s * N + 0.5f)];
+    }
+}
+// Pictures (trophy icons, power art, save pictures: user textures, not the font atlas): an HDR twin
+// with every pixel converted the same way, drawn instead of the picture while HDR is on; the vertex
+// colours of those draws (a tint, usually white) are left as they are.
+static std::vector<std::pair<ImTextureData*, ImTextureData*>> pq_twins; // picture -> twin
+static ImTextureData* TwinOf(ImTextureData* tex) {
+    for (auto& [src, twin] : pq_twins) if (src == tex) return twin;
+    return nullptr;
+}
+static void FillTwin(ImTextureData* src, ImTextureData* twin) {
+    const unsigned char* in = static_cast<const unsigned char*>(src->GetPixels());
+    unsigned char* out = static_cast<unsigned char*>(twin->GetPixels());
+    const size_t n = size_t(src->Width) * src->Height;
+    for (size_t i = 0; i < n; ++i) {
+        SrgbBytesToPq(in + i * 4, out + i * 4);
+        out[i * 4 + 3] = in[i * 4 + 3];
+    }
+}
+static void SyncPictureTwins() {
+    ImVector<ImTextureData*>& all = ImGui::GetPlatformIO().Textures;
+    const ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+    const auto is_atlas = [&](ImTextureData* t) {
+        for (ImTextureData* a : atlas->TexList) if (a == t) return true;
+        return false;
+    };
+    const auto is_twin = [&](ImTextureData* t) {
+        for (auto& p : pq_twins) if (p.second == t) return true;
+        return false;
+    };
+    for (int i = 0; i < all.Size; ++i) {
+        ImTextureData* src = all[i];
+        if (!src || is_atlas(src) || is_twin(src) || src->Format != ImTextureFormat_RGBA32 ||
+            !src->GetPixels() || src->Status == ImTextureStatus_WantDestroy ||
+            src->Status == ImTextureStatus_Destroyed)
+            continue;
+        ImTextureData* twin = TwinOf(src);
+        if (!twin) {
+            twin = IM_NEW(ImTextureData)();
+            twin->Create(ImTextureFormat_RGBA32, src->Width, src->Height);
+            FillTwin(src, twin);
+            ImGui::RegisterUserTexture(twin);
+            pq_twins.push_back({src, twin});
+        } else if ((src->Status == ImTextureStatus_WantCreate || src->Status == ImTextureStatus_WantUpdates) &&
+                   twin->Width == src->Width && twin->Height == src->Height) {
+            // The picture changed this frame: the whole twin again.
+            FillTwin(src, twin);
+            if (twin->Status == ImTextureStatus_OK) {
+                ImTextureRect r{0, 0, (unsigned short)twin->Width, (unsigned short)twin->Height};
+                twin->Updates.push_back(r);
+                twin->UpdateRect = r;
+                twin->SetStatus(ImTextureStatus_WantUpdates);
+            }
+        }
+    }
+}
+static void ConvertDrawDataToPq(ImDrawData* data) {
+    if (!data) return;
+    std::vector<unsigned char> keep;
+    for (int n = 0; n < data->CmdListsCount; ++n) {
+        ImDrawList* list = data->CmdLists[n];
+        keep.assign(size_t(list->VtxBuffer.Size), 0);
+        for (ImDrawCmd& cmd : list->CmdBuffer) {
+            if (cmd.UserCallback || !cmd.TexRef._TexData) continue;
+            ImTextureData* twin = TwinOf(cmd.TexRef._TexData);
+            if (!twin || twin->Status == ImTextureStatus_Destroyed) continue;
+            cmd.TexRef._TexData = twin; // the picture's HDR twin; its tint stays as it is
+            for (unsigned int k = 0; k < cmd.ElemCount; ++k) {
+                const unsigned int v = cmd.VtxOffset + list->IdxBuffer[int(cmd.IdxOffset + k)];
+                if (v < keep.size()) keep[v] = 1;
+            }
+        }
+        for (int i = 0; i < list->VtxBuffer.Size; ++i) {
+            if (keep[size_t(i)]) continue;
+            ImDrawVert& v = list->VtxBuffer[i];
+            const ImU32 c = v.col;
+            const unsigned char in[3] = {(unsigned char)((c >> IM_COL32_R_SHIFT) & 0xFF),
+                                         (unsigned char)((c >> IM_COL32_G_SHIFT) & 0xFF),
+                                         (unsigned char)((c >> IM_COL32_B_SHIFT) & 0xFF)};
+            unsigned char out[3];
+            SrgbBytesToPq(in, out);
+            v.col = (ImU32(out[0]) << IM_COL32_R_SHIFT) | (ImU32(out[1]) << IM_COL32_G_SHIFT) |
+                    (ImU32(out[2]) << IM_COL32_B_SHIFT) | (c & (0xFFu << IM_COL32_A_SHIFT));
+        }
+    }
+}
+
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     const ContextScope context_scope;
     // Present interval for the FPS readout (measured also while nothing is drawn).
@@ -2893,10 +3037,11 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
 
     UpdateChoiceTextures();
+    UpdateLoadingArtwork();
 #ifdef TLG_RENDERER_V2
     int power_open,power_choice;runtime_power_wheel_visual_status(&power_open,&power_choice);
     if(power_open)TlgPowerArt::UpdateTexture();
-    if(menu_open && TlgSettings::Get().menu_tab==6)TlgTrophiesUpdateTextures();
+    if((menu_open && TlgSettings::Get().menu_tab==6) || TlgTrophiesToastActive())TlgTrophiesUpdateTextures();
 #endif
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
@@ -2933,7 +3078,18 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (mouse_pad_on && !menu_open) {
         MousePadBox();
     }
+#ifdef TLG_RENDERER_V2
+    if (!loading) {
+        TlgTrophiesToast(base_scale);   // trophy earned: icon + name, top right
+    }
+#endif
+    // Pictures created or changed anywhere in this frame get their HDR twin before Render, which
+    // lists the textures to upload (2026-11-20: syncing before NewFrame showed a new picture's
+    // original colours for a frame first).
+    const bool hdr_now = hdr_output.load(std::memory_order_relaxed);
+    if (hdr_now) SyncPictureTwins();
     ImGui::Render();
+    if (hdr_now) ConvertDrawDataToPq(ImGui::GetDrawData());
 
     const vk::RenderingAttachmentInfo attachment{
         .imageView = view,

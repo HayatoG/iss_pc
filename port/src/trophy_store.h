@@ -17,8 +17,10 @@ struct Progress {
     std::map<int,int64_t> earned;
     std::string save_identity;
     std::set<int> recovered;
+    std::string title_id="CUSA00223";   // the game the ledger belongs to (First Light: CUSA00575)
 };
 // Corrupt/mismatched files are rejected, never silently reset or overwritten.
-Progress Load(const std::filesystem::path& path,const std::string& fingerprint,int total,const std::string& save_identity="");
+Progress Load(const std::filesystem::path& path,const std::string& fingerprint,int total,const std::string& save_identity="",
+              const std::string& title_id="CUSA00223");
 void Save(const std::filesystem::path& path,const Progress& progress);
 }

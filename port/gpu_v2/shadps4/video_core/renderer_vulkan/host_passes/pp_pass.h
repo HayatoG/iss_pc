@@ -18,6 +18,10 @@ public:
         float gamma = 1.0f;
         u32 hdr = 0;
         u32 srgb_input = 0;
+        /// HDR only (2026-11-20, ISS_HDR_BOOST): shadows/midtones x gain, rolling off to unchanged
+        /// at hdr_white nits; 1 = the game's own picture.
+        float hdr_gain = 1.0f;
+        float hdr_white = 1000.0f;
     };
 
     void Create(vk::Device device, vk::Format surface_format);

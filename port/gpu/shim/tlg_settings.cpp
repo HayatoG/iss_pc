@@ -4,6 +4,7 @@
 #include "tlg_orbs.h"
 #include "tlg_graphics.h"
 #include "tlg_view.h"
+#include "tlg_quality.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -150,6 +151,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.vsync = i != 0;
     } else if (key == "vsync_relaxed") {
         v.vsync_relaxed = i != 0;
+    } else if (key == "hdr_boost") {
+        v.hdr_boost = i != 0;
+    } else if (key == "hdr_boost_strength") {
+        v.hdr_boost_strength = std::clamp(value.empty() ? 150 : i, 110, 300);
     } else if (key == "fps_limit") {
         v.fps_limit = TlgGraphics::ParseFpsLimit(i);
     } else if (key == "async_shaders") {
@@ -214,7 +219,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "quality_target_fps") {
         v.quality_target_fps = i <= 0 ? 0 : std::clamp(i, 20, 240);
     } else if (key == "quality_floor") {
-        v.quality_floor = std::clamp(i, 0, 14);
+        v.quality_floor = std::clamp(i, 0, TlgQuality::MaxLevel);   // 12 since 2026-11-23 (tlg_quality.h)
     } else if (key == "draw_budget") {
         v.draw_budget = std::clamp(i, 10, 100);
     } else if (key == "dyn_cull") {
@@ -446,6 +451,8 @@ void Save() {
     std::fprintf(file, "sensor_aim=%d\ngraffiti_guide_seen=%d\n", v.sensor_aim.load(),
                  int(v.graffiti_guide_seen.load()));
     std::fprintf(file, "vsync_relaxed=%d\n", int(v.vsync_relaxed.load()));
+    std::fprintf(file, "hdr_boost=%d\nhdr_boost_strength=%d\n", int(v.hdr_boost.load()),
+                 v.hdr_boost_strength.load());
     std::fprintf(file,
                  "lod_scale=%.3f\nregion_lod=%.3f\nregion_fade=%.3f\nnear_clip=%.3f\nfar_clip=%.0f\n"
                  "mip_lod_bias=%.3f\nlod_bands=%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\ndyn_cull=%d\ndraw_budget=%d\nquality_floor=%d\nquality_target_fps=%d\n",

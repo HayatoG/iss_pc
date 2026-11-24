@@ -165,6 +165,8 @@ inline bool Matches(u64 pgm_hash) {
 // driver as that file instead (<words>: the original module's size, so each permutation has its
 // own file). ISS_SHADER_SWAP_DUMP=<hex>[,<hex>...] writes those programs' original modules there
 // as <hash>.<words>.orig.spv. The port's caches keep the original words.
+// ISS_SHADER_SWAP_EXACT=<hash> adds a fingerprint to that program's filenames
+// and disables size-only fallback for it. Other programs retain their names.
 namespace iss::shader_swap {
 /// A relative directory is taken from the folder of tlg-probe-v2.exe (out/), so a package can
 /// carry its shaders (e.g. ../gpu_v2/shader_swap).
@@ -200,10 +202,29 @@ inline std::span<const u32> Apply(std::span<const u32> code, std::vector<u32>& s
     if (!dir || code.size() < 5) return code;
     const std::string program = ProgramOf(code);
     if (program.empty()) return code;
-    const std::string base = std::string(dir) + "/" + program + "." + std::to_string(code.size());
+    std::string base = std::string(dir) + "/" + program + "." + std::to_string(code.size());
+    const char* exact_program = std::getenv("ISS_SHADER_SWAP_EXACT");
+    const bool exact = exact_program && program == exact_program;
+    if (exact) {
+        u64 fingerprint = 14695981039346656037ull;
+        for (const u32 word : code) {
+            for (unsigned shift = 0; shift < 32; shift += 8) {
+                fingerprint ^= (word >> shift) & 0xff;
+                fingerprint *= 1099511628211ull;
+            }
+        }
+        char suffix[18];
+        std::snprintf(suffix, sizeof(suffix), ".%016llx",
+                      static_cast<unsigned long long>(fingerprint));
+        base += suffix;
+    }
     if (const char* dump = std::getenv("ISS_SHADER_SWAP_DUMP");
         dump && std::string(dump).find(program) != std::string::npos) {
-        if (FILE* f = std::fopen((base + ".orig.spv").c_str(), "wb")) {
+        const std::string dump_path = base + ".orig.spv";
+        FILE* existing = exact ? std::fopen(dump_path.c_str(), "rb") : nullptr;
+        if (existing) {
+            std::fclose(existing);
+        } else if (FILE* f = std::fopen(dump_path.c_str(), "wb")) {
             std::fwrite(code.data(), sizeof(u32), code.size(), f);
             std::fclose(f);
         }

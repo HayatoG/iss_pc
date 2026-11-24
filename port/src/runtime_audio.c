@@ -62,7 +62,7 @@ typedef struct {
     float pc_limit;            /* PC-speaker limiter gain for pad sounds (1 = no reduction) */
     float pc_loudest;          /* loudest pad sample seen so far (logged when it grows) */
     uint64_t controller_check_ns;
-    uint64_t ds4_retry_ns;     /* last late DualShock 4 Bluetooth attach attempt */
+    uint64_t speaker_retry_ns;
     uint64_t next_deadline_ns; /* next return of sceAudioOutOutput */
     int64_t adjust_ns; int window_min, window_count; /* queue level control */
     uint64_t last_output_us;
@@ -242,7 +242,7 @@ static int32_t open_port(int32_t type, uint32_t length, uint32_t freq, uint32_t 
     if (sdl_audio()) {
         SDL_AudioDeviceID target=SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
         int dedicated=0,muted=0;
-        if (type==4)target=controller_audio_device(getenv("ISS_PAD_SPEAKER_DEVICE"),&dedicated,&muted);
+        if (type==4)target=controller_audio_device(getenv("ISS_PAD_SPEAKER_DEVICE"),&dedicated,&muted,0);
 
         if (type==4 && !dedicated && !muted) {
             const char *choice=getenv("ISS_PAD_SPEAKER_DEVICE");
@@ -258,7 +258,7 @@ static int32_t open_port(int32_t type, uint32_t length, uint32_t freq, uint32_t 
         if (type==4 && !dedicated && !muted && !p->bluetooth_speaker && dualsense_bt_speaker_requested()) {
             /* No USB speaker endpoint and no explicit device: try a Bluetooth DualSense. */
             const char *choice=getenv("ISS_PAD_SPEAKER_DEVICE");
-            if (!choice || !*choice || !SDL_strcasecmp(choice,"auto")) p->bt=ds_bt_sink_open();
+            if (!choice || !*choice || !SDL_strcasecmp(choice,"auto")) p->bt=ds_bt_sink_open(0);
         }
         SDL_AudioSpec device; int device_frames;
         p->downmix=p->channels==8 && SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&device,&device_frames)
@@ -341,6 +341,45 @@ static ABI int32_t audio_close(int32_t handle) {
     pthread_mutex_unlock(&table_lock);
     return p ? 0 : error;
 }
+/* Called with the port and table locks held. Keep the PC stream until a new route is ready. */
+static void retry_controller_speaker(Port *p) {
+    const char *choice=getenv("ISS_PAD_SPEAKER_DEVICE");
+    int dedicated,muted;
+    const SDL_AudioDeviceID target=controller_audio_device(choice,&dedicated,&muted,1);
+    SDL_AudioSpec spec={p->is_float?SDL_AUDIO_F32:SDL_AUDIO_S16,p->channels,48000};
+    SDL_AudioStream *stream=NULL;
+    if (dedicated) {
+        spec.channels=p->downmix || p->channels==1 ? 2 : p->channels;
+        stream=SDL_OpenAudioDeviceStream(target,&spec,NULL,NULL);
+        if (!stream) return;
+        if (!controller_audio_speaker_map(stream) || !SDL_ResumeAudioStreamDevice(stream)) {
+            SDL_DestroyAudioStream(stream);
+            return;
+        }
+        p->controller_device=target;
+        p->controller_stereo=p->channels==1;
+        printf("Controller feedback: pad-speaker audio routed to %s (connected after start)\n",
+               SDL_GetAudioDeviceName(target));
+    } else if (!muted && (!choice || !*choice || !SDL_strcasecmp(choice,"auto"))) {
+        p->bluetooth_speaker=open_bluetooth_speaker(&spec);
+        if (p->bluetooth_speaker) {
+            bluetooth_reserved=p->bluetooth_reserved=true;
+            puts("Controller feedback: pad-speaker audio routed directly to DualShock 4 over Bluetooth (connected after start)");
+        } else if (dualsense_bt_speaker_requested()) {
+            p->bt=ds_bt_sink_open(1);
+            if (p->bt) puts("Controller feedback: pad-speaker audio routed to the Bluetooth DualSense speaker (connected after start)");
+        }
+        if (!p->bluetooth_speaker && !p->bt) return;
+    } else {
+        return;
+    }
+    SDL_DestroyAudioStream(p->stream);
+    p->stream=stream;
+    p->pc_limit=1.f;p->pc_loudest=0.f;
+    if (!p->controller_enabled && (p->bt || (stream && controller_audio_name(SDL_GetAudioDeviceName(target))))) {
+        p->controller_enabled=1;++controller_ports;runtime_pad_controller_speaker(1);
+    }
+}
 /* `pace`: wait for this port's next period. sceAudioOutOutputs waits once for all its ports. */
 static int32_t output_port(int32_t handle, const void *data, int pace) {
     int32_t error=0;
@@ -349,6 +388,17 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
     pthread_mutex_unlock(&table_lock);
     if (!p) return error;
     pthread_mutex_lock(&p->lock);
+    if (ds_bt_sink_failed(p->bt) && !pthread_mutex_trylock(&table_lock)) {
+        ds_bt_sink_close(p->bt);p->bt=NULL;
+        if (p->controller_enabled && controller_ports && !--controller_ports)runtime_pad_controller_speaker(0);
+        p->controller_enabled=0;
+        const SDL_AudioSpec spec={p->is_float?SDL_AUDIO_F32:SDL_AUDIO_S16,p->downmix?2:p->channels,48000};
+        p->stream=SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&spec,NULL,NULL);
+        if (p->stream) SDL_ResumeAudioStreamDevice(p->stream);
+        p->speaker_retry_ns=now_ns();
+        pthread_mutex_unlock(&table_lock);
+        puts("Controller feedback: DualSense Bluetooth disconnected; using limited PC output");
+    }
     if (p->bluetooth_speaker && SDL_GetAtomicInt(&p->bluetooth_speaker->failed)) {
         close_bluetooth_speaker(p->bluetooth_speaker);
         p->bluetooth_speaker=NULL;
@@ -357,24 +407,14 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
         if (p->stream) SDL_ResumeAudioStreamDevice(p->stream);
         puts("Controller feedback: DualShock 4 Bluetooth disconnected; using limited PC output");
     }
-    /* Late DualShock 4 attach (2026-11-06): the game opens the pad-speaker port before SDL reports
-     * the controller, so the open-time check found no pad. While pad sounds use the PC fallback,
-     * look again once a second and move them to a wireless DS4 when one appears. table_lock is
+    /* The game can open the pad-speaker port before the controller appears.
+     * While pad sounds use PC fallback, retry USB and Bluetooth once a second. table_lock is
      * only tried (close takes it before p->lock), so a busy table just waits for the next second. */
     if (p->type==4 && p->stream && !p->bluetooth_speaker && !p->bt && !p->controller_device &&
-        now_ns()-p->ds4_retry_ns>=1000000000u) {
-        p->ds4_retry_ns=now_ns();
-        const char *choice=getenv("ISS_PAD_SPEAKER_DEVICE");
-        if ((!choice || !*choice || !SDL_strcasecmp(choice,"auto")) && !pthread_mutex_trylock(&table_lock)) {
-            const SDL_AudioSpec spec={p->is_float?SDL_AUDIO_F32:SDL_AUDIO_S16,p->channels,48000};
-            Ds4BluetoothSpeaker *speaker=open_bluetooth_speaker(&spec);
-            if (speaker) {
-                bluetooth_reserved=p->bluetooth_reserved=true;
-                SDL_DestroyAudioStream(p->stream);p->stream=NULL;
-                p->pc_limit=1.f;p->pc_loudest=0.f;
-                puts("Controller feedback: pad-speaker audio routed directly to DualShock 4 over Bluetooth (connected after start)");
-                p->bluetooth_speaker=speaker;
-            }
+        now_ns()-p->speaker_retry_ns>=1000000000u) {
+        p->speaker_retry_ns=now_ns();
+        if (!pthread_mutex_trylock(&table_lock)) {
+            retry_controller_speaker(p);
             pthread_mutex_unlock(&table_lock);
         }
     }
@@ -415,7 +455,7 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
             SDL_AudioSpec spec={p->is_float?SDL_AUDIO_F32:SDL_AUDIO_S16,p->channels,48000};
             p->stream=SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&spec,NULL,NULL);
             if (p->stream)SDL_ResumeAudioStreamDevice(p->stream);
-            puts("Controller feedback: controller audio disconnected; pad sounds returned to normal PC output (restart to reroute)");
+            puts("Controller feedback: controller audio disconnected; pad sounds returned to normal PC output");
             /* Keep ownership until close; the absent controller cannot receive output. */
         }
     }

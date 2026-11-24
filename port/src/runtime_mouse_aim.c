@@ -18,9 +18,14 @@ static float read_float(const void *p,unsigned offset){float v;memcpy(&v,(const 
 static void release_follow(void){
     if(follow_owned){if(*no_follow==1)*no_follow=follow_before;follow_owned=0;}
 }
+static unsigned data_limits=0x1c0,context_limits=0x1c0;
 void runtime_mouse_aim_attach(uintptr_t base){
     no_follow=(unsigned char*)(base+0xe16c40u);
     atomic_store(&attached,base);
+}
+void runtime_mouse_aim_attach_at(uintptr_t follow,unsigned data_offset,unsigned context_offset){
+    no_follow=(unsigned char*)follow;data_limits=data_offset;context_limits=context_offset;
+    atomic_store(&attached,follow);
 }
 int runtime_mouse_aim_installed(void){return atomic_load(&attached)!=0;}
 /* The player camera update (the hooked site) runs every gameplay frame and stops in
@@ -69,8 +74,8 @@ void __attribute__((ms_abi)) runtime_mouse_aim_camera(float *angles,const void *
     if(!previous || now-previous>250000u || !motion || now-motion>250000u || !bits)return;
     if(!data || !context)return;
     float delta[2];memcpy(delta,&bits,8);
-    float dl=read_float(data,0x1c0),du=read_float(data,0x1c4);
-    float cl=read_float(context,0x1c0),cu=read_float(context,0x1c4);
+    float dl=read_float(data,data_limits),du=read_float(data,data_limits+4);
+    float cl=read_float(context,context_limits),cu=read_float(context,context_limits+4);
     int applied=iss_mouse_apply(angles,delta[0],delta[1],dl,du,cl,cu);
     if(camera_reports++<8)fprintf(stderr,
         "Direct mouse consume applied=%d delta=%.5g,%.5g limits=%.5g,%.5g/%.5g,%.5g angles=%.5g,%.5g\n",
