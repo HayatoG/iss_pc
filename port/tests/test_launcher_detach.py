@@ -267,7 +267,9 @@ class CacheSizeTests(unittest.TestCase):
         self.assertTrue(threads)
         self.assertNotIn(threading.main_thread(), threads)
         self.assertEqual(5 * 2 ** 20, backend.cache_bytes())
-        self.assertIn('Shader cache: 5', ' '.join(chip['text'] for chip in backend.chips))
+        # 2026-11-22: the Home screen has no shader cache chip any more; the size still decides
+        # whether this is a first start.
+        self.assertNotIn('Shader cache', ' '.join(chip['text'] for chip in backend.chips))
         self.assertFalse(backend.showFirstRun)
 
     def test_properties_never_walk_the_folder(self):
@@ -293,8 +295,8 @@ class CacheSizeTests(unittest.TestCase):
         with mock.patch.object(backend_module.tlg_run, 'shader_cache_size', slow):
             backend = Backend(settings=data, probes=probes)
             self.assertIsNone(backend._cache_bytes)
-            self.assertIn('Shader cache: measuring', ' '.join(chip['text'] for chip in backend.chips))
-            backend.refresh()                 # a second request while measuring runs once more after
+            self.assertFalse(backend.showFirstRun)   # still measuring: not taken for a first start
+            backend.refresh()                # a second request while measuring runs once more after
             release.set()
             self.wait(backend)
             self.wait(backend)

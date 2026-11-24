@@ -504,6 +504,10 @@ extern "C" int tlggpu_overlay_captures_input(void) {
     return TlgOverlay::CapturesInput() ? 1 : 0;
 }
 
+// The power wheel's cutscene screenshot diagnostic (ISS_CUTSCENE_SHOT) is a renderer v2 feature; the
+// classic renderer has no screenshot path, so the request does nothing here (Windows needs the symbol).
+extern "C" void tlggpu_request_screenshot(void) {}
+
 extern "C" void tlggpu_input_settings(TlgGpuInputSettings* out) {
     const auto& s = TlgSettings::Get();
     out->mouse_enabled = s.mouse_enabled ? 1 : 0;

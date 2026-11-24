@@ -66,8 +66,14 @@ class ControllerTests(unittest.TestCase):
                     'exe': lambda: 'launcher.exe', 'running': lambda: self.running,
                     'version': lambda: 'v2026.10.18-abcd124', 'save': lambda _: None,
                     'backup': lambda: None, 'handoff': lambda *a: self.handoffs.append(a),
-                    'opener': lambda *a, **k: io.BytesIO(self.zip)})
+                    'opener': lambda *a, **k: io.BytesIO(self.zip),
+                    # Install rechecks GitHub first (2026-11-23): these stand in for the two requests.
+                    'fetch': lambda _version: dict(self.release), 'fetch_beta': self.no_beta})
         self.u.release = self.release
+
+    @staticmethod
+    def no_beta(_version):
+        raise releases.UpdateError('none')
 
     def pump(self, condition):
         end = time.monotonic() + 5
@@ -76,17 +82,27 @@ class ControllerTests(unittest.TestCase):
             time.sleep(.005)
         self.assertTrue(condition(), self.u.statusText)
 
-    def test_one_confirmation_download_prepare_and_handoff_preserves_install(self):
+    def test_install_rechecks_then_downloads_prepares_and_hands_off_with_no_other_dialog(self):
+        # 2026-11-23: the click on Install is the confirmation; the launcher rechecks the release,
+        # then downloads, verifies, prepares and hands off without asking again.
         self.assertTrue(self.u.canInstall)
         self.u.install()
-        self.assertTrue(self.u.dialog['open'])
-        self.u.answer('yes')
+        self.assertFalse(self.u.dialog)
         self.pump(lambda: self.backend.quit_called or bool(self.u._error))
         self.assertEqual(self.u._error, '')
         self.assertEqual(len(self.handoffs), 1)
         self.assertEqual((self.port / 'launcher.exe').read_text(), 'old')
         self.assertEqual(update_install._read(self.handoffs[0][0])['target'], str(self.port))
         self.assertFalse(self.u.dialog)
+
+    def test_a_failed_recheck_installs_nothing(self):
+        def offline(_version):
+            raise releases.UpdateError('offline')
+        self.u.probes['fetch'] = offline
+        self.u.install()
+        self.pump(lambda: bool(self.u._error))
+        self.assertEqual(self.handoffs, [])
+        self.assertFalse(self.backend.quit_called)
 
     def test_busy_and_source_checkout_cannot_install(self):
         self.running = True
@@ -97,19 +113,22 @@ class ControllerTests(unittest.TestCase):
         self.u.probes['frozen'] = lambda: False
         self.assertFalse(self.u.canInstall)
 
-    def test_game_started_after_confirmation_blocks_handoff(self):
+    def test_game_started_after_the_click_blocks_the_update(self):
         self.u.install()
         self.running = True
-        self.u.answer('yes')
-        self.pump(lambda: bool(self.u._error))
+        self.pump(lambda: not self.u.checking)
+        for _ in range(50):
+            self.app.processEvents()
+            time.sleep(.005)
         self.assertEqual(self.handoffs, [])
         self.assertFalse(self.backend.quit_called)
+        self.assertEqual((self.port / 'launcher.exe').read_text(), 'old')
 
     def test_wrong_digest_and_missing_protocol_cannot_touch_install(self):
         for digest in ('sha256:' + '0' * 64, ''):
             self.u.release['assets'][0]['digest'] = digest
+            self.u._error = ''
             self.u.install()
-            self.u.answer('yes')
             self.pump(lambda: bool(self.u._error))
             self.assertEqual(self.handoffs, [])
         self.assertEqual((self.port / 'launcher.exe').read_text(), 'old')

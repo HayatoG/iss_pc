@@ -225,12 +225,15 @@ class KnownIssuesTests(unittest.TestCase):
     def gpu(self, name, vendor, vram=8.0, type_='discrete_gpu'):
         return {'name': name, 'vendor': vendor, 'vram_gb': vram, 'type': type_, 'driver': 'x'}
 
-    def test_the_four_starting_entries_exist_with_their_issue_numbers(self):
+    def test_the_open_entries_exist_with_their_issue_numbers(self):
         by_id = {i['id']: i for i in self.issues}
         self.assertEqual(by_id['polaris-windows']['issues'], [49, 65, 67])
-        self.assertEqual(by_id['vram-4gb']['issues'], [72, 75])
         self.assertEqual(by_id['maxwell-quadro']['issues'], [70])
-        self.assertIn('ISS_BP09=1', by_id['polaris-windows']['what']['en'])
+        self.assertIn('BP09', by_id['polaris-windows']['what']['en'])
+        # 2026-11-23: fixed, so no longer listed: RTX 30 flickering (GPU results are no longer read
+        # ahead) and 4 GB cards running out of texture memory (automatic budget and lighting size).
+        self.assertNotIn('ampere-windows', by_id)
+        self.assertNotIn('vram-4gb', by_id)
         for i in self.issues:
             self.assertTrue(i['title']['en'] and i['title']['pt'] and i['what']['en'] and i['what']['pt'])
 
@@ -241,19 +244,12 @@ class KnownIssuesTests(unittest.TestCase):
         for name in ('AMD Radeon RX 5500 XT', 'AMD Radeon RX 5700 XT', 'AMD Radeon RX 6600', 'AMD Radeon RX 7800 XT'):
             self.assertNotIn('polaris-windows', self.ids(self.gpu(name, 'AMD'), 'windows'), name)
 
-    def test_ampere_on_windows(self):
-        for name in ('NVIDIA GeForce RTX 3060', 'NVIDIA GeForce RTX 3080 Ti', 'NVIDIA GeForce RTX 3050 Laptop GPU'):
-            self.assertIn('ampere-windows', self.ids(self.gpu(name, 'NVIDIA'), 'windows'), name)
-        self.assertNotIn('ampere-windows', self.ids(self.gpu('NVIDIA GeForce RTX 3060', 'NVIDIA'), 'linux'))
-        self.assertNotIn('ampere-windows', self.ids(self.gpu('NVIDIA GeForce RTX 2060', 'NVIDIA'), 'windows'))
-        self.assertNotIn('ampere-windows', self.ids(self.gpu('NVIDIA GeForce RTX 4060', 'NVIDIA'), 'windows'))
-
-    def test_four_gb_vram(self):
-        self.assertIn('vram-4gb', self.ids(self.gpu('NVIDIA GeForce GTX 1650', 'NVIDIA', 4.0), 'windows'))
-        self.assertIn('vram-4gb', self.ids(self.gpu('AMD Radeon RX 570', 'AMD', 3.9), 'linux'))
-        self.assertNotIn('vram-4gb', self.ids(self.gpu('NVIDIA GeForce RTX 2060', 'NVIDIA', 6.0), 'linux'))
-        self.assertNotIn('vram-4gb', self.ids(self.gpu('NVIDIA GeForce RTX 3060', 'NVIDIA', None), 'linux'))   # unknown
-        self.assertNotIn('vram-4gb', self.ids(self.gpu('Intel iGPU', 'Intel', 4.0, 'integrated_gpu'), 'linux'))
+    def test_fixed_problems_match_no_card(self):
+        # 2026-11-23: RTX 30 cards on Windows and 4 GB cards no longer get a known problem.
+        for gpu, os_key in ((self.gpu('NVIDIA GeForce RTX 3060', 'NVIDIA'), 'windows'),
+                            (self.gpu('NVIDIA GeForce GTX 1650', 'NVIDIA', 4.0), 'windows'),
+                            (self.gpu('NVIDIA GeForce RTX 2060', 'NVIDIA', 6.0), 'linux')):
+            self.assertEqual([], self.ids(gpu, os_key), gpu['name'])
 
     def test_maxwell_and_quadro(self):
         for name in ('NVIDIA GeForce GTX 960', 'NVIDIA GeForce GTX 970', 'NVIDIA Quadro M1000M', 'NVIDIA GeForce GTX 750 Ti'):
