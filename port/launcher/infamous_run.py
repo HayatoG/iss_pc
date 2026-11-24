@@ -37,11 +37,75 @@ sys.path.insert(0, str(PORT_DIR / 'scripts'))
 import mod_patches  # noqa: E402
 
 
+# The games this launcher starts (2026-11-11). inFAMOUS First Light (CUSA00575 1.04, the standalone)
+# runs on the same engine and the same port as Second Son: only its own game code, its "full game"
+# entitlement and its own data folder (saves, tlg.ini, shader caches) differ. The Second Son-only
+# features (mods, mouse camera, karma switcher, trophies) check the title and code and stay off.
+GAMES = {
+    'second_son': {'name': 'inFAMOUS Second Son', 'user_sub': '', 'version': '1.07'},
+    'first_light': {'name': 'inFAMOUS First Light', 'user_sub': 'first-light', 'version': '1.04',
+                    'titles': ('CUSA00575',), 'eboot': (0x6ffd70, 136_535_375),
+                    'addcont': ('UNLOCKAPPLICATIO',), 'art_min': 500,   # 652 art files in 1.04
+                    'art_required': ('cache/all_shaders.xpps', 'cache/psarc/music_a.psarc',
+                                     'cache/psarc/music_b.psarc', 'ui/vshell/save_icon.png')},
+}
+DEFAULT_GAME = 'second_son'
+_game = DEFAULT_GAME
+
+
+def current_game():
+    """'second_son' | 'first_light': the game the launcher starts (settings['game'])."""
+    return _game
+
+
+def select_game(settings):
+    """Makes settings['game'] the current game (user_dir() and the checks follow it)."""
+    global _game
+    game = settings.get('game', DEFAULT_GAME)
+    _game = game if game in GAMES else DEFAULT_GAME
+    settings['game'] = _game
+    # the Saves page lists, copies and finds this game's saves (CUSA00575 in first-light/ for First Light)
+    userdata.set_game(GAMES[_game].get('titles', ('CUSA00223',))[0], GAMES[_game]['user_sub'])
+    return _game
+
+
+def guess_game_dir(game, settings):
+    """A folder of `game` next to the other game's (the PS4 dump tools put every title in one folder,
+    named after its serial); '' when none is found."""
+    titles = GAMES[game].get('titles', ('CUSA00223', 'CUSA00004'))
+    for known in (settings.get('game_dir') or '', *(settings.get('game_dirs') or {}).values()):
+        if not known:
+            continue
+        for title in titles:
+            candidate = Path(known).parent / title
+            if (candidate / 'eboot.bin').is_file():
+                return str(candidate)
+    return ''
+
+
+def switch_game(settings, game):
+    """Changes the game: its folder comes back from settings['game_dirs'] (or is guessed), the
+    other game's folder is kept there. The caller saves the settings."""
+    if game not in GAMES or game == settings.get('game', DEFAULT_GAME):
+        select_game(settings)
+        return
+    dirs = dict(settings.get('game_dirs') or {})
+    dirs[settings.get('game', DEFAULT_GAME)] = settings.get('game_dir', '')
+    settings['game_dir'] = dirs.get(game) or guess_game_dir(game, settings)
+    dirs[game] = settings['game_dir']
+    settings['game_dirs'] = dirs
+    settings['game'] = game
+    select_game(settings)
+
+
 def user_dir():
     """The folder of saves, tlg.ini, backups and GPU caches: ISS_USER_DIR, else the per-user pointer
     file (survives reinstalling), else <port folder>/user (userdata.py has the rules). Always call
-    this instead of caching it: the Qt launcher changes it while running."""
-    return userdata.user_dir(PORT_DIR)
+    this instead of caching it: the Qt launcher changes it while running. First Light keeps its own
+    in <that folder>/first-light (its saves and settings never mix with Second Son's)."""
+    base = userdata.user_dir(PORT_DIR)
+    sub = GAMES[_game]['user_sub']
+    return base / sub if sub else base
 
 
 def mods_dir():
@@ -172,6 +236,10 @@ def renderer_v2_env(settings):
     except OSError:
         pass
     env['ISS_GAME_DIR'] = settings['game_dir']
+    lighting_window = settings.get('v2_lighting_read_window')
+    if lighting_window in ('0', '1024'):
+        env['ISS_HUGE_READ_WINDOW_MB'] = lighting_window
+    env['ISS_AMD_NATIVE_PASSES_COMPAT'] = '1' if settings.get('v2_amd_native_passes') is True else '0'
     # Native passes and unified memory: the launcher's switches (backports_table.py has the defaults).
     states = experimental_states(settings)
     for key, var in (('native_passes', 'ISS_NATIVE_PASSES'), ('v2_unified_memory', 'ISS_UNIFIED_MEMORY')):
@@ -333,6 +401,7 @@ DEFAULT_SETTINGS = {
     'write_merge': True,     # ISS_WRITE_MERGE: game memcpy/memset into GPU memory without a GPU wait
     'deferred_readback': True,  # ISS_DEFERRED_READBACK: the game thread waits for its own GPU reads
     'precompile_shaders': True,  # launcher: make the shader jobs list before the game starts (precompile.py)
+    'allow_hdr': True,       # BB_HDR=1 (2026-11-23): the game's own HDR option works when Windows HDR is on
     'close_on_play': True,
     'reopen_launcher': True,  # launcher closed on play: opens again when the game exits  # launcher: close about 2 s after the game starts (an open launcher cost ~30% FPS in CPU-bound scenes)
     'gpu_readbacks': '2',    # 2 precise: GPU particles (smoke to drain) need it; 0 fast skips them
@@ -360,7 +429,32 @@ def load_settings():
     if saved and saved.get('settings_rev', 1) < 2:
         settings['eager_readback'] = False
     settings['settings_rev'] = SETTINGS_REV
+    select_game(settings)
+    auto_native_output(settings)
     return settings
+
+
+def auto_native_output(settings=None):
+    """Once per game (2026-11-23): the output resolution becomes the monitor's, whatever tlg.ini held
+    before (native_resolution.auto_output, forced). settings.json then remembers it was done
+    ('native_output_auto_<game>'), so a resolution the player picks later is never changed again.
+    Without settings (previews) it only fills a tlg.ini that has no output yet. Never fatal."""
+    try:
+        import native_resolution
+        flag = f'native_output_auto_{_game}'
+        if settings is not None and settings.get(flag):
+            return
+        path = user_dir() / 'tlg.ini'
+        ini = read_ini(path) if path.is_file() else {}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        output = native_resolution.auto_output(path, ini, force=settings is not None)
+        if output:
+            print(f'Output resolution set to the monitor: {native_resolution.OUTPUT_LABELS[output]}', flush=True)
+        if output is not None and settings is not None:   # done (0 = monitor below 1080p: left as it is)
+            settings[flag] = True
+            save_settings(settings)
+    except Exception as error:      # noqa: BLE001
+        print(f'Output resolution: not set automatically ({error})', flush=True)
 
 
 def save_settings(settings):
@@ -398,9 +492,37 @@ TEXT = {
                   'para o sce_sys/ da pasta do jogo; veja "Arquivos do jogo necessÃ¡rios" no README.'),
     'unreadable': ('{detail} could not be read (damaged, incomplete or still encrypted): dump it again from the PS4.',
                    'NÃ£o deu para ler o {detail} (danificado, incompleto ou ainda criptografado): faÃ§a o dump de novo no PS4.'),
+    'other_title': ('{detail}: this is not the US edition (CUSA00223). The game runs, but the mouse camera, native '
+                    'rendering, trophies, the karma switcher and the other US-only features stay off.',
+                    '{detail}: esta não é a edição americana (CUSA00223). O jogo abre, mas a câmera pelo mouse, a '
+                    'renderização nativa, os troféus, o seletor de karma e os outros recursos só da edição americana '
+                    'ficam desligados.'),
+    'no_art': ('{detail} is missing: the game\'s art files (the art folder, about 27 GB) are not all there, so the '
+               'game would start to a black screen. Copy the whole base game folder, then update 1.07 over it.',
+               'Falta o {detail}: os arquivos de arte do jogo (a pasta art, cerca de 27 GB) não estão completos e o '
+               'jogo abriria com a tela preta. Copie a pasta inteira do jogo base e depois o update 1.07 por cima.'),
+    'small_art': ('the art folder has only {detail} files; the full game has about 1,800 files (27 GB). Some may be missing '
+                  'or not downloaded yet (OneDrive, an unfinished copy).',
+                  'a pasta art tem só {detail} arquivos; o jogo completo tem cerca de 1.800 arquivos (27 GB). Alguns podem '
+                  'estar faltando ou ainda não baixados (OneDrive, cópia incompleta).'),
+    'other_game_eboot': ('eboot.bin is not the one from inFAMOUS First Light 1.04 ({detail}); First Light is only '
+                         'tested with CUSA00575 1.04. Copy every file of its latest update over the game folder.',
+                         'O eboot.bin não é o do inFAMOUS First Light 1.04 ({detail}); o First Light só foi testado '
+                         'com o CUSA00575 1.04. Copie todos os arquivos do update mais recente por cima da pasta do jogo.'),
+    'other_game_title': ('{detail}: this folder is not inFAMOUS First Light (CUSA00575). Choose the First Light folder, '
+                         'or pick Second Son in the game list.',
+                         '{detail}: esta pasta não é do inFAMOUS First Light (CUSA00575). Escolha a pasta do First Light '
+                         'ou selecione o Second Son na lista de jogos.'),
 }
 # Problems that are reported but do not block Play.
-WARNINGS = {'other_eboot', 'old_param'}
+WARNINGS = {'other_eboot', 'old_param', 'other_title', 'small_art', 'other_game_eboot'}
+# The edition the port's direct mouse, native rendering, trophies and karma switcher are made for.
+TITLE_US = 'CUSA00223'
+# Art files the game opens at every start, the same in every edition and language (without them it
+# starts to a black screen), and the least number of files a complete art folder has (1,819 in US 1.07).
+ART_REQUIRED = ('cache/all_shaders.xpps', 'cache/psarc/music_a.psarc', 'cache/psarc/music_b.psarc',
+                'cache/psarc/music_c.psarc', 'ui/vshell/save_icon.png')
+ART_MIN_FILES = 1000
 
 
 def message(key, portuguese=None, **fmt):
@@ -454,14 +576,124 @@ def _cached(path, kind, inspect):
     return _inspected[key]
 
 
+def verify_list_path(title=TITLE_US):
+    """The reference list of a complete 1.07 art/ folder of this edition (tools/verify), shipped with
+    the package: CUSA00223 (US) or CUSA00004 (EU; same code, other language packs)."""
+    return PORT_DIR / 'tools' / 'verify' / f'{title}-107-art.json'
+
+
+def verify_game(game_dir, progress=None, stopped=None):
+    """Full check of the game folder's art/ files against the reference list: every file's size,
+    then its SHA-256. progress(done_bytes, total_bytes) is called while reading; stopped() returning
+    True ends the check early. Returns {'state': 'ok'|'bad'|'stopped'|'nolist'|'other_title',
+    'missing': [...], 'size': [...], 'content': [...], 'files': n, 'bytes': n, 'title': id}."""
+    import hashlib
+    game = Path(game_dir)
+    result = {'state': 'ok', 'missing': [], 'size': [], 'content': [], 'files': 0, 'bytes': 0,
+              'title': game_title(game)}
+    try:
+        reference = json.loads(verify_list_path(result['title'] or TITLE_US).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        # No list for this edition: say so (other_title) rather than "the list is missing".
+        result['state'] = 'other_title' if result['title'] and result['title'] != TITLE_US else 'nolist'
+        return result
+    if result['title'] and result['title'] != reference.get('title_id'):
+        result['state'] = 'other_title'
+        return result
+    entries = reference['files']
+    result['files'] = len(entries)
+    total = sum(size for _, size, _ in entries)
+    result['bytes'] = total
+    done = 0
+    to_hash = []
+    for rel, size, digest in entries:      # sizes first: missing or cut-short files show at once
+        path = game / rel
+        try:
+            actual = path.stat().st_size
+        except OSError:
+            result['missing'].append(rel)
+            done += size
+            continue
+        if actual != size:
+            result['size'].append(rel)
+            done += size
+            continue
+        to_hash.append((rel, size, digest))
+    for rel, size, digest in to_hash:
+        h = hashlib.sha256()
+        try:
+            with open(game / rel, 'rb') as f:
+                while True:
+                    if stopped and stopped():
+                        result['state'] = 'stopped'
+                        return result
+                    block = f.read(8 << 20)
+                    if not block:
+                        break
+                    h.update(block)
+                    done += len(block)
+                    if progress:
+                        progress(done, total)
+        except OSError:
+            result['missing'].append(rel)
+            continue
+        if h.hexdigest() != digest:
+            result['content'].append(rel)
+    if progress:
+        progress(total, total)
+    if result['missing'] or result['size'] or result['content']:
+        result['state'] = 'bad'
+    return result
+
+
+US_107_ELF_SHA256 = 'b3afd173a379f83e1e408e71fdef22b78f93092d332b79decd48a18a08bfc605'
+
+
+def eu_same_code(game_dir, title):
+    """True for EU 1.07 (CUSA00004) whose eboot is the US 1.07 executable, byte for byte: the
+    game then turns the US 1.07 features on for it too (probe.c iss_feature_title)."""
+    if title != 'CUSA00004' or mod_patches.game_app_version(game_dir) != APP_VER_107:
+        return False
+    eboot = Path(game_dir) / 'eboot.bin'
+
+    def digest(path):
+        import hashlib
+        from infamous_patches import read_eboot_elf
+        elf = read_eboot_elf(path.parent)
+        return hashlib.sha256(elf).hexdigest() if elf is not None else ''
+    try:
+        _scripts()
+        return _cached(eboot, 'sha256', digest) == US_107_ELF_SHA256
+    except (OSError, ValueError, ImportError):
+        return False
+
+
+def game_title(game_dir):
+    """TITLE_ID of the game folder's param.sfo ("CUSA00223"), or None when it cannot be read."""
+    try:
+        _scripts()
+        from prepare import sfo
+        return sfo((Path(game_dir) / 'sce_sys/param.sfo').read_bytes()).get('TITLE_ID')
+    except (OSError, ValueError, KeyError, ImportError):
+        return None
+
+
 def check_game(game_dir):
     """Problems that keep the game from starting, as (key, detail) pairs; empty means ready.
     Keys in WARNINGS are only reported."""
     game = Path(game_dir)
     problems = []
     eboot = game / 'eboot.bin'
+    info = GAMES[_game]
     if not eboot.is_file():
         problems.append(('missing', 'eboot.bin'))
+    elif 'eboot' in info:   # First Light: its own code (1.04); no Second Son update or mods to check
+        try:
+            entry, size = _cached(eboot, 'layout', eboot_layout)
+            if (entry, size) != info['eboot']:
+                problems.append(('other_game_eboot', f'entry={entry:#x}, image={size:,} bytes'))
+        except (OSError, ValueError, KeyError, StopIteration) as error:
+            problems.append(('unreadable', f'eboot.bin ({error})'))
     else:
         try:
             entry, size = _cached(eboot, 'layout', eboot_layout)
@@ -473,6 +705,23 @@ def check_game(game_dir):
                     problems.append(('old_param', f'sce_sys/param.sfo (APP_VER {version})'))
         except (OSError, ValueError, KeyError, StopIteration) as error:
             problems.append(('unreadable', f'eboot.bin ({error})'))
+    title = game_title(game)
+    if 'titles' in info:
+        if title and title not in info['titles']:
+            problems.append(('other_game_title', title))
+    elif title and title != TITLE_US and not eu_same_code(game, title):
+        problems.append(('other_title', title))
+    art = game / 'art'
+    missing_art = next((rel for rel in info.get('art_required', ART_REQUIRED) if not (art / rel).is_file()), None)
+    if missing_art:
+        problems.append(('no_art', f'art/{missing_art}'))
+    else:
+        try:
+            count = _cached(art, 'art_files', lambda path: sum(len(names) for _, _, names in os.walk(path)))
+        except OSError:
+            count = None
+        if count is not None and count < info.get('art_min', ART_MIN_FILES):
+            problems.append(('small_art', f'{count:,}'))
     for module in MODULES:
         path = game / 'sce_module' / module
         if not path.is_file():
@@ -783,6 +1032,18 @@ def save_experimental(settings, states):
     save_settings(settings)
 
 
+# GPU switches fixed on 2026-11-23 (removed from both launchers): read GPU results ahead off (made
+# smoke and glow flicker), write without waiting on, deferred readbacks on, stale readbacks off
+# (one-frame-old data), command thread sleeps while waiting on (frees a core on small CPUs).
+# Environment beats tlg.ini, so a key an older version left there cannot change them either.
+# Also fixed (2026-11-23): asynchronous shader compile off (skipped draws make objects flash) and
+# loading cached pipelines in the background on. Both are read by this port's renderer only;
+# renderer v2 never skips draws and always preloads in the background.
+LOCKED_GPU_ENV = {'ISS_EAGER_READBACK': '0', 'ISS_WRITE_MERGE': '1', 'ISS_DEFERRED_READBACK': '1',
+                  'ISS_STALE_READBACK': '0', 'ISS_DRAIN_SLEEP': '1',
+                  'ISS_ASYNC_SHADERS': '0', 'ISS_BACKGROUND_WARMUP': '1'}
+
+
 def build_env(settings, extra=None):
     env = dict(os.environ)
     for key, value in DEFAULT_ENV.items():
@@ -792,9 +1053,13 @@ def build_env(settings, extra=None):
     budget = 'auto' if settings.get('vram_auto', True) and renderer_v2(settings) else str(int(settings['vram_budget_mb']))
     env['ISS_GC_BUDGET_MB'] = os.environ.get('ISS_GC_BUDGET_MB', budget)
     env['ISS_READBACKS'] = os.environ.get('ISS_READBACKS', str(settings.get('gpu_readbacks', '2')))
-    env['ISS_EAGER_READBACK'] = os.environ.get('ISS_EAGER_READBACK', '1' if settings.get('eager_readback', False) else '0')
-    env['ISS_WRITE_MERGE'] = os.environ.get('ISS_WRITE_MERGE', '1' if settings.get('write_merge', True) else '0')
-    env['ISS_DEFERRED_READBACK'] = os.environ.get('ISS_DEFERRED_READBACK', '1' if settings.get('deferred_readback', True) else '0')
+    # 2026-11-23: these GPU switches are fixed (no longer in the launchers); saved older choices are
+    # ignored. Only ISS_/TLG_ set outside the launcher (test scripts) still change them; see LOCKED_GPU_ENV.
+    for key, value in LOCKED_GPU_ENV.items():
+        env[key] = os.environ.get(key, value)
+    # HDR (2026-11-23): renderer v2 offers the game's HDR10 option only with BB_HDR=1 (and Windows HDR on).
+    # It was only ever set in a test copy's defaults.env; the Graphics screen's "Allow HDR" switch sets it now.
+    env['BB_HDR'] = os.environ.get('BB_HDR', '1' if settings.get('allow_hdr', True) else '0')
     env['ISS_STICK_DEADZONE'] = os.environ.get('ISS_STICK_DEADZONE', f"{int(settings.get('stick_deadzone', 10)) / 100:.2f}")
     for name, value in padsettings.environment(settings).items():   # mouse touchpad mode, TLG_KEY_MAP
         env.setdefault(name, value)
@@ -803,10 +1068,14 @@ def build_env(settings, extra=None):
         env['ISS_UI_LANG'] = settings['ui_language']
     env['ISS_CONFIG'] = str(user_dir() / 'tlg.ini')
     dlc = addons.labels(user_dir() / 'dlc')
+    # First Light asks for its "full game" entitlement at every start (an error screen without it);
+    # the port answers it offline, as for the player's own add-ons.
+    dlc = [*dlc, *(label for label in GAMES[_game].get('addcont', ()) if label not in dlc)]
     if dlc:
         env.setdefault('ISS_ADDCONT_LABELS', ','.join(dlc))
+        env.setdefault('TLG_ADDCONT_LABELS', env['ISS_ADDCONT_LABELS'])
     # Window name, app id (matches infamous-pc.desktop for Alt+Tab and the dock) and icon.
-    env.setdefault('ISS_APP_NAME', 'inFAMOUS Second Son')
+    env.setdefault('ISS_APP_NAME', GAMES[_game]['name'])
     env.setdefault('ISS_APP_ID', 'infamous-pc')
     icon = window_icon(settings)
     if icon:
@@ -829,6 +1098,10 @@ def build_env(settings, extra=None):
     # Experimental fixes (BPnn) and A/B switches the player changed: ISS_<name>=0/1 (the probe
     # copies them to TLG_). Untouched ones add nothing; ISS_/TLG_ set outside the launcher win.
     env.update(backports_table.environment(experimental_states(settings), os.environ))
+    for key, value in LOCKED_GPU_ENV.items():   # an old saved stale/drain choice must not undo the lock
+        tlg = 'TLG_' + key[len('ISS_'):]
+        value = os.environ.get(key, os.environ.get(tlg, value))
+        env[key] = env[tlg] = value              # both names, so whichever the game reads agrees
     if renderer_v2(settings):
         for key, value in renderer_v2_env(settings).items():
             if key not in os.environ:
@@ -941,6 +1214,41 @@ def reopen_after(pid):
         return False
 
 
+GPU_PREFERENCE_KEY = r'Software\Microsoft\DirectX\UserGpuPreferences'
+
+
+def gpu_preference_text(current):
+    """The registry text with GpuPreference=2 (high performance), other fields kept."""
+    fields = [f for f in (current or '').split(';') if f and not f.startswith('GpuPreference=')]
+    return ';'.join(fields + ['GpuPreference=2']) + ';'
+
+
+def prefer_dedicated_gpu(exe):
+    """Windows only (2026-11-23): marks the game's exe "High performance" in Windows' per-app
+    graphics settings (Settings > System > Display > Graphics; the same registry value that page
+    writes, in the player's own HKEY_CURRENT_USER). On a PC with built-in graphics and a graphics
+    card, Windows and the NVIDIA/AMD hybrid drivers then give the game the card. The game itself
+    also picks a dedicated card first whenever Vulkan lists one. Never fatal."""
+    if os.name != 'nt':
+        return
+    try:
+        import winreg
+        name = str(Path(exe).resolve())
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, GPU_PREFERENCE_KEY, 0,
+                                winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            try:
+                current = winreg.QueryValueEx(key, name)[0]
+            except FileNotFoundError:
+                current = ''
+            wanted = gpu_preference_text(current)
+            if current != wanted:
+                winreg.SetValueEx(key, name, 0, winreg.REG_SZ, wanted)
+                print(f'Graphics preference: {Path(exe).name} set to High performance (was {current or "not set"})',
+                      flush=True)
+    except Exception as error:      # noqa: BLE001
+        print(f'Graphics preference: not set ({error})', flush=True)
+
+
 def raise_open_file_limit():
     """Linux: lifts the open-file limit to its hard maximum; the game inherits it. A desktop session
     starts programs with a soft limit of 1024 (systemd DefaultLimitNOFILESoft), and renderer v2
@@ -964,6 +1272,9 @@ def launch(settings, seconds=0, extra_env=None):
     logtail.LogTail and wait() for the exit code."""
     data = user_dir()
     data.mkdir(parents=True, exist_ok=True)
+    # The in-game overlay's Mods page reads this game's mod list from overlay-mods.json (2026-11-23).
+    from publish_mod_catalogue import publish_mod_catalogue
+    publish_mod_catalogue(sys.modules[__name__], settings)
     update_ini(data / 'tlg.ini', {
         'display_mode': str(settings['display_mode']).lower(),  # the game's keys: windowed|borderless|fullscreen
         'vsync': int(bool(settings['vsync'])),
@@ -979,8 +1290,14 @@ def launch(settings, seconds=0, extra_env=None):
     cmd = [str(probe), str(OUT_DIR / 'boot-linked.bin'), '--app0', settings['game_dir'],
            '--user', str(data), '--content-profile', str(OUT_DIR / 'content.bin'),
            '--patches', str(OUT_DIR / 'patches.bin'), '--timeout', str(int(seconds))]
+    extra_env = dict(extra_env or {})
+    concrete_bank = extra_env.pop(iss_controller_feedback.BANK_MOUNT_KEY, None)
+    if concrete_bank:
+        for root in ('/app0', '/hostapp'):
+            cmd += ['--mount', f'{root}/art/cache/common_sound.sprig.xpps={concrete_bank}']
     if ISA_TABLE.is_file():
         cmd += ['--isa-rewrite', str(ISA_TABLE)]
+    prefer_dedicated_gpu(probe)
     raise_open_file_limit()
     with open(log, 'wb') as out:   # the child keeps its own copy of the descriptor
         process = subprocess.Popen(cmd, cwd=str(data), env=build_env(settings, extra_env),
@@ -1039,6 +1356,11 @@ def main(argv=None):
     sys.stdout.flush()
     return process.wait()
 
+
+# DualSense controller output (2026-11-06): lightbar, controller-speaker routing/gain and the added
+# Concrete cue. Wraps launch() for Renderer v2 on Windows; see iss_controller_feedback.py.
+import iss_controller_feedback
+iss_controller_feedback.install(globals())
 
 if __name__ == '__main__':
     sys.exit(main())

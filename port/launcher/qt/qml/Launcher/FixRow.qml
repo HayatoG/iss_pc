@@ -19,11 +19,11 @@ Item {
             Text { text: d.title || ""; color: "#fff"; font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 800 }); font.pixelSize: 22; font.weight: Font.ExtraBold
                    font.capitalization: Font.AllUppercase; font.letterSpacing: 1.3; anchors.verticalCenter: parent.verticalCenter }
         }
-        Text { visible: !!d.note; x: 14; text: d.note || ""; color: Theme.textDim; font.family: Theme.fontText; font.pixelSize: 12 }
+        Text { visible: !!d.note; x: 14; text: d.note || ""; color: Theme.textDim; font.family: Theme.fontText; font.pixelSize: 13 }
     }
 
     // fix card
-    Rectangle {
+    PolishCard {
         id: card
         visible: d.kind === "item"
         y: 4; width: parent.width; radius: 12
@@ -37,7 +37,7 @@ Item {
                 spacing: 10
                 Text { visible: !!d.code; text: d.code || ""; color: row.accent; font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 700 }); font.pixelSize: 16
                        font.weight: Font.Bold; font.letterSpacing: 1; anchors.verticalCenter: parent.verticalCenter }
-                Text { text: d.label || ""; color: Theme.text; font.family: Theme.fontText; font.pixelSize: 15; font.weight: Font.DemiBold
+                Text { text: d.label || ""; color: Theme.text; font.family: Theme.fontText; font.pixelSize: 16; font.weight: Font.DemiBold
                        anchors.verticalCenter: parent.verticalCenter }
             }
             Flow {
@@ -46,7 +46,7 @@ Item {
                 Tag { visible: !!d.shaderWarn; text: "⚠ " + (d.shaderWarn || ""); tone: "warn" }
             }
             Text { width: parent.width; text: d.what || ""; wrapMode: Text.WordWrap; color: Theme.textDim
-                   font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
+                   font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
         }
         Toggle {
             visible: d.control === "switch"
@@ -67,14 +67,14 @@ Item {
                 inputMethodHints: Qt.ImhDigitsOnly
                 validator: IntValidator { bottom: d.lo || 0; top: d.hi || 0 }
                 color: Theme.text; placeholderTextColor: Theme.textMuted
-                font.family: Theme.fontText; font.pixelSize: 14
+                font.family: Theme.fontText; font.pixelSize: 15
                 horizontalAlignment: Text.AlignRight
                 background: Rectangle { radius: 8; color: Theme.chip; border.width: 1
                                         border.color: num.activeFocus ? row.accent : Theme.cardLine }
                 onEditingFinished: Backend.setFix(d.id, text === "" ? "auto" : text)
             }
             Text { visible: !!d.unit; text: d.unit || ""; color: Theme.textDim; font.family: Theme.fontText
-                   font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+                   font.pixelSize: 14; anchors.verticalCenter: parent.verticalCenter }
         }
         Select {
             visible: d.control === "combo"

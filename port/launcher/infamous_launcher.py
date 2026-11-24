@@ -318,9 +318,8 @@ class Launcher:
         self.check(video, 1, 'vsync')
         self.check(video, 2, 'show_fps')
         self.combo(video, 5, 'gpu_readbacks', ['0', '1', '2'], lambda k: self.t('readbacks_' + k))
-        self.check(video, 6, 'eager_readback')
-        self.check(video, 7, 'write_merge')
-        self.check(video, 8, 'precompile_shaders')
+        # Rows 6-7 were "Read GPU results ahead" / "Write to GPU memory without waiting": fixed since 2026-11-23.
+        # Row 8 was "Compile shaders on the first start": always on since 2026-11-23.
         self.check(video, 9, 'close_on_play')
         ttk.Label(video, text=self.t('vram'), wraplength=220).grid(row=3, column=0, sticky='w', pady=(6, 0))
         vram = tk.IntVar(value=int(self.settings['vram_budget_mb']))
@@ -332,20 +331,7 @@ class Launcher:
         ttk.Label(video, text=self.t('vram_hint'), foreground='#777', wraplength=360).grid(row=4, column=0, columnspan=2, sticky='w')
 
         self.exp_states = tlg_run.experimental_states(self.settings)
-        occ_item = next(i for i in backports_table.ITEMS if i.key == 'occlusion_mode')
-        occ_box = ttk.LabelFrame(middle, text=self.t('occlusion'), padding=8)
-        occ_box.grid(sticky='ew', pady=(8, 0))
-        occ_box.columnconfigure(0, weight=1)
-        occ_options = [(v, (pt if self.pt() else en) + (f' ({self.t("exp_default")})' if v == occ_item.default else ''))
-                       for v, en, pt in occ_item.choices]
-        occ_value = backports_table.effective(occ_item, self.exp_states)
-        occ_combo = ttk.Combobox(occ_box, values=[o[1] for o in occ_options], state='readonly')
-        occ_combo.current(next((i for i, o in enumerate(occ_options) if o[0] == occ_value), 0))
-        occ_combo.grid(row=0, column=0, sticky='ew')
-        occ_combo.bind('<<ComboboxSelected>>',
-                       lambda _, o=occ_options, b=occ_combo, i=occ_item: self.exp_set(i, o[b.current()][0]))
-        ttk.Label(occ_box, text=self.t('occlusion_hint'), foreground='#777', wraplength=360,
-                  justify='left').grid(row=1, column=0, sticky='w', pady=(6, 0))
+        # The light glare (occlusion) box is gone (2026-11-23): fixed at 4, real occlusion.
 
         # Detailed log, right under the light glare box (same file/env path as the other switches).
         log_item = next(i for i in backports_table.ITEMS if i.key == 'verbose_log')

@@ -50,10 +50,17 @@ def sfo_content_id(path):
     return None
 
 
-def labels(folder):
-    """Labels of the add-ons found in folder (sorted, no duplicates); [] without the folder."""
-    found = set()
+def found(folder):
+    """[{'label', 'source'}] of the add-ons in folder, one per label (sorted by label); source is the
+    package or folder it came from, relative to folder. [] without the folder."""
+    seen = {}
     root = Path(folder)
+
+    def name(path):
+        try:
+            return str(path.relative_to(root)) or path.name
+        except ValueError:
+            return path.name
 
     def visit(path, depth):
         try:
@@ -64,15 +71,20 @@ def labels(folder):
         if sfo.is_file():
             label = label_of(sfo_content_id(sfo) or '')
             if label:
-                found.add(label)
+                seen.setdefault(label, name(path))
         for entry in entries:
             if entry.is_file() and entry.suffix.lower() == '.pkg':
                 label = label_of(pkg_content_id(entry) or '')
                 if label:
-                    found.add(label)
+                    seen.setdefault(label, name(entry))
             elif entry.is_dir() and depth < MAX_DEPTH and entry.name != 'sce_sys':
                 visit(entry, depth + 1)
 
     if root.is_dir():
         visit(root, 0)
-    return sorted(found)
+    return [{'label': label, 'source': seen[label]} for label in sorted(seen)]
+
+
+def labels(folder):
+    """Labels of the add-ons found in folder (sorted, no duplicates); [] without the folder."""
+    return [item['label'] for item in found(folder)]

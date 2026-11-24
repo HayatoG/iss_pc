@@ -8,7 +8,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QUrl
 from PySide6.QtGui import (QBrush, QColor, QFontDatabase, QGuiApplication, QIcon, QImage, QLinearGradient, QPainter,
                            QPen, QRadialGradient)
 from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtQuick import QQuickImageProvider
+from PySide6.QtQuick import QQuickImageProvider, QQuickWindow
 
 from . import logic
 from .backend import Backend
@@ -19,6 +19,7 @@ HERE = Path(__file__).resolve().parent
 QML_ROOT = HERE / 'qml'
 FONT_DISPLAY = 'Big Shoulders Stencil Display'
 FONT_TEXT = 'Barlow'
+FONT_TEXT_WINDOWS = 'Segoe UI'
 
 
 def load_fonts():
@@ -30,8 +31,12 @@ def load_fonts():
         if ident >= 0:
             for name in QFontDatabase.applicationFontFamilies(ident):
                 families[name] = True
-    return (FONT_DISPLAY if FONT_DISPLAY in families else 'sans-serif',
-            FONT_TEXT if FONT_TEXT in families else 'sans-serif')
+    text = FONT_TEXT if FONT_TEXT in families else 'sans-serif'
+    # 2026-11-22: on Windows the body text uses the system's Segoe UI (real semibold and bold weights,
+    # wider letters, built for screens); Barlow looked thin and small. Other systems keep Barlow.
+    if sys.platform == 'win32' and FONT_TEXT_WINDOWS in QFontDatabase.families():
+        text = FONT_TEXT_WINDOWS
+    return (FONT_DISPLAY if FONT_DISPLAY in families else 'sans-serif', text)
 
 
 class HeroProvider(QQuickImageProvider):
@@ -89,6 +94,12 @@ class App:
 
     def __init__(self, backend=None, argv=None):
         self.qt = QGuiApplication.instance() or QGuiApplication(argv or sys.argv)
+        # Sharp text (2026-11-22): the system's own font rasteriser (hinted, like other Windows apps)
+        # instead of Qt's scalable distance-field text, which looked soft and blocky at 11-15 px.
+        try:
+            QQuickWindow.setTextRenderType(QQuickWindow.TextRenderType.NativeTextRendering)
+        except Exception:
+            pass
         self.qt.setApplicationName('infamous-launcher')
         self.qt.setDesktopFileName('infamous-pc')
         self.backend = backend or Backend()
@@ -111,6 +122,9 @@ class App:
         if not self.engine.rootObjects():
             raise RuntimeError('the QML interface did not load (see the messages above)')
         self.window = self.engine.rootObjects()[0]
+        # Controller navigation (2026-11-23): SDL gamepad polling from out/SDL3.dll, tabs on L1/R1.
+        from controller_navigation import attach
+        attach(self)
 
     def go(self, index):
         self.window.setProperty('current', index)

@@ -107,6 +107,11 @@ public:
         return compute_queue;
     }
 
+    /// ISS_UPLOAD_QUEUE=1: a queue of the transfer-only family (copy engine), null otherwise.
+    vk::Queue GetUploadQueue() const {
+        return upload_queue;
+    }
+
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
     }
@@ -567,6 +572,7 @@ private:
     vk::Queue readback_queue;
     bool has_readback_queue{};
     vk::Queue compute_queue;
+    vk::Queue upload_queue;
     bool has_compute_queue{};
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;

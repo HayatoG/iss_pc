@@ -36,6 +36,9 @@ static inline int iss_pitch_finite(float x) {
  */
 static __attribute__((ms_abi,noinline,target("no-avx,no-avx2")))
 float iss_pitch_cap(float cap, const void *state, const void *config, const void *frame) {
+#ifdef ISS_PITCH_LIVE_ENABLED
+    if(!ISS_PITCH_LIVE_ENABLED())return cap;
+#endif
     const float x = iss_pitch_f(frame,-0x1b0), y = iss_pitch_f(frame,-0x190);
     const float pitch = iss_pitch_f(state,0x334), zoom = iss_pitch_f(state,0x360);
     const float pan_velocity = iss_pitch_f(frame,-0x210);

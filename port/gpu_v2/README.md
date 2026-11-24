@@ -1,10 +1,10 @@
 # renderer v2 (experimental)
 
 **pt-BR** — Um renderer alternativo (origem abaixo), rodando no Linux sobre o runtime deste port. A interface
-que o jogador vê (FPS, menu Insert, "Compilando shaders", diálogos de save) é a deste port.
+que o jogador vê (FPS, menu F1, "Compilando shaders", diálogos de save) é a deste port.
 
 **en-US** — An alternative renderer (origin below), running on Linux on this port's runtime. What the player
-sees (FPS counter, Insert menu, "Compiling shaders", save dialogs) is this port's own.
+sees (FPS counter, F1 menu, "Compiling shaders", save dialogs) is this port's own.
 
 ## Origin and credit
 

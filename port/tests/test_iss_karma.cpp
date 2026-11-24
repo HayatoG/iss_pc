@@ -22,6 +22,8 @@ static void FlushInstructionCache(void*,void*,size_t){}
 
 static IssKarmaSnapshot disk_snapshot{};
 extern "C" int tlggpu_overlay_captures_input(void){return 0;}
+extern "C" int runtime_mouse_aim_camera_live(void){return -1;}
+extern "C" void tlggpu_request_screenshot(void){}
 extern "C" int iss_karma_binding_poll(float,int,int,int){return 1;}
 extern "C" int iss_karma_profile_capture_pending(){return 0;}
 extern "C" int iss_karma_profile_capture(const IssKarmaSnapshot*,int){return 0;}

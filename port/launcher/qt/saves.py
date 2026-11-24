@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import Property, QObject, QTimer, QUrl, Signal, Slot
 
 from .logic import savemanager, shader_cache, tlg_run, userdata
+import addons  # noqa: E402  (launcher/ is on sys.path, as for logic's imports)
 
 
 def _local(url):
@@ -102,6 +103,10 @@ class Saves(QObject):
             'name': b['name'], 'when': self.when(b['time']),
             'info': self.t('backups_line', count=self.count(b['saves']), size=shader_cache.human_size(b['size']))}
             for b in savemanager.list_backups(data)]
+        try:
+            self._dlc = addons.found(data / 'dlc')
+        except Exception:   # an unreadable folder never stops the page
+            self._dlc = []
         self.changed.emit()
 
     # -- properties --------------------------------------------------------------------------------
@@ -176,7 +181,8 @@ class Saves(QObject):
 
     @Property(str, notify=changed)
     def homeHint(self):
-        """Shown on the Home screen: the current data folder has no saves but another place does."""
+        """Shown on the Home screen: the current data folder has no saves but another place does.
+        The saves it looks for are the selected game's (userdata.set_game, 2026-11-22)."""
         others = self._others()
         if self._slots or not others:
             return ''
@@ -208,6 +214,32 @@ class Saves(QObject):
         self._found = found
         self._scanning, self._scanned = False, True
         self.changed.emit()
+
+    # -- DLC (add-ons): <data folder>/dlc, read by infamous_run.build_env at every start ----------------
+    @Property(str, notify=changed)
+    def dlcDir(self):
+        return str(self.data_dir() / 'dlc')
+
+    @Property('QVariantList', notify=changed)
+    def dlcItems(self):
+        return getattr(self, '_dlc', [])
+
+    @Slot()
+    def openDlcFolder(self):
+        path = self.data_dir() / 'dlc'
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        if 'open' in self.probes:
+            self.probes['open'](path)
+        else:
+            tlg_run.open_external(path)
+        self.reload()
+
+    @Slot()
+    def rescanDlc(self):
+        self.reload()
 
     # -- data folder -----------------------------------------------------------------------------------
     @Slot()

@@ -32,7 +32,48 @@ static void test_progress_reset(void){++reset_notifications;}
 static ABI void test_original_reset(void* object){++original_resets;reset_object=(uintptr_t)object;}
 static int32_t test_trophy_unlock(int32_t id,int32_t *platinum) { recorded_id=id;if(platinum)*platinum=-1;return 0; }
 static int32_t test_trophy_state(uint32_t *flags,uint32_t *count) { memset(flags,0,16);flags[0]=1u<<17;*count=1;return 0; }
+static void test_local_psn(void) {
+    int32_t state;
+    unsigned char id[36];
+#ifdef _WIN32
+    assert(_putenv_s("ISS_PAPERTRAIL_LOCAL_PSN","")==0);
+#else
+    assert(unsetenv("ISS_PAPERTRAIL_LOCAL_PSN")==0);
+#endif
+    assert(np_state(USER_ID,&state)==0 && state==1);
+    assert(np_online_id(USER_ID,id)==NP_SIGNED_OUT);
+#ifdef _WIN32
+    assert(_putenv_s("ISS_PAPERTRAIL_LOCAL_PSN","1")==0);
+#else
+    assert(setenv("ISS_PAPERTRAIL_LOCAL_PSN","1",1)==0);
+#endif
+    assert(np_state(USER_ID,&state)==0 && state==2);
+    assert(np_state(USER_ID+1,&state)==0 && state==1);
+    memset(id,0xff,sizeof(id));
+    assert(np_online_id(USER_ID,id)==0 && !strcmp((char *)id,"PaperTrailLocal"));
+    assert(id[19]==0 && id[20]==0xff);
+    assert(np_id(USER_ID,id)==0 && id[35]==0);
+    assert(np_id(USER_ID,NULL)==NP_INVALID_ARGUMENT);
+    assert(netctl_state(&state)==0 && state==0);
+    assert(np_signed_out()==NP_SIGNED_OUT && http_send(0,"{}",2)==HTTP_NETWORK);
+    const char payload[]="{\"onlineId\":\"PaperTrailLocal\",\"w1m1e\":1,\"w1m3e\":0}";
+    int request=http_request_url(1,1,"https://api.infamouspapertrail.com/update",sizeof(payload)-1);
+    assert(http_send(request,NULL,0)==HTTP_NETWORK);
+    assert(http_send(request,payload,sizeof(payload)-1)==0);
+    assert(http_send(request,NULL,0)==0);
+    assert(http_status(request,&state)==0 && state==200);
+    char response[1024];
+    int count=http_read(request,response,sizeof(response)-1);
+    assert(count>0);
+    response[count]=0;
+    assert(strstr(response,"\"w1m1es\":1,\"w1m2w\":1"));
+    assert(strstr(response,"\"w1m3es\":0,\"w1m4w\":0"));
+    assert(http_read(request,response,sizeof(response))==0);
+    assert(http_delete_request(request)==0 && http_status(request,&state)==HTTP_NETWORK);
+}
+
 int main(void) {
+    test_local_psn();
     unsigned char param[128]={0}, result[64]={0}; /* the game zeroes the pointers it does not want */
     uint32_t value;
 

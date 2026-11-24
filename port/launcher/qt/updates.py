@@ -19,6 +19,7 @@ from . import releases, report, updater
 from .logic import tlg_run
 import savemanager
 import update_install
+import userdata
 
 
 class Updates(QObject):
@@ -51,6 +52,11 @@ class Updates(QObject):
         self._dialog, self._handlers = {}, {}
         seen = backend.settings.get('update_seen')
         self.release = dict(seen) if isinstance(seen, dict) and seen.get('tag') else None
+        # The latest beta (GitHub pre-release), checked with the release; installed into a new folder.
+        beta = backend.settings.get('beta_seen')
+        self.beta = dict(beta) if isinstance(beta, dict) and beta.get('tag') else None
+        self._beta_error = ''
+        self._target, self._mode = None, ''   # the release being installed; 'inplace' | 'sibling'
         self.fetched.connect(self._on_fetched)
         self.progressed.connect(self._on_progress)
         self.stepDone.connect(self._on_step)
@@ -129,6 +135,86 @@ class Updates(QObject):
         notes = releases.extract_notes(self.release.get('body', ''), self.backend.t_.pt())
         return notes or self.t('upd_no_notes')
 
+    # -- the latest beta (pre-release) ----------------------------------------------------------------
+    @Property(bool, notify=changed)
+    def hasBeta(self):
+        return bool(self.beta)
+
+    @Property(str, notify=changed)
+    def betaTag(self):
+        return (self.beta or {}).get('name') or (self.beta or {}).get('tag', '')
+
+    @Property(str, notify=changed)
+    def betaPublished(self):
+        return (self.beta or {}).get('published', '')
+
+    @Property(str, notify=changed)
+    def betaNotes(self):
+        if not self.beta:
+            return ''
+        return releases.extract_notes(self.beta.get('body', ''), self.backend.t_.pt()) or self.t('upd_no_notes')
+
+    @Property(str, notify=changed)
+    def betaStatus(self):
+        if self._beta_error:
+            return self._beta_error
+        if not self.beta:
+            return self.t('upd_beta_none')
+        return self.t('upd_beta_status', tag=self.beta['tag'], date=self.beta.get('published') or '?')
+
+    @Property(bool, notify=changed)
+    def canInstallBeta(self):
+        """A beta with a package for this platform, in a packaged build, nothing running."""
+        if not self.beta or not self.frozen() or self._checking or self._phase:
+            return False
+        if self.running() or self._in_checkout():
+            return False
+        try:
+            updater.pick_assets(self.beta, nt=self.windows())
+        except releases.UpdateError:
+            return False
+        return True
+
+    @Slot()
+    def openBetaPage(self):
+        url = (self.beta or {}).get('url') or releases.RELEASES_URL
+        if not url.startswith(releases.RELEASE_PREFIX):
+            url = releases.RELEASES_URL
+        if 'open_url' in self.probes:
+            self.probes['open_url'](url)
+        else:
+            tlg_run.open_external(url)
+
+    @Slot()
+    def installBeta(self):
+        """Rechecks GitHub for the newest beta, then (Windows) downloads, verifies and installs it in this
+        same folder and restarts; Linux keeps its new-folder confirmation (_manual_install_beta)."""
+        if not self.canInstallBeta:
+            return
+        self._auto_channel = 'beta'
+        self.check()
+
+    def _manual_install_beta(self):
+        """A beta goes into a NEW folder next to this one: this install stays as it is, the
+        player's data folder is copied in when it lives inside it, and the player may restart into it."""
+        if not self.canInstallBeta:
+            return
+        try:
+            package, _ = updater.pick_assets(self.beta, nt=self.windows())
+        except releases.UpdateError as error:
+            self._fail(error)
+            return
+        self._target, self._mode = self.beta, 'sibling'
+        port = self.port_dir()
+        target = updater.target_folder(port, package['name'], self.beta['tag'])
+        data = updater.data_to_copy(port, self.data_dir())
+        lines = [self.t('upd_ask_where', folder=str(target)), self.t('upd_ask_old', folder=str(port)),
+                 self.t('upd_ask_data_copy' if data else 'upd_ask_data_kept', folder=str(self.data_dir()))]
+        self._ask(self.t('upd_beta_ask_title'),
+                  self.t('upd_beta_ask', tag=self.beta['tag'], size=_mb(package['size'])),
+                  [('yes', self.t('upd_download_now'), 'primary'), ('no', self.t('upd_cancel'), 'ghost')],
+                  {'yes': self._start_download}, lines)
+
     @Property(str, notify=changed)
     def introText(self):
         return self.t('upd_intro_inplace' if self.windows() else 'upd_intro')
@@ -160,20 +246,66 @@ class Updates(QObject):
         # The release seen before: GitHub answers 304 when it is still the latest, without counting
         # the request against its limit of 60 an hour per network.
         etag = (self.release or {}).get('etag', '')
+        beta_etag = (self.beta or {}).get('etag', '')
 
         def work():
             fetch = self.probes.get('fetch') or (lambda v: releases.fetch_latest(v, etag=etag))
+            fetch_beta = self.probes.get('fetch_beta') or (lambda v: releases.fetch_prerelease(v, etag=beta_etag))
             try:
-                self.fetched.emit(fetch(version))
+                result = fetch(version)
             except releases.UpdateError as error:
-                self.fetched.emit(error)
+                result = error
             except Exception as error:    # never let a surprise leave the screen stuck on "checking"
-                self.fetched.emit(releases.UpdateError('http', str(error)))
+                result = releases.UpdateError('http', str(error))
+            try:
+                beta = fetch_beta(version)
+            except releases.UpdateError as error:
+                beta = error
+            except Exception as error:
+                beta = releases.UpdateError('http', str(error))
+            self.fetched.emit((result, beta))
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_fetched(self, result):
+    def _on_fetched(self, both):
+        """Stores the check's results; when Install asked for it, starts that channel's update."""
+        channel = getattr(self, '_auto_channel', '')
+        self._auto_channel = ''
+        self._receive_release_metadata(both)
+        if not channel:
+            return
+        selected = both[1 if channel == 'beta' else 0]
+        if isinstance(selected, releases.UpdateError):    # offline/error: never install cached metadata
+            self._fail(selected)
+            return
+        allowed = self.canInstallBeta if channel == 'beta' else self.canInstall
+        if not allowed:
+            return
+        self._target = dict(self.beta if channel == 'beta' else self.release)
+        self._mode = 'inplace' if self.windows() else 'sibling'
+        if self.windows():
+            self._start_download()
+        else:    # Linux keeps its new-folder confirmation
+            self._manual_install_beta() if channel == 'beta' else self._manual_install()
+
+    def _receive_release_metadata(self, both):
+        result, beta = both
         self._checking = False
         today = datetime.date.today().isoformat()
+        if isinstance(beta, releases.UpdateError):
+            self._beta_error = '' if beta.kind == 'none' else releases.error_text(beta, self.t)
+            if beta.kind == 'none':
+                self.beta = None
+                self.backend.settings.pop('beta_seen', None)
+        elif beta is None:    # 304: unchanged
+            self._beta_error = ''
+            if self.beta:
+                self.beta['checked'] = today
+        else:
+            self._beta_error = ''
+            self.beta = {'tag': beta['tag'], 'name': beta.get('name', beta['tag']), 'url': beta['url'],
+                         'body': beta['body'][:30000], 'published': beta['published'],
+                         'assets': list(beta.get('assets') or [])[:20], 'checked': today, 'etag': beta.get('etag', '')}
+            self.backend.settings['beta_seen'] = self.beta
         if isinstance(result, releases.UpdateError):
             self._error = releases.error_text(result, self.t)
         elif result is None:    # 304: the release seen before is still the latest
@@ -187,6 +319,8 @@ class Updates(QObject):
                             'checked': today, 'etag': result.get('etag', '')}
             self.backend.settings['update_seen'] = self.release
             self._save()
+        if isinstance(result, releases.UpdateError) and not isinstance(beta, releases.UpdateError):
+            self._save()    # the beta seen is kept even when the release check failed
         self.changed.emit()
 
     @Slot()
@@ -213,7 +347,8 @@ class Updates(QObject):
         return self.probes['exe']() if 'exe' in self.probes else Path(sys.executable).name
 
     def data_dir(self):
-        return Path(self.probes['data_dir']() if 'data_dir' in self.probes else tlg_run.user_dir())
+        # The whole data folder (Second Son's and, inside it, First Light's), whatever game is selected.
+        return Path(self.probes['data_dir']() if 'data_dir' in self.probes else userdata.user_dir(tlg_run.PORT_DIR))
 
     def running(self, live=False):
         """A game or shader job of this launcher. live=True also asks Windows for a tlg-probe process."""
@@ -316,7 +451,15 @@ class Updates(QObject):
 
     @Slot()
     def install(self):
-        """Step 1: ask before downloading. Windows asks once for the whole update; Linux asks again later."""
+        """Rechecks GitHub for the newest release, then (Windows) downloads, verifies, installs it in this
+        same folder and restarts without another click. Checking alone never installs anything."""
+        if not self.canInstall:
+            return
+        self._auto_channel = 'stable'
+        self.check()
+
+    def _manual_install(self):
+        """Linux: ask before downloading, and again before installing into a new folder."""
         if not self.canInstall:
             return
         try:
@@ -324,6 +467,7 @@ class Updates(QObject):
         except releases.UpdateError as error:
             self._fail(error)
             return
+        self._target, self._mode = self.release, ('inplace' if self.windows() else 'sibling')
         port = self.port_dir()
         if self.windows():
             self._ask(self.t('upd_install'),
@@ -343,18 +487,20 @@ class Updates(QObject):
 
     def _start_download(self):
         windows = self.windows()
+        target = self._target or self.release
+        inplace = self._mode == 'inplace'
         try:
-            if windows and self.running(live=True):
+            if self.running(live=True):
                 raise update_install.InstallError('busy', 'game')
-            package, sums_asset = updater.pick_assets(self.release, nt=windows)
+            package, sums_asset = updater.pick_assets(target, nt=windows)
             port, version = self.port_dir(), self.installed()
             self._work = Path(tempfile.mkdtemp(prefix='.iss-update-', dir=port.parent))
         except Exception as error:
             self._fail(error)
             return
         archive = self._work / package['name']
-        # Windows replaces the files in place, so the data folder is never copied.
-        data = None if windows else updater.data_to_copy(port, self.data_dir())
+        # In place (a Windows release) replaces the files, so the data folder is never copied.
+        data = None if inplace else updater.data_to_copy(port, self.data_dir())
         opener = self.probes.get('opener')
         self._cancel.clear()
         self._handed, self._archive = False, None
@@ -394,7 +540,7 @@ class Updates(QObject):
             self._archive, self._verified = value
             self._phase = ''
             self.changed.emit()
-            if self.windows():
+            if self._mode == 'inplace':
                 self._start_prepare()
             else:
                 self._ask_install()
@@ -409,11 +555,12 @@ class Updates(QObject):
 
     def _ask_install(self):
         """Step 2 (Linux): the package is here and checked; ask before installing it."""
-        package, _ = updater.pick_assets(self.release)
-        target = updater.target_folder(self.port_dir(), package['name'], self.release['tag'])
+        release = self._target or self.release
+        package, _ = updater.pick_assets(release, nt=self.windows())
+        target = updater.target_folder(self.port_dir(), package['name'], release['tag'])
         self._ask(self.t('upd_ask_install_title'),
                   self.t('upd_ask_install_sha' if self._verified else 'upd_ask_install_size',
-                         tag=self.release['tag'], folder=str(target)),
+                         tag=release['tag'], folder=str(target)),
                   [('yes', self.t('upd_install_now'), 'primary'), ('no', self.t('upd_cancel'), 'ghost')],
                   {'yes': self._start_install, 'no': self._discard})
 
@@ -425,8 +572,9 @@ class Updates(QObject):
 
     def _start_install(self):
         """Linux: extract into a new folder next to the install (the old one stays)."""
-        package, _ = updater.pick_assets(self.release)
-        archive, port, tag = self._archive, self.port_dir(), self.release['tag']
+        release = self._target or self.release
+        package, _ = updater.pick_assets(release, nt=self.windows())
+        archive, port, tag = self._archive, self.port_dir(), release['tag']
         exe, data = self.exe_name(), self.data_dir()
         self._phase, self._error = 'install', ''
         self.changed.emit()
@@ -467,17 +615,29 @@ class Updates(QObject):
     # -- Windows: in place ---------------------------------------------------------------------------
     def _start_prepare(self):
         """Extracts the verified package and writes the journal, all outside the installed files."""
-        archive, workdir, tag = self._archive, self._work, self.release['tag']
+        archive, workdir, tag = self._archive, self._work, (self._target or self.release)['tag']
         port, exe = self.port_dir(), self.exe_name()
-        protected = [str(self.data_dir())]
-        if self.backend.settings.get('game_dir'):
-            protected.append(str(self.backend.settings['game_dir']))
+        # Protect the shared data base (BOTH games), the portable user folder and every game folder.
+        protected = {str(self.data_dir()), str(Path(userdata.user_dir(port))), str(port / 'user')}
+        folders = self.backend.settings.get('game_dirs') or {}
+        for folder in [self.backend.settings.get('game_dir'), *folders.values()]:
+            if folder:
+                protected.add(str(Path(folder).expanduser().resolve()))
+        protected = sorted(protected)
         self._phase, self._error = 'prepare', ''
         self.changed.emit()
 
         def work():
             try:
                 stage = updater.extract(archive, workdir / 'payload', updater.package_folder(archive.name))
+                # The asset's name may differ from the ZIP's single root folder.
+                if not (stage / update_install.MANIFEST).is_file():
+                    roots = [p for p in stage.iterdir()
+                             if p.is_dir() and not p.is_symlink() and (p / update_install.MANIFEST).is_file()]
+                    if len(roots) != 1:
+                        raise update_install.InstallError('archive', 'ambiguous or missing package root')
+                    stage = roots[0]
+                _drop_personal_from_stage(stage)
                 archive.unlink(missing_ok=True)
                 transaction = update_install.prepare(stage, port, tag, exe_name=exe, protected=protected)
                 self.stepDone.emit(('prepared', transaction))
@@ -523,3 +683,46 @@ class Updates(QObject):
 
 def _mb(size):
     return f'{size / 2 ** 20:.0f} MB' if size >= 2 ** 20 else f'{size / 1024:.0f} KB'
+
+
+def _drop_personal_from_stage(stage):
+    """Older release ZIPs carried user-folder placeholders (user/dlc/PUT-YOUR-DLC-HERE.txt). Removes every
+    reserved personal-data path from the verified STAGING folder and its inventory, never from the install,
+    so they can't collide with the player's protected data. Every path is still validated."""
+    import json
+    manifest_path = stage / update_install.MANIFEST
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), list):
+        raise update_install.InstallError('archive', 'package inventory missing')
+
+    def personal(name):
+        if not isinstance(name, str):
+            raise update_install.InstallError('archive', 'invalid path')
+        parts = name.split('/')
+        update_install._relative('/'.join('_personal_' if p.casefold() in update_install.RESERVED else p
+                                          for p in parts))
+        return any(p.casefold() in update_install.RESERVED for p in parts)
+
+    kept = []
+    for row in manifest['files']:
+        if not isinstance(row, dict):
+            raise update_install.InstallError('archive', 'invalid inventory entry')
+        if not personal(row.get('path')):
+            kept.append(row)
+    manifest['files'] = kept
+    update_install._entries(manifest)
+    root = stage.resolve()
+    for path in sorted(stage.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+        name = path.relative_to(stage).as_posix()
+        if name == update_install.MANIFEST:
+            continue
+        if path.is_symlink() or getattr(path, 'is_junction', lambda: False)():
+            raise update_install.InstallError('archive', 'link in package')
+        if personal(name):
+            if not path.resolve().is_relative_to(root):
+                raise update_install.InstallError('archive', 'staging path escape')
+            if path.is_dir():
+                path.rmdir()
+            else:
+                path.unlink()
+    update_install._json(manifest_path, manifest)

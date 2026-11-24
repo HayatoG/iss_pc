@@ -41,6 +41,11 @@ bool Visible();
 /// Present thread: draws into `view` (layout ColorAttachmentOptimal).
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
 
+/// Present thread, before Render: whether the swapchain is HDR10 (BT.2020 PQ) this frame. The
+/// overlay's colours are then converted from SDR to PQ at a 203-nit reference white
+/// (ISS_HDR_UI_NITS), instead of being read by the display as PQ code values (2026-11-20).
+void SetHdrOutput(bool hdr);
+
 /// A short message at the top of the screen for `seconds` (any thread), e.g. an input mode change.
 void Notice(const std::string& text, float seconds);
 

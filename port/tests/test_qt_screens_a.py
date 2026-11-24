@@ -49,9 +49,13 @@ class KeyboardTableTests(unittest.TestCase):
         mine = {button: scancode for button, scancode, _ in padsettings.KEYBOARD_BUTTONS}
         self.assertEqual(self.c_key_map(), mine)
 
-    def test_fixed_keys_exist_in_runtime_pad_c(self):
+    def test_default_movement_and_fixed_graffiti_keys_exist_in_runtime_pad_c(self):
         text = RUNTIME_PAD.read_text(encoding='utf-8')
-        for scancode in ('W', 'A', 'S', 'D', 'LEFT', 'RIGHT', 'UP', 'DOWN', 'T', 'G', 'Y'):
+        defaults = {'W': 'LS_UP', 'A': 'LS_LEFT', 'S': 'LS_DOWN', 'D': 'LS_RIGHT',
+                    'LEFT': 'RS_LEFT', 'RIGHT': 'RS_RIGHT', 'UP': 'RS_UP', 'DOWN': 'RS_DOWN'}
+        for scancode, binding in defaults.items():
+            self.assertIn(f'{{SDL_SCANCODE_{scancode},{binding}}}', text)
+        for scancode in ('T', 'G', 'Y'):
             self.assertIn(f'SDL_SCANCODE_{scancode}]', text, scancode)
 
     def test_ps4_button_names_are_the_ones_apply_button_map_reads(self):

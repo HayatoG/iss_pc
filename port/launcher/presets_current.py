@@ -12,7 +12,7 @@ import os
 CURRENT = {
     'id': 'current',
     'exported': '2026-10-16',
-    'names': {'en': 'RECOMMENDED 2', 'pt': 'RECOMENDADO 2'},
+    'names': {'en': 'OLDER COMPATIBILITY 2', 'pt': 'COMPATIBILIDADE ANTIGA 2'},
     'what': {
         'en': 'The maintainer\'s own setup: exact GPU reads (Precise), read-ahead off, no FSR 1 or sharpening, '
               'and the driver pipeline cache. Changes GPU accuracy too.',

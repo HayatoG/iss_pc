@@ -1,69 +1,74 @@
 import QtQuick
+import QtQuick.Controls.Basic
 import Launcher
 
 Rectangle {
     id: root
     property int current: 0
+    property bool modalBlocked: false
+    property var hiddenKeys: []
     signal pick(int index)
-    color: Theme.rail
-    width: Theme.railWidth
-    Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: Theme.railLine }
-
+    signal advancedRequested(bool on)
+    signal homeRequested()
+    height: 112; color: "#40102652"
     readonly property var entries: [
-        { key: "play", label: "nav_play" }, { key: "graphics", label: "nav_graphics" },
-        { key: "controls", label: "nav_controls" }, { key: "fixes", label: "nav_fixes" },
-        { key: "saves", label: "nav_saves" }, { key: "guides", label: "nav_guides" },
-        { key: "support", label: "nav_support" }, { key: "updates", label: "nav_updates" },
-        { key: "advanced", label: "nav_advanced" }, { key: "mods", label: "nav_mods" } ]
-
-    Column {
-        x: 16; y: 22; width: parent.width - 33; spacing: 3
-        Item {
-            width: parent.width; height: 76
-            Column {
-                x: 6; y: 2; spacing: 2
-                Text { text: "inFAMOUS"; color: "#ffffff"; font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 800 }); font.pixelSize: 34
-                       font.weight: Font.ExtraBold; font.capitalization: Font.AllUppercase
-                       font.letterSpacing: 1.7; lineHeight: 0.95 }
-                Text { text: "Second Son · PC"; color: Theme.smoke; font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 700 }); font.pixelSize: 15
-                       font.weight: Font.Bold; font.capitalization: Font.AllUppercase; font.letterSpacing: 4.8 }
-            }
-        }
-        Repeater {
-            model: root.entries
-            NavButton {
-                width: parent.width
-                label: Theme.tr(modelData.label)
-                iconPath: Theme.icons[modelData.key]
-                accent: Theme.accents[modelData.key]
-                current: root.current === index
-                badge: modelData.key === "updates" && Updates.available
-                onClicked: root.pick(index)
-            }
+        {key:"play",label:"nav_play"},{key:"trophies",label:"nav_trophies"},{key:"mods",label:"nav_mods"},
+        {key:"graphics",label:"nav_graphics"},{key:"controls",label:"nav_controls"},{key:"saves",label:"nav_saves"},
+        {key:"updates",label:"nav_updates"},{key:"support",label:"nav_support"},{key:"advanced",label:"nav_advanced"},{key:"fixes",label:"nav_fixes"}]
+    function controllerOnTab() { for (var i = 0; i < entries.length; ++i) { var nav = navRepeater.itemAt(i); if (nav && nav.activeFocus) return true } return false }
+    function controllerHasFocus() { return languageButton.activeFocus || advancedButton.activeFocus || controllerOnTab() }
+    function focusCurrent() { var item = navRepeater.itemAt(current); if (item) item.forceActiveFocus() }
+    function moveFocus(index, delta) {
+        for (var next = index + delta; next >= 0 && next < entries.length; next += delta) {
+            var item = navRepeater.itemAt(next)
+            if (item && item.visible) { item.forceActiveFocus(); return }
         }
     }
-
-    Column {
-        anchors.bottom: parent.bottom; anchors.bottomMargin: 22
-        x: 22; width: parent.width - 44; spacing: 12
+    Row {
+        x: 40; y: 13; spacing: 14
+        Text { text: "inFAMOUS"; color: "white"; font.family: Backend.fontDisplay; font.pixelSize: 25; font.weight: Font.Bold; anchors.verticalCenter: parent.verticalCenter }
+        Text { text: "PC  /  Second Son + First Light"; color: "#b9d8f6"; font.family: Theme.fontText; font.pixelSize: 13; anchors.verticalCenter: parent.verticalCenter }
+    }
+    Row {
+        anchors.right: parent.right; anchors.rightMargin: 40; y: 13; spacing: 22
+        Text { text: Backend.footerVersion; color: "#b9d8f6"; font.family: Theme.fontText; font.pixelSize: 12; anchors.verticalCenter: parent.verticalCenter }
+        ConsoleButton { id: languageButton; objectName: "launcherLanguage"; height: 30; width: 66; text: Backend.lang === "pt_BR" ? "PT-BR" : "EN-US"; onClicked: Backend.setLang(Backend.lang === "pt_BR" ? "en_US" : "pt_BR") }
+        ConsoleButton { id: advancedButton; objectName: "launcherAdvanced"; height: 30; width: Backend.lang === "pt_BR" ? 184 : 146; text: Theme.tr("adv_tabs_label"); onClicked: root.advancedRequested(!Backend.showAdvanced) }
+        Text {
+            id: clock; color: "white"; font.family: Theme.fontText; font.pixelSize: 16
+            anchors.verticalCenter: parent.verticalCenter; text: Qt.formatTime(new Date(), "hh:mm")
+            Timer { interval: 10000; repeat: true; running: root.visible; onTriggered: clock.text = Qt.formatTime(new Date(), "hh:mm") }
+        }
+    }
+    Flickable {
+        x: 40; y: 56; width: parent.width - 80; height: 50; clip: true
+        contentWidth: navRow.width; contentHeight: height; boundsBehavior: Flickable.StopAtBounds
         Row {
-            spacing: 6; width: parent.width
+            id: navRow; spacing: 8
             Repeater {
-                model: [ { code: "pt_BR", label: "PT-BR" }, { code: "en_US", label: "EN-US" } ]
-                Rectangle {
-                    readonly property bool on: Backend.lang === modelData.code
-                    width: (parent.width - 6) / 2; height: 34; radius: 8
-                    color: on ? Theme.navOn : "transparent"
-                    border.width: 1; border.color: on ? Theme.smoke : Theme.chipLine
-                    Text { anchors.centerIn: parent; text: modelData.label; color: parent.on ? "#fff" : Theme.textMuted
-                           font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.Bold }
-                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Backend.setLang(modelData.code) }
+                id: navRepeater; model: root.entries
+                FocusScope {
+                    id: nav
+                    visible: root.hiddenKeys.indexOf(modelData.key) < 0
+                    readonly property bool selected: root.current === index
+                    width: selected ? 148 : 90; height: 46; activeFocusOnTab: true
+                    Rectangle { anchors.fill: parent; color: root.modalBlocked ? "transparent" : nav.selected ? "#26ffffff" : navMouse.containsMouse || nav.activeFocus ? "#15ffffff" : "transparent" }
+                    Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 2; color: "white"; visible: !root.modalBlocked && (nav.selected || nav.activeFocus) }
+                    Icon { path: Theme.icons[modelData.key]; size: 22; color: "white"; anchors.verticalCenter: parent.verticalCenter; x: nav.selected ? 14 : (nav.width - 22) / 2 }
+                    Text { visible: nav.selected; text: Theme.tr(modelData.label); color: "white"; font.family: Theme.fontText; font.pixelSize: 14; x: 47; width: parent.width - 54; anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight }
+                    Rectangle { visible: modelData.key === "updates" && Updates.available; x: parent.width - 14; y: 7; width: 6; height: 6; radius: 3; color: Theme.warn }
+                    MouseArea { id: navMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: { nav.forceActiveFocus(); root.pick(index) } }
+                    ToolTip.visible: navMouse.containsMouse; ToolTip.delay: 500; ToolTip.text: Theme.tr(modelData.label)
+                    Keys.onReturnPressed: root.pick(index)
+                    Keys.onSpacePressed: root.pick(index)
+                    Keys.onLeftPressed: root.moveFocus(index, -1)
+                    Keys.onRightPressed: root.moveFocus(index, 1)
+                    Keys.onDownPressed: root.homeRequested()
+                    Accessible.role: Accessible.Button; Accessible.name: Theme.tr(modelData.label)
+                    Accessible.onPressAction: root.pick(index)
                 }
             }
         }
-        Text {
-            text: (Backend.version ? Backend.version + " · " : "") + Theme.tr("footer_credit") + "\n" + Theme.tr("footer_license")
-            color: Theme.textFaint; font.family: Theme.fontText; font.pixelSize: 12; lineHeight: 1.25
-        }
     }
+    Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: "#25ffffff" }
 }

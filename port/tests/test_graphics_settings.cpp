@@ -29,7 +29,7 @@ static void SetEnv(const char* name, const char* value) {
 
 int main() {
     TlgSettings::Values fresh;
-    assert(fresh.iss_native_ui_16_9==1 && !fresh.iss_native_hud_edges);
+    assert(fresh.iss_native_ui_16_9==0 && fresh.iss_native_hud_edges); // wide UI canvas + HUD at edges (2026-11-07)
     assert(G::ParseDisplayMode("borderless") == G::Borderless && G::ParseDisplayMode("bogus") == G::Windowed);
     assert(G::ParseFpsLimit(240) == 240 && G::ParseFpsLimit(75) == 0);
     assert(G::ParseResolution("1440p") == 3 && G::ParseResolution("8K") == 0);

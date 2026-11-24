@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <string>
 #include <boost/container/small_vector.hpp>
+#include <fmt/format.h>
 
+#include "../../../gpu/shader_salt.h"
 #include "common/perf_stats.h"
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
@@ -10,6 +14,9 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
+
+extern bool g_iss_pipeline_robustness; // gpu/overrides/vk_instance.cpp
+extern bool g_iss_pipeline_stats;      // gpu/overrides/vk_instance.cpp
 
 ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
                                  DescriptorHeap& desc_heap, const Shader::Profile& profile,
@@ -123,14 +130,62 @@ void ComputePipeline::CompileVariant(bool fast) {
         .module = module,
         .pName = "main",
     };
+    // ISS_NO_ROBUST_SHADERS (gpu/shader_salt.h): no bounds checks on this pipeline's buffers.
+    const bool no_robust = g_iss_pipeline_robustness &&
+                           iss::no_robust::Matches(stages[int(Shader::SwStage::Compute)]->pgm_hash);
+    const vk::PipelineRobustnessCreateInfoEXT robustness_ci = {
+        .storageBuffers = vk::PipelineRobustnessBufferBehaviorEXT::eDisabled,
+        .uniformBuffers = vk::PipelineRobustnessBufferBehaviorEXT::eDisabled,
+        .vertexInputs = vk::PipelineRobustnessBufferBehaviorEXT::eDeviceDefault,
+        .images = vk::PipelineRobustnessImageBehaviorEXT::eDeviceDefault,
+    };
+    if (no_robust && !fast) {
+        std::fprintf(stderr, "ISS_NO_ROBUST_SHADERS pipeline %08x: buffer robustness off\n",
+                     u32(stages[int(Shader::SwStage::Compute)]->pgm_hash));
+    }
+    // ISS_SHADER_STATS (gpu/shader_salt.h): the driver's statistics of this pipeline.
+    const u64 pgm_hash = stages[int(Shader::SwStage::Compute)]->pgm_hash;
+    const bool capture_stats = g_iss_pipeline_stats && !fast && iss::shader_stats::Matches(pgm_hash);
+    vk::PipelineCreateFlags create_flags =
+        fast ? vk::PipelineCreateFlagBits::eDisableOptimization : vk::PipelineCreateFlags{};
+    if (capture_stats) create_flags |= vk::PipelineCreateFlagBits::eCaptureStatisticsKHR;
     const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
-        .flags = fast ? vk::PipelineCreateFlagBits::eDisableOptimization : vk::PipelineCreateFlags{},
+        .pNext = no_robust ? &robustness_ci : nullptr,
+        .flags = create_flags,
         .stage = shader_ci,
         .layout = *pipeline_layout,
     };
     const auto device = instance.GetDevice();
     auto [pipeline_result, pipe] =
         device.createComputePipelineUnique(vk_pipeline_cache, compute_pipeline_ci);
+    if (capture_stats && pipeline_result == vk::Result::eSuccess) {
+        auto [props_result, props] =
+            device.getPipelineExecutablePropertiesKHR(vk::PipelineInfoKHR{.pipeline = *pipe});
+        for (u32 e = 0; props_result == vk::Result::eSuccess && e < props.size(); ++e) {
+            auto [stats_result, stats] = device.getPipelineExecutableStatisticsKHR(
+                vk::PipelineExecutableInfoKHR{.pipeline = *pipe, .executableIndex = e});
+            std::string line;
+            for (const auto& s : stats) {
+                line += fmt::format(" [{}=", s.name.data());
+                switch (s.format) {
+                case vk::PipelineExecutableStatisticFormatKHR::eBool32:
+                    line += fmt::format("{}]", s.value.b32);
+                    break;
+                case vk::PipelineExecutableStatisticFormatKHR::eInt64:
+                    line += fmt::format("{}]", s.value.i64);
+                    break;
+                case vk::PipelineExecutableStatisticFormatKHR::eUint64:
+                    line += fmt::format("{}]", s.value.u64);
+                    break;
+                case vk::PipelineExecutableStatisticFormatKHR::eFloat64:
+                    line += fmt::format("{:.2f}]", s.value.f64);
+                    break;
+                }
+            }
+            std::fprintf(stderr, "SHADER_STATS %08x %s:%s\n", u32(pgm_hash),
+                         props[e].name.data(), line.c_str());
+        }
+    }
     if (pipeline_result != vk::Result::eSuccess && tiered) {
         if (fast) {
             LOG_WARNING(Render_Vulkan, "Fast compute creation failed ({}); using normal compilation",

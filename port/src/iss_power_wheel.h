@@ -10,6 +10,9 @@ void runtime_power_wheel_load_begin(void);
 void runtime_power_wheel_tick(void);
 void runtime_power_wheel_request(int index);
 int runtime_power_wheel_gameplay(void);
+/* Verified and not paused (the game's pause counter only): unlike runtime_power_wheel_gameplay(),
+ * cutscenes count as not paused, so the pause-menu 16:9 presentation does not box them in. */
+int runtime_power_wheel_unpaused(void);
 void runtime_power_wheel_status(IssPowerWheelStatus *out);
 void runtime_power_wheel_visual(int open,int choice);
 void runtime_power_wheel_visual_status(int *open,int *choice);

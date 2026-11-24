@@ -47,9 +47,10 @@ def _bp(n, default, shader, live, name, what, source, risky=False):
                  name, what, shader=shader, live=live, pass_env=True, risky=risky, source=source)
 
 
-def _ab(key, env, default, shader, live, name, what, store='ini', pass_env=True, broken=False):
+def _ab(key, env, default, shader, live, name, what, store='ini', pass_env=True, broken=False, hidden=False):
     return _make(env, 'ab', key, env, 'bool', None if default is None else '1' if default else '0',
-                 name, what, shader=shader, live=live, store=store, pass_env=pass_env, broken=broken)
+                 name, what, shader=shader, live=live, store=store, pass_env=pass_env, broken=broken,
+                 hidden=hidden)
 
 
 def _ab_choice(key, env, default, choices, name, what, **kw):
@@ -138,12 +139,12 @@ MENU = [
           choices=(('0', 'Off', 'Desligado'), ('30', '30 FPS', '30 FPS'), ('45', '45 FPS', '45 FPS'),
                    ('60', '60 FPS', '60 FPS'))),
     _menu('View', 'quality_floor', 'int', '1', ('Minimum dynamic quality level', 'Nível mínimo da qualidade dinâmica'),
-          ('The game steps its quality level (0 best, 14 lowest: shorter LOD, fewer shadow cascades, fewer objects) '
+          ('The game steps its quality level (0 best, 12 lightest here: shorter LOD, fewer shadow cascades, fewer objects) '
            'up in heavy scenes and back down in light ones. Raising the minimum keeps the lighter levels: more FPS '
            'on weak hardware, less detail.',
-           'O jogo sobe o nível de qualidade (0 melhor, 14 mais baixo: LOD mais curto, menos cascatas de sombra, '
+           'O jogo sobe o nível de qualidade (0 melhor, 12 o mais leve aqui: LOD mais curto, menos cascatas de sombra, '
            'menos objetos) em cenas pesadas e desce nas leves. Subir o mínimo mantém os níveis mais leves: '
-           'mais FPS em máquina fraca, menos detalhe.'), lo=0, hi=14),
+           'mais FPS em máquina fraca, menos detalhe.'), lo=0, hi=12),   # 12 = the game's cap (tlg_quality.h, 2026-11-23)
     _make('menu:draw_budget', 'menu', 'draw_budget', '', 'int', '100',
           ('Draw list budget (next start)', 'Orçamento das listas de draw (próximo início)'),
           ("Share of the game's 24 MB / 10 MB frame command lists. Lower makes the game cut LOD, shadows and detail "
@@ -155,7 +156,9 @@ MENU = [
           ('Negative: sharper textures at a distance (more shimmer, a little more GPU). Positive: blurrier.',
            'Negativo: texturas mais nítidas ao longe (mais cintilação, um pouco mais de GPU). Positivo: mais borradas.'),
           lo=-3.0, hi=3.0),
-    _menu('Performance', 'fps_limit', 'choice', '0', ('Frame rate limit', 'Limite de FPS'),
+    # Default '60' (2026-11-23): the game's own default since 2026-11-05 (tlg_settings.h fps_limit{60}). It was
+    # '0' here, so choosing "Unlimited" removed the key and the game quietly stayed at 60.
+    _menu('Performance', 'fps_limit', 'choice', '60', ('Frame rate limit', 'Limite de FPS'),
           ('Caps the presented frames. The game runs at 30 FPS (as on PS4).',
            'Limita os quadros apresentados. O jogo roda a 30 FPS (como no PS4).'),
           choices=(('24', '24', '24'), ('30', '30', '30'), ('60', '60', '60'), ('120', '120', '120'), ('240', '240', '240'),
@@ -285,21 +288,23 @@ DIAGNOSTICS = [
     _ab('async_shaders', 'TLG_ASYNC_SHADERS', False, False, True, ('Asynchronous shader compile', 'Compilação assíncrona de shaders'),
         ('Compiles pipelines off the GPU thread: fewer hitches, but a draw whose pipeline is not ready yet is skipped and the object flashes for a frame. Off by default since 2026-10-16. Also in the in-game menu.',
          'Compila pipelines fora da thread da GPU: menos engasgos, mas um draw cuja pipeline ainda não está pronta é pulado e o objeto pisca por um quadro. Desligada por padrão desde 16/10/2026. Também no menu do jogo.'),
-        pass_env=False),
+        pass_env=False, hidden=True),   # 2026-11-23: fixed off (infamous_run.LOCKED_GPU_ENV)
     _ab('deferred_readback', 'TLG_DEFERRED_READBACK', True, False, False, ('Deferred GPU readbacks', 'Leituras da GPU adiadas'),
         ('Only the thread that reads GPU results waits, not the whole GPU. Needs "Precise" GPU accuracy.',
          'Só a thread que lê resultados da GPU espera, não a GPU inteira. Precisa da precisão "Preciso".'),
-        store='launcher', pass_env=False),
+        store='launcher', pass_env=False, hidden=True),   # 2026-11-23: fixed on (infamous_run.LOCKED_GPU_ENV)
     _ab('stale_readback', 'TLG_STALE_READBACK', False, False, False, ('Stale readbacks', 'Leituras da GPU com um quadro de atraso'),
         ('CPU reads see the last published GPU version instead of waiting (needs deferred readbacks).',
          'A CPU lê a última versão publicada pela GPU em vez de esperar (precisa das leituras adiadas).'),
-        pass_env=False),
+        pass_env=False, hidden=True),   # 2026-11-23: fixed off (infamous_run.LOCKED_GPU_ENV)
     _ab('background_warmup', 'TLG_BACKGROUND_WARMUP', True, False, False, ('Load pipelines while playing', 'Carregar pipelines durante o jogo'),
         ('The cached pipelines load in the background (a corner note shows progress); off blocks until all are loaded.',
-         'Os pipelines em cache carregam em segundo plano (uma nota no canto mostra o progresso); desligado espera carregar tudo.')),
+         'Os pipelines em cache carregam em segundo plano (uma nota no canto mostra o progresso); desligado espera carregar tudo.'),
+        hidden=True),   # 2026-11-23: fixed on (infamous_run.LOCKED_GPU_ENV)
     _ab('drain_sleep', 'TLG_DRAIN_SLEEP', True, False, False, ('GPU command thread sleeps while waiting', 'Thread de comandos da GPU dorme ao esperar'),
         ('While it waits for draw recording the GPU command thread sleeps instead of spinning: one core less busy, no FPS difference measured (16 threads: 30.8-32.9 either way). Off restores the spin for comparisons.',
-         'Enquanto espera a gravação dos draws, a thread de comandos da GPU dorme em vez de girar: um núcleo a menos ocupado, sem diferença de FPS medida (16 threads: 30,8-32,9 nos dois modos). Desligado volta ao giro, para comparar.')),
+         'Enquanto espera a gravação dos draws, a thread de comandos da GPU dorme em vez de girar: um núcleo a menos ocupado, sem diferença de FPS medida (16 threads: 30,8-32,9 nos dois modos). Desligado volta ao giro, para comparar.'),
+        hidden=True),   # 2026-11-23: fixed on (infamous_run.LOCKED_GPU_ENV)
     _ab('pipeline_binaries', 'TLG_PIPELINE_BINARIES', False, False, False, ('Pipeline binaries (VK_KHR_pipeline_binary)', 'Pipeline binaries (VK_KHR_pipeline_binary)'),
         ('Still crashes the game on the NVIDIA 595 driver; off by default in this port.',
          'Ainda derruba o jogo no driver NVIDIA 595; desligado por padrão neste port.'),
@@ -357,7 +362,11 @@ DIAGNOSTICS = [
                 'quanto de uma luz está visível é falso. 1 = nada visível, 2 = tudo visível, 3 = contagem zero; '
                 '4 = oclusão real contada pela GPU (o padrão); 0 é o comportamento antigo. '
                 'Mande o log e uma captura de cada modo.'),
-               source='diagnóstico (liverpool.cpp ZPASS_DONE)'),
+               source='diagnóstico (liverpool.cpp ZPASS_DONE)',
+               # 2026-11-23: fixed at 4 (real occlusion, the game's own default): not shown by the
+               # launchers and never passed, so an older saved choice no longer changes anything.
+               # Renderer v2 always counts real occlusion (ISS_REAL_OCCLUSION=1 in gpu_v2/defaults.env).
+               pass_env=False, hidden=True),
     _ab('verbose_log', 'TLG_VERBOSE_LOG', False, False, False, ('Detailed log (for bug reports)', 'Log detalhado (para relatórios de problema)'),
         ('Turns on every safe trace switch, the GPU log at debug level, timestamps and thread ids on GPU lines, and extra '
          'messages for files, gamepads, semaphores, audio and boot steps. The log gets very large and the game may run a '

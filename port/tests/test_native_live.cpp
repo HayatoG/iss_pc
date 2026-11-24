@@ -12,6 +12,9 @@
 #include <windows.h>
 #endif
 static unsigned calls;static uintptr_t object;static int observed_frame_index;
+// Player camera hook absent: the cutscene framing never applies here (it calls game code).
+extern "C" int runtime_mouse_aim_camera_live(void){return -1;}
+extern "C" unsigned runtime_mouse_aim_camera_calls(void){return 0;}
 static void __attribute__((ms_abi)) observe(const void* p,int frame,uint64_t){calls++;object=(uintptr_t)p;observed_frame_index=frame;}
 static void __attribute__((ms_abi)) observeObject(const void* p){object=(uintptr_t)p;calls++;}
 int main(){
@@ -159,5 +162,22 @@ int main(){
  assert(runtime_native_plan()->width==2560 && runtime_native_plan()->height==1440);
  assert(!runtime_native_live_request_config({3,75,0,1})); // 2580 exceeds 2560
  assert(runtime_native_live_request_config({3,74,0,1})); // 2546 x 1066 fits
+ // Wide UI canvas (2026-11-07): live resize is available, the HUD placement applies at once without a
+ // rebuild, lower resolutions queue the normal rebuild, the UI canvas keeps its startup size, and
+ // switching the UI layout itself still needs a restart.
+ runtime_native_safe_resize(p);assert(runtime_native_live_rebuild_state()==2);
+ runtime_native_dimension_resize(p,saved);
+ for(unsigned i=0;i<4;i++){uint32_t v=(uint32_t)saved[i==0?11:i==1?13:i==2?14:12];memcpy(p+(i<2?i*4:i*4+4),&v,4);}
+ p[0xdf0f08]=0;runtime_native_target_observer((void*)(base+0xe682b0),0);runtime_native_safe_resize(p);
+ assert(runtime_native_live_rebuild_state()==3);
+ IssNativePlan wide;assert(iss_native_plan({3,100,0,0},&wide)&&wide.ui_width==2580&&wide.ui_height==1080);
+ runtime_native_publish(1,"test",&wide);runtime_native_live_enable(cells,&wide);assert(runtime_native_live_enabled());
+ const int state_before=runtime_native_live_rebuild_state();
+ assert(runtime_native_live_request_config({3,100,1,0}));
+ assert(runtime_native_plan()->hud_edges==1&&runtime_native_plan()->width==3440&&runtime_native_live_rebuild_state()==state_before);
+ assert(strstr(runtime_native_live_reason(),"HUD placement"));
+ assert(!runtime_native_live_request_config({3,100,1,1})&&strstr(runtime_native_live_reason(),"UI layout"));
+ assert(runtime_native_live_request_config({3,75,1,0})&&runtime_native_live_rebuild_state()==1);
+ puts("Wide UI canvas: live HUD placement, live lower resolution, fixed UI canvas, layout change refused");
  puts("Native observer signatures, all-byte mismatch refusal, original prologues and executed ABI bridges passed");
 }

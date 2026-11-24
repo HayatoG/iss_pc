@@ -316,6 +316,81 @@ def download(target_dir, url=SOURCE_URL, progress=None, cancel=None, *, signatur
         raise DlssError('network', getattr(error, 'reason', error))
 
 
+# The bridge, when the project publishes it: an asset named tlg_dlss.dll on one of the newest releases
+# (pre-releases included) of the port's own repository. Nothing else is accepted.
+RELEASES_API = 'https://api.github.com/repos/HayatoG/iss_pc/releases?per_page=15'
+RELEASE_DOWNLOADS = 'https://github.com/HayatoG/iss_pc/releases/download/'
+BRIDGE_TEMP = 'tlg_dlss.download.dll'
+BRIDGE_MAX = 32 * 1024 * 1024
+
+
+def bridge_asset(releases_url=RELEASES_API, timeout=15, urlopen=None):
+    """(url, size) of the newest tlg_dlss.dll published on the port's releases; DlssError('unpublished')
+    when none has it."""
+    _check_url(releases_url)
+    request = urllib.request.Request(releases_url, headers={'User-Agent': 'infamous-pc-launcher',
+                                                            'Accept': 'application/vnd.github+json'})
+    opener = urlopen or (lambda r: urllib.request.urlopen(r, timeout=timeout, context=ssl.create_default_context()))
+    try:
+        with opener(request) as response:
+            rows = json.loads(response.read(4 * 1024 * 1024).decode('utf-8'))
+    except (urllib.error.URLError, OSError, ssl.SSLError, ValueError) as error:
+        raise DlssError('network', getattr(error, 'reason', error))
+    for release in rows if isinstance(rows, list) else []:
+        for asset in (release or {}).get('assets') or []:
+            url = str(asset.get('browser_download_url') or '')
+            if asset.get('name') == BRIDGE_NAME and url.startswith(RELEASE_DOWNLOADS) \
+                    and isinstance(asset.get('size'), int) and 0 < asset['size'] <= BRIDGE_MAX:
+                return url, asset['size']
+    raise DlssError('unpublished')
+
+
+def download_bridge(target_dir, progress=None, cancel=None, *, releases_url=RELEASES_API, timeout=30, urlopen=None):
+    """Downloads the port's tlg_dlss.dll into target_dir: a temporary name, checked (a 64-bit DLL that
+    exports TlgDlssGetApi, the exact size of the release), then renamed. Returns its Component."""
+    url, size = bridge_asset(releases_url, urlopen=urlopen)
+    _check_url(url)
+    cancel = cancel or threading.Event()
+    target_dir = Path(target_dir)
+    temp, final = target_dir / BRIDGE_TEMP, target_dir / BRIDGE_NAME
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise DlssError('write', error)
+    try:
+        request = urllib.request.Request(url, headers={'User-Agent': 'infamous-pc-launcher'})
+        opener = urlopen or (lambda r: urllib.request.urlopen(r, timeout=timeout, context=ssl.create_default_context()))
+        done = 0
+        with opener(request) as response, open(temp, 'wb') as out:
+            while True:
+                if cancel.is_set():
+                    raise DlssError('cancelled')
+                chunk = response.read(CHUNK)
+                if not chunk:
+                    break
+                done += len(chunk)
+                if done > size:
+                    raise DlssError('size', done)
+                out.write(chunk)
+                if progress:
+                    progress(done, size)
+        if done != size:
+            raise DlssError('network', f'{done} of {size} bytes')
+        if not inspect_bridge(temp).ok:
+            raise DlssError('bridge_invalid')
+        try:
+            os.replace(temp, final)
+        except OSError as error:
+            raise DlssError('write', error)
+        return Component('ok', final)
+    except DlssError:
+        _remove(temp)
+        raise
+    except (urllib.error.URLError, OSError, ssl.SSLError, ValueError) as error:
+        _remove(temp)
+        raise DlssError('network', getattr(error, 'reason', error))
+
+
 def inspect_nvidia_dll_for_download(path, signature_check, min_size, max_size):
     """The checks before a downloaded file replaces the DLL (the size limits are the caller's)."""
     size = Path(path).stat().st_size
@@ -378,6 +453,18 @@ TEXT = {
     'dlss_progress': ('Downloading… {done} of {total} MB', 'Baixando… {done} de {total} MB'),
     'dlss_progress_unknown': ('Downloading… {done} MB', 'Baixando… {done} MB'),
     'dlss_done': ('Done: DLSS {version} is in {path}.', 'Pronto: o DLSS {version} está em {path}.'),
+    'dlss_auto_working': ('DLSS selected: downloading what it needs (NVIDIA\'s nvngx_dlss.dll from github.com/NVIDIA/DLSS, '
+                          'under NVIDIA\'s licence, and the port\'s bridge)…',
+                          'DLSS escolhido: baixando o que ele precisa (o nvngx_dlss.dll da NVIDIA, de github.com/NVIDIA/DLSS, '
+                          'sob a licença da NVIDIA, e a ponte do port)…'),
+    'dlss_auto_ready': ('DLSS is ready: both files are in place. It applies on the next start.',
+                        'O DLSS está pronto: os dois arquivos estão no lugar. Vale na próxima abertura.'),
+    'dlss_auto_partial': ('DLSS is not ready yet: {detail} Until then the game uses FSR 3.1.',
+                          'O DLSS ainda não está pronto: {detail} Até lá o jogo usa o FSR 3.1.'),
+    'dlss_err_unpublished': ('The bridge tlg_dlss.dll is not published on the port\'s GitHub releases yet.',
+                             'A ponte tlg_dlss.dll ainda não foi publicada nos lançamentos do port no GitHub.'),
+    'dlss_err_bridge_invalid': ('The downloaded bridge is not a valid tlg_dlss.dll; it was discarded.',
+                                'A ponte baixada não é um tlg_dlss.dll válido; foi descartada.'),
     'dlss_err_url': ('The address is not allowed (HTTPS only).', 'O endereço não é permitido (só HTTPS).'),
     'dlss_err_network': ('The download failed: {detail}. Check the connection and try again; nothing was kept.',
                          'O download falhou: {detail}. Verifique a conexão e tente de novo; nada foi guardado.'),

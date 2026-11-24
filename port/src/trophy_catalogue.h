@@ -57,4 +57,37 @@ inline constexpr std::array<TrophyText,48> Catalogue{{
  {"Excessive Force","Kill exactly one enemy with a Karmic Streak."}
 }};
 constexpr const TrophyText* TextForTrophy(int id){return id>=0&&id<int(Catalogue.size())?&Catalogue[size_t(id)]:nullptr;}
+// inFAMOUS First Light (CUSA00575): 25 trophies, zero-based game IDs (order checked against the
+// game's own trophy icons, 2026-11-12).
+inline constexpr std::array<TrophyText,25> FirstLightCatalogue{{
+ {"Noble Achievement","Earn every other trophy."},
+ {"Lost","Suffer a loss (story)."},
+ {"Cracked","Endure a deception (story)."},
+ {"Betrayed","Experience a double-cross (story)."},
+ {"She's Ready","Complete the story."},
+ {"Illuminated","Collect every Neon Lumen."},
+ {"Blackout","Destroy every police drone."},
+ {"Lickety Pronto","Complete every Lumen Race."},
+ {"That's So Fetch","Complete every Neon Graffiti."},
+ {"Unleashed","Buy every upgrade."},
+ {"Novice","Complete 25% of the challenges."},
+ {"Professional","Complete 50% of the challenges."},
+ {"Expert","Complete 75% of the challenges."},
+ {"Perfectionist","Complete every challenge."},
+ {"Alpha Rescue Diamond","Score 500,000 points in Alpha Rescue."},
+ {"Alpha Survival Diamond","Score 500,000 points in Alpha Survival."},
+ {"Beta Rescue Diamond","Score 500,000 points in Beta Rescue."},
+ {"Beta Survival Diamond","Score 500,000 points in Beta Survival."},
+ {"Gamma Survival Diamond","Score 500,000 points in Gamma Survival."},
+ {"Turret Syndrome","Overload 25 turrets."},
+ {"Great Responsibility","Save 50 hostages."},
+ {"Top of the Class","Earn 10,000,000 points in total."},
+ {"Event Horizon","Defeat 100 enemies with a Neon Singularity."},
+ {"...Bada Boom!","Defeat 20 enemies in a row with Homing Missiles."},
+ {"Fish in a Barrel","Get 25 Stasis + weak point kills."}
+}};
+constexpr const TrophyText* TextForTrophy(bool firstLight,int id){
+    if(!firstLight)return TextForTrophy(id);
+    return id>=0&&id<int(FirstLightCatalogue.size())?&FirstLightCatalogue[size_t(id)]:nullptr;
+}
 }

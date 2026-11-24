@@ -10,8 +10,11 @@ namespace TlgQuality {
 
 /// The game drops instances at random every frame from level 15 on (0.8% at 15, 3.1% at 16: lights,
 /// particles and objects blink), and levels 17 and up never leave the loading screen on the 11% save
-/// route (measured). Level 14 had the same frame rate as 16 there, so the governor and the manual floor stop here.
-inline constexpr int MaxLevel = 14;
+/// route (measured). Level 14 had the same frame rate as 16 there, so the governor and the manual floor stopped
+/// at 14 at first. 2026-11-23: capped at 12 for the F1 slider, tlg.ini, the governor and the floor. At 13 and 14
+/// the game unloads its sharp textures, and after going back to 0 they took minutes to stream in again; at 12
+/// they stayed and came back quickly up close (the owner's test, RTX 3080 Ti, 3440x1440).
+inline constexpr int MaxLevel = 12;
 
 /// Fed once a second with the frame rate and the draws per frame of that second.
 class Governor {

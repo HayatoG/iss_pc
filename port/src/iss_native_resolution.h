@@ -14,9 +14,11 @@
 #include <errno.h>
 #include "iss_native_exposure.h"
 
-enum { ISS_NATIVE_PRESETS = 6, ISS_NATIVE_SITE_COUNT = 18 };
-static const uint32_t iss_native_widths[] = {0,1920,2560,3440,3840,5120};
-static const uint32_t iss_native_heights[] = {0,1080,1440,1440,2160,1440};
+/* 6 and 7 (2026-11-05): the 1080-line ultrawides, 2560x1080 (21:9) and 3840x1080 (32:9). Added at
+ * the end so a saved iss_native_output keeps its meaning. */
+enum { ISS_NATIVE_PRESETS = 8, ISS_NATIVE_SITE_COUNT = 18 };
+static const uint32_t iss_native_widths[] = {0,1920,2560,3440,3840,5120,2560,3840};
+static const uint32_t iss_native_heights[] = {0,1080,1440,1440,2160,1440,1080,1080};
 typedef struct IssNativeConfig { int output, percent, hud_edges;
 #ifdef __cplusplus
     int ui_16_9=0;
@@ -39,6 +41,26 @@ static const unsigned char iss_native_projection[] = {
   0xc5,0xfa,0x2a,0x01,0xc5,0xfa,0x2a,0x08,0xb0,0x01,0xc5,0xfa,0x5e,0xc1
 };
 static const unsigned char iss_native_aspect_width[]={0x48,0x8d,0x0d,0xd3,0xc9,0x78,0x01};
+#include "iss_native_sites_fl.inc"
+/* Where one game's executable holds the native-rendering code: Second Son US 1.07 (and the European
+ * 1.07, same code) or First Light 1.04 (2026-11-12). The same plan and the same writes apply to both. */
+typedef struct {
+    const IssNativeSite *sites;                 /* ISS_NATIVE_SITE_COUNT entries */
+    uint32_t projection_at, aspect_at;          /* the two camera aspect loads (guarded, = sites 17/16) */
+    const unsigned char *projection, *aspect_width;
+    uint32_t exposure_allocator; const IssExposureSite *exposure;
+} IssNativeLayout;
+static const IssNativeLayout iss_native_layout_ss={iss_native_sites,0x58030c,0x5802e6,iss_native_projection,
+    iss_native_aspect_width,ISS_EXPOSURE_ALLOCATOR,iss_exposure_sites};
+static const IssNativeLayout iss_native_layout_fl={iss_native_sites_fl,0x65acc0,0x65ac9a,iss_native_projection_fl,
+    iss_native_aspect_width_fl,ISS_EXPOSURE_ALLOCATOR_FL,iss_exposure_sites_fl};
+/* The layout for a game's TITLE_ID / APP_VER (the code itself is still checked byte by byte), or NULL. */
+static inline const IssNativeLayout *iss_native_layout_for(const char *serial,const char *version){
+    if(!serial||!version)return NULL;
+    if(!strcmp(serial,"CUSA00223")&&!strcmp(version,"01.07"))return &iss_native_layout_ss;
+    if(!strcmp(serial,"CUSA00575")&&!strcmp(version,"01.04"))return &iss_native_layout_fl;
+    return NULL;
+}
 /* Temporal upscaling modes (iss_temporal_mode): the scene is the output divided by the FSR 3.1 ratio.
  * 0 keeps iss_native_percent as the player set it (100% = temporal anti-aliasing at the output
  * size); 1 Quality 1.5x, 2 Balanced 1.7x, 3 Performance 2.0x, 4 Ultra performance 3.0x. */
@@ -51,10 +73,12 @@ static inline int iss_native_integer(const char *s,int min,int max,int *out) {
     *out=(int)n; return 1;
 }
 /* Strict parsing: malformed native settings reject the request, not a silently
- * clamped substitute resolution. Missing keys default to off/100% and the
- * corrected 16:9 menu canvas. Explicit existing choices remain respected. */
+ * clamped substitute resolution. Missing keys default to off/100%, the UI canvas of
+ * the screen's own shape and the HUD at the screen edges (2026-11-07: menus laid out
+ * by the game for wide screens, checked in play at 3440x1440). Explicit existing
+ * choices remain respected. */
 static inline int iss_native_config(FILE *f, IssNativeConfig *c) {
-    *c=(IssNativeConfig){0,100,0,1,0};
+    *c=(IssNativeConfig){0,100,1,0,0};
     if (!f) return 1;
     char line[1024]; int valid=1;
     while (fgets(line,sizeof(line),f)) {
@@ -158,8 +182,8 @@ static inline int iss_native_retarget(int old_output,int percent,int new_output)
     return pick.percent;
 }
 static inline void iss_native_write32(unsigned char *p,uint32_t x) {memcpy(p,&x,4);}
-static inline void iss_native_changes(const IssNativePlan *p,IssNativeSite sites[ISS_NATIVE_SITE_COUNT]) {
-    memcpy(sites,iss_native_sites,sizeof(iss_native_sites));
+static inline void iss_native_changes_for(const IssNativeLayout *layout,const IssNativePlan *p,IssNativeSite sites[ISS_NATIVE_SITE_COUNT]) {
+    memcpy(sites,layout->sites,sizeof(IssNativeSite)*ISS_NATIVE_SITE_COUNT);
     const uint32_t values[]={p->width,p->height,p->width,p->height,p->ui_width,p->ui_height,p->width,p->height};
     const unsigned imm[]={3,3,2,3,4,3,1,1};
     for(unsigned i=0;i<8;i++){
@@ -176,42 +200,51 @@ static inline void iss_native_changes(const IssNativePlan *p,IssNativeSite sites
     for(unsigned i=16;i<18;i++){
         memcpy(sites[i].after,sites[i].before,sites[i].length);
         if(p->ui_16_9){
-            const uint32_t target=i==16?0x1eff4a:0x1eff51;
+            /* the render width/height immediates of sites 0 and 1 (Second Son: 0x1eff4a / 0x1eff51) */
+            const uint32_t target=i==16?layout->sites[0].offset+3:layout->sites[1].offset+3;
             const int32_t displacement=(int32_t)((int64_t)target-(sites[i].offset+7));
             memcpy(sites[i].after+3,&displacement,4);
         }
     }
+}
+static inline void iss_native_changes(const IssNativePlan *p,IssNativeSite sites[ISS_NATIVE_SITE_COUNT]) {
+    iss_native_changes_for(&iss_native_layout_ss,p,sites);
 }
 /* Atomic preflight: a single incompatible byte, short image, wrong region or
  * other render patch refuses ALL writes, including lighting capacity. */
 static inline int iss_native_apply(unsigned char *image,uint64_t size,const char *serial,
                                    const char *version,IssNativeConfig config) {
     IssNativePlan plan;
-    if(!image || strcmp(serial,"CUSA00223") || strcmp(version,"01.07") || !iss_native_plan(config,&plan))return 0;
+    const IssNativeLayout *L=iss_native_layout_for(serial,version);
+    if(!image || !L || !iss_native_plan(config,&plan))return 0;
     const uint32_t exposure_entries=iss_native_exposure_entries(plan.width,plan.height);
-    if(!exposure_entries || (exposure_entries>ISS_EXPOSURE_ORIGINAL_ENTRIES&&!iss_native_exposure_guard(image,size)))return 0;
-    if(size<0x58030cu+sizeof(iss_native_projection) ||
-       memcmp(image+0x58030c,iss_native_projection,sizeof(iss_native_projection)) ||
-       memcmp(image+0x5802e6,iss_native_aspect_width,sizeof(iss_native_aspect_width)))return 0;
-    IssNativeSite sites[ISS_NATIVE_SITE_COUNT];iss_native_changes(&plan,sites);
+    if(!exposure_entries || (exposure_entries>ISS_EXPOSURE_ORIGINAL_ENTRIES&&
+        !iss_native_exposure_guard_at(image,size,L->exposure_allocator,L->exposure)))return 0;
+    if(size<(uint64_t)L->projection_at+sizeof(iss_native_projection) ||
+       memcmp(image+L->projection_at,L->projection,sizeof(iss_native_projection)) ||
+       memcmp(image+L->aspect_at,L->aspect_width,sizeof(iss_native_aspect_width)))return 0;
+    IssNativeSite sites[ISS_NATIVE_SITE_COUNT];iss_native_changes_for(L,&plan,sites);
     for(unsigned i=0;i<ISS_NATIVE_SITE_COUNT;i++) {
         const IssNativeSite *s=sites+i;
         if(s->offset>size || s->length>size-s->offset || memcmp(image+s->offset,s->before,s->length))return 0;
     }
     for(unsigned i=0;i<ISS_NATIVE_SITE_COUNT;i++)memcpy(image+sites[i].offset,sites[i].after,sites[i].length);
-    if(exposure_entries>ISS_EXPOSURE_ORIGINAL_ENTRIES)iss_native_exposure_write(image,exposure_entries);
+    if(exposure_entries>ISS_EXPOSURE_ORIGINAL_ENTRIES)iss_native_exposure_write_at(image,exposure_entries,L->exposure);
     return 1;
 }
 /* Private capacity-only control: increase the two already-guarded lighting
  * immediates after native startup patching. Keep dimensions and UI unchanged.
  * Preflight both entire instructions before either write. */
-static inline int iss_native_raise_light_capacity(unsigned char *image,size_t size,const IssNativePlan *plan,uint32_t entries){
-    if(!image||!plan||entries<plan->light_entries||entries<0x320000u||entries>0x400000u||(entries&65535u))return 0;
-    IssNativeSite sites[ISS_NATIVE_SITE_COUNT];iss_native_changes(plan,sites);
+static inline int iss_native_raise_light_capacity_for(const IssNativeLayout *layout,unsigned char *image,size_t size,const IssNativePlan *plan,uint32_t entries){
+    if(!layout||!image||!plan||entries<plan->light_entries||entries<0x320000u||entries>0x400000u||(entries&65535u))return 0;
+    IssNativeSite sites[ISS_NATIVE_SITE_COUNT];iss_native_changes_for(layout,plan,sites);
     for(unsigned i=14;i<16;i++)if(sites[i].offset>size||sites[i].length>size-sites[i].offset||
         memcmp(image+sites[i].offset,sites[i].after,sites[i].length))return 0;
     iss_native_write32(image+sites[14].offset+3,entries);
     iss_native_write32(image+sites[15].offset+2,entries);return 1;
+}
+static inline int iss_native_raise_light_capacity(unsigned char *image,size_t size,const IssNativePlan *plan,uint32_t entries){
+    return iss_native_raise_light_capacity_for(&iss_native_layout_ss,image,size,plan,entries);
 }
 #ifdef __cplusplus
 extern "C" {

@@ -42,11 +42,12 @@ std::string Fingerprint(const std::vector<unsigned char>& b){
     uint64_t hash=14695981039346656037ull;for(auto c:b){hash^=c;hash*=1099511628211ull;}
     char out[17];std::snprintf(out,sizeof(out),"%016llx",(unsigned long long)hash);return out;
 }
-Progress Load(const std::filesystem::path& path,const std::string& fingerprint,int total,const std::string& save_identity){
-    Regular(path);Progress out{fingerprint,{},save_identity,{}};if(!std::filesystem::exists(path))return out;
+Progress Load(const std::filesystem::path& path,const std::string& fingerprint,int total,const std::string& save_identity,
+              const std::string& title_id){
+    Regular(path);Progress out{fingerprint,{},save_identity,{},title_id};if(!std::filesystem::exists(path))return out;
     if(std::filesystem::file_size(path)>65536)throw std::runtime_error("Oversized trophy ledger");
     std::ifstream input(path);auto j=nlohmann::json::parse(input);
-    if(j.at("schema")!=1||j.at("title_id")!="CUSA00223"||j.at("package_fingerprint")!=fingerprint)throw std::runtime_error("Trophy ledger identity mismatch");
+    if(j.at("schema")!=1||j.at("title_id")!=title_id||j.at("package_fingerprint")!=fingerprint)throw std::runtime_error("Trophy ledger identity mismatch");
     if(j.value("save_identity",std::string{})!=save_identity)throw std::runtime_error("Trophy save identity mismatch");
     auto rows=j.at("earned");if(!rows.is_array()||rows.size()>128)throw std::runtime_error("Invalid trophy ledger");
     for(auto& row:rows){int id=row.at("id").get<int>();int64_t timestamp=row.at("time").get<int64_t>();
@@ -58,7 +59,7 @@ void Save(const std::filesystem::path& path,const Progress& p){
     Regular(path);Regular(path.parent_path());std::filesystem::create_directories(path.parent_path());
     auto temp=path;temp+=".tmp";Regular(temp);auto backup=path;backup+=".bak";Regular(backup);
     nlohmann::json rows=nlohmann::json::array();for(auto [id,time]:p.earned)rows.push_back({{"id",id},{"time",time}});
-    nlohmann::json j={{"schema",1},{"title_id","CUSA00223"},{"package_fingerprint",p.fingerprint},{"save_identity",p.save_identity},{"earned",rows},{"recovered",p.recovered}};
+    nlohmann::json j={{"schema",1},{"title_id",p.title_id},{"package_fingerprint",p.fingerprint},{"save_identity",p.save_identity},{"earned",rows},{"recovered",p.recovered}};
     {std::ofstream file(temp,std::ios::binary|std::ios::trunc);file<<j.dump(2)<<'\n';file.flush();if(!file)throw std::runtime_error("Could not write trophy ledger");}
     if(std::filesystem::exists(path))std::filesystem::copy_file(path,backup,std::filesystem::copy_options::overwrite_existing);
 #ifdef _WIN32

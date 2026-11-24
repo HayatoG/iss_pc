@@ -75,8 +75,12 @@ class ChipTests(unittest.TestCase):
         kw.setdefault('states', {})
         kw.setdefault('problems', [])
         kw.setdefault('cache_bytes', 0)
-        settings = dict(settings, game_dir=kw.pop('game_dir', '/some/game'))
-        return logic.compute_chips(settings, logic.Translator(settings), **kw)
+        with tempfile.TemporaryDirectory() as root:
+            sfo = Path(root) / 'sce_sys' / 'param.sfo'
+            sfo.parent.mkdir()
+            sfo.write_bytes(make_sfo({'APP_VER': '01.07', 'TITLE_ID': 'CUSA00223'}))
+            settings = dict(settings, game_dir=kw.pop('game_dir', root))
+            return logic.compute_chips(settings, logic.Translator(settings), **kw)
 
     def test_everything_ready(self):
         chips, ready = self.chips(gpu=('NVIDIA GeForce RTX 2060', '1.3'), pad='DualSense',
@@ -84,7 +88,7 @@ class ChipTests(unittest.TestCase):
         self.assertTrue(ready)
         texts = [c['text'] for c in chips]
         self.assertIn('NVIDIA GeForce RTX 2060 · Vulkan 1.3', texts)
-        self.assertIn('Pasta do jogo OK · update 1.07', texts)
+        self.assertIn('Pasta do jogo OK · update 1.07 · CUSA00223', texts)
         self.assertIn('Perfil: Recomendado', texts)
         self.assertIn('Controle: DualSense', texts)
         self.assertTrue(any(t.startswith('Cache de shaders: 218') for t in texts))
@@ -105,7 +109,7 @@ class ChipTests(unittest.TestCase):
         chips, ready = self.chips(problems=[('not_built', '/x/tlg-probe')])
         self.assertFalse(ready)
         texts = [c['text'] for c in chips]
-        self.assertIn('Pasta do jogo OK · update 1.07', texts)
+        self.assertIn('Pasta do jogo OK · update 1.07 · CUSA00223', texts)
         self.assertIn('Port não compilado (rode o build.sh)', texts)
 
     def test_profile_counts_changes_like_the_tk_window(self):
@@ -115,7 +119,7 @@ class ChipTests(unittest.TestCase):
     def test_english(self):
         chips, _ = self.chips(EN, gpu=('GPU', ''), pad=None)
         texts = [c['text'] for c in chips]
-        self.assertIn('Game folder OK · update 1.07', texts)
+        self.assertIn('Game folder OK · update 1.07 · CUSA00223', texts)
         self.assertIn('No controller detected', texts)
 
 

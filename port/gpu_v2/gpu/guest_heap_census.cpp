@@ -159,4 +159,28 @@ bool Read(Heap out[2]) {
     return true;
 }
 
+bool SystemRam(std::uint64_t& available, std::uint64_t& total) {
+#ifdef _WIN32
+    MEMORYSTATUSEX s{};
+    s.dwLength = sizeof(s);
+    if (!GlobalMemoryStatusEx(&s)) return false;
+    available = s.ullAvailPhys;
+    total = s.ullTotalPhys;
+    return true;
+#else
+    std::FILE* f = std::fopen("/proc/meminfo", "r");
+    if (!f) return false;
+    char line[128];
+    unsigned long long kb = 0, avail = 0, tot = 0;
+    while (std::fgets(line, sizeof(line), f)) {
+        if (std::sscanf(line, "MemTotal: %llu", &kb) == 1) tot = kb;
+        if (std::sscanf(line, "MemAvailable: %llu", &kb) == 1) avail = kb;
+    }
+    std::fclose(f);
+    available = avail << 10;
+    total = tot << 10;
+    return tot != 0;
+#endif
+}
+
 } // namespace iss::heap_census

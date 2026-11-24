@@ -209,6 +209,8 @@ void Rasterizer::NativeGbufferRangeEnd(const iss::native_gbuffer::Batch* batch) 
 u32 Rasterizer::NativeGbufferExecute(const iss::native_gbuffer::Batch& b,
                                      const std::function<void(const u32*)>& begin_draw,
                                      const std::function<void()>& end_draw) {
+    // ISS_GUEST_SYNC_BARRIERS: packets of this native range were not seen by the command processor.
+    SCOPE_EXIT { NoteGuestSync(); };
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::GbufferNative};
     using namespace NativeGbuffer;
     const u32 n = u32(b.draws.size());

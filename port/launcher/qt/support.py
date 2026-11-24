@@ -4,6 +4,7 @@ GPU, links). The collecting, summarising and redacting is report.py (no Qt, own 
 holds the wizard state and turns results into texts. Nothing leaves the PC unless the player
 clicks: copy (clipboard), save .zip (a file the player picks) or open the issue page (browser)."""
 import datetime
+import os
 import threading
 from pathlib import Path
 
@@ -314,6 +315,96 @@ class Support(QObject):
         self._used_short = short
         self._open(url)
         self.say(self.t('sup_issue_short' if short else 'sup_issue_opened'), 'warn' if short else 'good')
+
+    # -- "Open issue on GitHub": include a log? (2026-11-23) -------------------------------------
+    # A GitHub link cannot carry a file, and most reports came without a log. So the button first
+    # asks: the newest log, one the player picks, or none. With a log, the report and the log (user
+    # names removed) are saved as a .zip in Downloads, the issue opens, and the .zip is shown in the
+    # file manager so it can be dragged into the issue.
+    chooseLogRequested = Signal()
+
+    @Property('QVariantMap', notify=changed)
+    def dialog(self):
+        return getattr(self, '_dialog', {'open': False})
+
+    @Property(str, notify=changed)
+    def logsDirUrl(self):
+        return QUrl.fromLocalFile(str(self.logs_dir())).toString()
+
+    def newest_log(self):
+        logs = report.list_logs(self.logs_dir())
+        return max(logs, key=lambda p: p.stat().st_mtime) if logs else None
+
+    @Slot()
+    def askIssue(self):
+        newest = self.newest_log()
+        buttons = []
+        if newest:
+            buttons.append({'id': 'newest', 'label': self.t('sup_issue_log_newest'), 'tone': 'primary'})
+        buttons += [{'id': 'choose', 'label': self.t('sup_issue_log_choose'), 'tone': ''},
+                    {'id': 'none', 'label': self.t('sup_issue_log_none'), 'tone': ''},
+                    {'id': 'cancel', 'label': self.t('sup_issue_log_cancel'), 'tone': ''}]
+        body = self.t('sup_issue_log_body')
+        lines = [self.t('sup_issue_log_newest_is', name=newest.name)] if newest else [self.t('sup_no_logs')]
+        self._dialog = {'open': True, 'title': self.t('sup_issue_log_title'), 'body': body, 'lines': lines,
+                        'buttons': buttons}
+        self.changed.emit()
+
+    @Slot(str)
+    def answer(self, choice):
+        self._dialog = {'open': False}
+        self.changed.emit()
+        if choice == 'newest':
+            newest = self.newest_log()
+            if newest:
+                self._issue_with_log(newest)
+        elif choice == 'choose':
+            self.chooseLogRequested.emit()
+        elif choice == 'none':
+            self.openIssue()
+
+    @Slot(str)
+    def issueWithLogFile(self, url):
+        path = _local(url)
+        if path:
+            self._issue_with_log(Path(path))
+
+    def _issue_with_log(self, path):
+        try:
+            text, _cut = report.read_log(path)
+        except OSError as error:
+            self.say(self.t('sup_log_error', detail=str(error)), 'bad')
+            return
+        log_text, _count = report.redact(text, self.names())
+        body = self.build_report()
+        if report.leftover_home_paths(log_text + body, self.names()):
+            self.say(self.t('sup_leak', n=1), 'bad')
+            return
+        from PySide6.QtCore import QStandardPaths
+        folder = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation) or str(Path.home()))
+        target = folder / self.defaultZipName
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            report.write_zip(str(target), body, log_text, path.name)
+        except OSError as error:
+            self.say(self.t('sup_zip_error', detail=str(error)), 'bad')
+            return
+        url, short = report.issue_url(self.issue_title(), body, self.build_report(short=True))
+        self._used_short = short
+        self._open(url)
+        self._reveal(target)
+        self.say(self.t('sup_issue_zip', path=str(target)), 'good')
+
+    def _reveal(self, path):
+        """Shows the file in the file manager (selected on Windows) so it can be dragged into the issue."""
+        if 'open_dir' in self.probes:
+            self.probes['open_dir'](path.parent)
+            return
+        if os.name == 'nt':
+            import subprocess
+            subprocess.Popen(['explorer', '/select,', str(path)])
+        else:
+            tlg_run.open_external(path.parent)
 
     def _open(self, url):
         if 'open_url' in self.probes:

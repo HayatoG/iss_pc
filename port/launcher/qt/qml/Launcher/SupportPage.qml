@@ -20,7 +20,7 @@ Item {
     component Body: Text {
         width: parent ? parent.width : 400
         wrapMode: Text.WordWrap; color: Theme.textDim
-        font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight
+        font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight
     }
     component Mono: Rectangle {      // dark selectable text box
         property alias text: edit.text
@@ -67,7 +67,7 @@ Item {
             // ---- known problems for the GPU -----------------------------------------------------------
             SectionTitle { text: Theme.tr("sup_known_title") }
             Text { visible: Support.gpuName !== ""; text: Theme.tr("sup_known_gpu").replace("{gpu}", Support.gpuName); color: Theme.textMuted
-                   font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.DemiBold }
+                   font.family: Theme.fontText; font.pixelSize: 15; font.weight: Font.DemiBold }
             Body { visible: Support.hwReady && Support.matchedCount === 0; text: Theme.tr("sup_known_none") }
             GhostButton {
                 visible: Support.known.length > Support.matchedCount
@@ -80,15 +80,15 @@ Item {
                 Column {
                     visible: modelData.matched || page.showOthers
                     width: body.width; spacing: 8
-                    Rectangle {
+                    PolishCard {
                         width: parent.width; height: card.implicitHeight + 30; radius: 12
                         color: Theme.card; border.width: 1
                         border.color: modelData.matched ? Qt.rgba(Theme.cyan.r, Theme.cyan.g, Theme.cyan.b, 0.7) : Theme.cardLine
                         opacity: modelData.matched ? 1 : 0.72
-                        Rectangle { visible: modelData.matched; width: 3; height: parent.height - 2; x: 1; y: 1; color: Theme.cyan }
+                        Rectangle { visible: modelData.matched; x: 10; y: 14; width: 3; height: parent.height - 28; radius: 1.5; color: Theme.cyan }
                         Column {
                             id: card
-                            x: 20; y: 15; width: parent.width - 40; spacing: 6
+                            x: 28; y: 15; width: parent.width - 48; spacing: 6
                             Row {
                                 spacing: 10
                                 Text { text: modelData.title; color: "#fff"; font.family: Theme.fontText; font.pixelSize: 16; font.weight: Font.DemiBold
@@ -97,7 +97,7 @@ Item {
                             }
                             Body { text: modelData.what; color: Theme.textSoft }
                             Text { visible: modelData.issues !== ""; text: "Issues: " + modelData.issues; color: Theme.textFaint
-                                   font.family: Theme.fontText; font.pixelSize: 12 }
+                                   font.family: Theme.fontText; font.pixelSize: 13 }
                         }
                     }
                 }
@@ -116,13 +116,13 @@ Item {
                         color: on ? Qt.rgba(Theme.cyan.r, Theme.cyan.g, Theme.cyan.b, 0.16) : Theme.chip
                         border.width: 1; border.color: on ? Theme.cyan : Theme.chipLine
                         Text { id: stepText; anchors.centerIn: parent; text: Theme.tr(modelData); color: parent.on ? "#fff" : Theme.textMuted
-                               font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.Bold }
+                               font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.Bold }
                         MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: Support.setStep(index) }
                     }
                 }
             }
 
-            Rectangle {
+            PolishCard {
                 width: parent.width; height: stepCol.implicitHeight + 40
                 radius: 14; color: Theme.card; border.width: 1; border.color: Theme.cardLine
                 Column {
@@ -135,15 +135,15 @@ Item {
                         width: parent.width; spacing: 10
                         Body { text: Theme.tr("sup_step1_text") }
                         Text { visible: Support.collecting; text: Theme.tr("sup_collecting"); color: page.accent
-                               font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.DemiBold }
+                               font.family: Theme.fontText; font.pixelSize: 15; font.weight: Font.DemiBold }
                         Repeater {
                             model: Support.hwRows
                             Row {
                                 spacing: 14; width: stepCol.width
-                                Text { width: 130; text: modelData.label; color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 14
+                                Text { width: 130; text: modelData.label; color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 15
                                        font.weight: Font.Bold }
                                 Text { width: parent.width - 144; text: modelData.value; color: "#fff"; wrapMode: Text.WordWrap
-                                       font.family: Theme.fontText; font.pixelSize: 14 }
+                                       font.family: Theme.fontText; font.pixelSize: 15 }
                             }
                         }
                     }
@@ -171,23 +171,34 @@ Item {
                                                 color: "transparent"; border.width: 2; border.color: modelData.selected ? Theme.cyan : Theme.off
                                                 Rectangle { anchors.centerIn: parent; width: 6; height: 6; radius: 3; color: Theme.cyan; visible: modelData.selected } }
                                     Text { x: 42; anchors.verticalCenter: parent.verticalCenter; text: modelData.name; color: "#fff"
-                                           font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.DemiBold }
+                                           font.family: Theme.fontText; font.pixelSize: 15; font.weight: Font.DemiBold }
                                     Tag { visible: modelData.latest; x: 250; anchors.verticalCenter: parent.verticalCenter; text: Theme.tr("sup_latest"); tone: "good" }
                                     Text { anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter
-                                           text: modelData.when + " · " + modelData.size; color: Theme.textDim; font.family: Theme.fontText; font.pixelSize: 12 }
+                                           text: modelData.when + " · " + modelData.size; color: Theme.textDim; font.family: Theme.fontText; font.pixelSize: 13 }
                                     MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: Support.selectLog(index) }
                                 }
                             }
                         }
                         Text { visible: Support.hasLogs; text: Theme.tr("sup_log_summary"); color: Theme.textMuted; font.family: Theme.fontText
                                font.pixelSize: 13; font.weight: Font.Bold; font.capitalization: Font.AllUppercase; font.letterSpacing: 1 }
-                        Text { visible: Support.busyLog; text: Theme.tr("sup_reading"); color: page.accent; font.family: Theme.fontText; font.pixelSize: 14 }
+                        Text { visible: Support.busyLog; text: Theme.tr("sup_reading"); color: page.accent; font.family: Theme.fontText; font.pixelSize: 15 }
                         Mono { visible: Support.hasLogs && !Support.busyLog; text: Support.summaryText; boxHeight: 170 }
                         Body { visible: Support.redactionNote !== ""; text: Support.redactionNote; color: Theme.ok }
                         Row {
                             spacing: 10
                             GhostButton { compact: true; text: Theme.tr("sup_open_logs"); onClicked: Support.openLogsFolder() }
                         }
+                        Row {   // detailed log (ISS_VERBOSE_LOG), moved here from the Play tab (2026-11-11)
+                            spacing: 12
+                            Text { text: Theme.tr("verbose_log"); color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.Bold
+                                   anchors.verticalCenter: parent.verticalCenter }
+                            Toggle {
+                                accent: page.accent
+                                checked: Backend.verboseLog
+                                onToggled: (v) => Backend.setVerboseLog(v)
+                            }
+                        }
+                        Body { text: Theme.tr("verbose_log_hint") }
                     }
 
                     // step 3: send
@@ -195,7 +206,7 @@ Item {
                         visible: Support.step === 2
                         width: parent.width; spacing: 12
                         Body { text: Theme.tr("sup_step3_text") }
-                        Text { text: Theme.tr("sup_describe"); color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 13
+                        Text { text: Theme.tr("sup_describe"); color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 14
                                font.weight: Font.Bold; font.capitalization: Font.AllUppercase; font.letterSpacing: 1 }
                         Rectangle {
                             width: parent.width; height: 92; radius: 10; color: "#0e1014"; border.width: 1
@@ -210,7 +221,7 @@ Item {
                                     wrapMode: TextEdit.Wrap; color: "#fff"; selectByMouse: true
                                     selectionColor: page.accent; selectedTextColor: "#00131a"
                                     placeholderText: Theme.tr("sup_describe_hint"); placeholderTextColor: Theme.textFaint
-                                    font.family: Theme.fontText; font.pixelSize: 14
+                                    font.family: Theme.fontText; font.pixelSize: 15
                                     padding: 0; background: null
                                     text: Support.description
                                     onTextChanged: if (text !== Support.description) Support.setDescription(text)
@@ -221,10 +232,10 @@ Item {
                             width: parent.width; spacing: 10
                             GhostButton { compact: true; text: Theme.tr("sup_copy"); onClicked: Support.copyReport() }
                             GhostButton { compact: true; text: Theme.tr("sup_save_zip"); onClicked: saveDialog.open() }
-                            GhostButton { compact: true; tone: "primary"; accent: Theme.cyan; text: Theme.tr("sup_open_issue"); onClicked: Support.openIssue() }
+                            GhostButton { compact: true; tone: "primary"; accent: Theme.cyan; text: Theme.tr("sup_open_issue"); onClicked: Support.askIssue() }
                         }
                         Body { visible: Support.reportIsLong; text: Theme.tr("sup_long_hint"); color: Theme.warn }
-                        Text { text: Theme.tr("sup_preview"); color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 13
+                        Text { text: Theme.tr("sup_preview"); color: Theme.textMuted; font.family: Theme.fontText; font.pixelSize: 14
                                font.weight: Font.Bold; font.capitalization: Font.AllUppercase; font.letterSpacing: 1 }
                         Mono { text: Support.reportText; boxHeight: 210 }
                     }
@@ -263,11 +274,22 @@ Item {
                                       : Support.tone === "warn" ? Theme.warn : Theme.textMuted
         color: "#0e1014"; border.width: 1; border.color: Qt.rgba(tone.r, tone.g, tone.b, 0.7)
         Text { id: msg; x: 16; y: 12; width: parent.width - 60; text: Support.message; wrapMode: Text.WordWrap; color: Theme.text
-               font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
+               font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
         Text { text: "✕"; color: Theme.textMuted; anchors.right: parent.right; anchors.rightMargin: 16; y: 12; font.pixelSize: 14
                MouseArea { anchors.fill: parent; anchors.margins: -8; cursorShape: Qt.PointingHandCursor; onClicked: Support.dismissMessage() } }
     }
 
+    // "Open issue on GitHub" first asks about the log (2026-11-23): Support.dialog / Support.answer
+    ConfirmCard { anchors.fill: parent; target: Support; z: 50 }
+    Connections { target: Support; function onChooseLogRequested() { logDialog.open() } }
+    FileDialog {
+        id: logDialog
+        title: Theme.tr("sup_issue_log_choose")
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Logs (*.log *.txt)", "All files (*)"]
+        currentFolder: Support.logsDirUrl
+        onAccepted: Support.issueWithLogFile(selectedFile.toString())
+    }
     FileDialog {
         id: saveDialog
         title: Theme.tr("sup_save_zip")

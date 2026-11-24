@@ -100,6 +100,8 @@ struct Tables {
     std::shared_mutex mutex;
     std::unordered_map<u64, const ComputePipeline*> shapes; ///< compute key -> first pipeline
     std::unordered_map<u64, std::shared_ptr<const Template>> templates;
+    /// A full table being dropped a few entries per learn (the command processor's only).
+    std::unordered_map<u64, std::shared_ptr<const Template>> dying;
 };
 static Tables& State() {
     static Tables tables;
@@ -569,6 +571,8 @@ static void Report() {
 } // namespace NativeCompute
 
 bool Rasterizer::NativeComputeExecute(iss::native_passes::Segment& s, u64& tick, bool asc) {
+    // ISS_GUEST_SYNC_BARRIERS: packets of this native range were not seen by the command processor.
+    SCOPE_EXIT { NoteGuestSync(); };
     // ISS_CP_PATH_CYCLES: reported as rec_submit (the native recorder's phase, unused here).
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::RecSubmit};
     using namespace NativeCompute;
@@ -738,7 +742,16 @@ bool Rasterizer::NativeComputeExecute(iss::native_passes::Segment& s, u64& tick,
         for (const auto& t : r->templates)
             for (const auto& cap : t->images) images |= bool(cap.id);
         for (const auto& a : r->ranges) gds |= a.gds;
-        on_compute = !images && dirty_reads.empty();
+        // GDS (counters the DMA engine copies on the graphics queue) stays on the graphics queue,
+        // as the comment above says; it was computed but not used.
+        // ISS_ASC_MIN_DISPATCHES=<n>: only segments of at least n dispatches go to the compute
+        // queue (small ones cost more in cross-queue waits and submissions than they overlap).
+        static const size_t min_dispatches = [] {
+            const char* p = std::getenv("ISS_ASC_MIN_DISPATCHES");
+            return p ? size_t(std::strtoull(p, nullptr, 10)) : size_t{0};
+        }();
+        on_compute = !images && !gds && dirty_reads.empty() &&
+                     s.draw_packets.size() >= min_dispatches;
         if (!on_compute) AscSegmentOnGraphics(images ? 0 : !dirty_reads.empty() ? 1 : 2);
     }
     if (asc && !on_compute) AscBeforeGraphicsWork(asc_vqid);
@@ -1063,12 +1076,23 @@ void Rasterizer::NativeComputeLearn(u64 key, const ComputePipeline* pipeline,
     t->order = order;
     {
         std::unique_lock lock{tables.mutex};
-        if (tables.templates.size() >= 65536) tables.templates.clear();
+        if (tables.templates.size() >= 65536 && tables.dying.empty()) {
+            // Dropped a few per millisecond, as the material templates (all at once
+            // stalls the command processor; a thread of its own held the heap for seconds).
+            tables.dying.swap(tables.templates);
+        }
+        NativeMaterial::DropSome(tables.dying);
         tables.shapes.try_emplace(key, pipeline);
         tables.templates[t->key] = std::move(t);
     }
     ++c.learned;
-    {
+    // The first 256 only (ISS_NATIVE_COMPUTE_LOG=1: all): ~11000 a session written by the command
+    // processor, which waited in WriteFile on one for ~340 ms (2026-11-02).
+    static const bool log_all = [] {
+        const char* p = std::getenv("ISS_NATIVE_COMPUTE_LOG");
+        return p && p[0] == '1';
+    }();
+    if (log_all || order < 256) {
         std::fprintf(stderr,
                      "NATIVE_COMPUTE_TEMPLATE order=%u key=%llx program=%llx pgm_hash=%llx walker=%d "
                      "flat_words=%u buffers=%zu written=%u images=%zu samplers=%zu\n",

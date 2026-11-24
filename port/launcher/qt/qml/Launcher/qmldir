@@ -1,4 +1,11 @@
 module Launcher
+ConsoleTrophies 1.0 ConsoleTrophies.qml
+ConsoleButton 1.0 ConsoleButton.qml
+ConsoleBackdrop 1.0 ConsoleBackdrop.qml
+ConsoleHome 1.0 ConsoleHome.qml
+ConsoleTile 1.0 ConsoleTile.qml
+GlassSurface 1.0 GlassSurface.qml
+Atmosphere 1.0 Atmosphere.qml
 singleton Theme 1.0 Theme.qml
 Icon 1.0 Icon.qml
 NavButton 1.0 NavButton.qml
@@ -28,3 +35,12 @@ ConfirmCard 1.0 ConfirmCard.qml
 Rail 1.0 Rail.qml
 Window 1.0 Window.qml
 Main 1.0 Main.qml
+TrophyTile 1.0 TrophyTile.qml
+TrophiesPage 1.0 TrophiesPage.qml
+PlatinumRays 1.0 PlatinumRays.qml
+ControlsHub 1.0 ControlsHub.qml
+PolishCard 1.0 PolishCard.qml
+PadGlyph 1.0 PadGlyph.qml
+TrophySummary 1.0 TrophySummary.qml
+
+FocusHalo 1.0 FocusHalo.qml

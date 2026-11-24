@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include "tlg_karma_profile_names.h"
+#include "tlg_karma_save_title.h"
 #include <set>
 namespace KarmaRecovery {
 namespace fs=std::filesystem;
@@ -13,7 +14,7 @@ inline std::vector<unsigned char> ReadSave(const fs::path& path){
 }
 inline std::vector<Candidate> Scan(const fs::path& root){
  std::vector<Candidate> out;std::set<std::string> seen;unsigned inspected=0;
- for(const auto& base:{root/"savedata/1/CUSA00223",root/"karma-backups",root/"savedata_backups"}){
+ for(const auto& base:{root/"savedata/1"/KarmaSaveTitle::Get(),root/"karma-backups",root/"savedata_backups"}){
   if(!fs::exists(base))continue;if(fs::is_symlink(fs::symlink_status(base)))throw std::runtime_error("Recovery links refused");
   for(const auto& entry:fs::recursive_directory_iterator(base)){
    if(entry.is_symlink())throw std::runtime_error("Recovery links refused");
@@ -35,7 +36,7 @@ inline std::vector<Candidate> Scan(const fs::path& root){
 inline std::string RestoreNewSlot(const fs::path& root,const Candidate& candidate){
  const auto bytes=ReadSave(candidate.data);V::State state{};
  if(V::Hex(V::Hash(bytes))!=candidate.key||!V::Load(root,bytes,state))throw std::runtime_error("Recovery source changed; rescan first");
- const auto saves=root/"savedata/1/CUSA00223";
+ const auto saves=root/"savedata/1"/KarmaSaveTitle::Get();
  for(const auto& path:{root,root/"savedata",root/"savedata/1",saves,candidate.meta})if(fs::is_symlink(fs::symlink_status(path)))throw std::runtime_error("Recovery links refused");
  fs::create_directories(saves);
  for(unsigned i=0;i<32;++i){

@@ -112,9 +112,9 @@ extern "C" int tlggpu_init(const TlgGpuConfig* config) {
     // Initial host window shape follows the requested output, independently of
     // scene scale. The game's actual buffers remain guarded in probe.c.
     const int native_output=TlgSettings::Get().iss_native_output;
-    if(native_output>0 && native_output<6){
-        constexpr uint32_t widths[]={0,1920,2560,3440,3840,5120};
-        constexpr uint32_t heights[]={0,1080,1440,1440,2160,1440};
+    if(native_output>0 && native_output<8){   // same table as src/iss_native_resolution.h
+        constexpr uint32_t widths[]={0,1920,2560,3440,3840,5120,2560,3840};
+        constexpr uint32_t heights[]={0,1080,1440,1440,2160,1440,1080,1080};
         callbacks.width=widths[native_output];callbacks.height=heights[native_output];
     }
     // The launcher's choices (backports_table.py): TLG_RENDERER=2 picked this renderer, and
@@ -239,6 +239,7 @@ extern "C" void tlggpu_input_settings(TlgGpuInputSettings* out) {
     out->rumble = s.rumble ? 1 : 0;
     out->sensitivity = s.mouse_sensitivity;
     std::snprintf(out->key_map, sizeof(out->key_map), "%s", s.key_map.c_str());
+    std::snprintf(out->key_binds, sizeof(out->key_binds), "%s", TlgSettings::KeyBinds().c_str());
 }
 extern "C" void tlggpu_mouse_pad_hud(int active, float x, float y, int touching, int clicking) {
     TlgOverlay::SetMousePad(active != 0, x, y, touching != 0, clicking != 0);

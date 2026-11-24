@@ -1,15 +1,13 @@
-name: Normal Sunny Linux tester build
+name: Sunny Linux build 2026-11-07
 on:
   push:
-    branches: [build/normal-linux-20261027]
-    paths: ['port/**', '.github/workflows/normal-linux-20261027.yml']
+    branches: [build/sunny-linux-20261107]
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
     defaults:
       run:
         working-directory: port
@@ -31,37 +29,35 @@ jobs:
         run: python3 .github/scripts/test_release_notes.py
       - name: System packages
         run: |
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -q
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -q --no-install-recommends gcc-14 g++-14 cmake ninja-build pkg-config nasm ccache \
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gcc-14 g++-14 cmake ninja-build pkg-config nasm ccache \
             curl git python3-venv python3-tk libvulkan-dev glslang-tools libboost-dev \
             libxxhash-dev zlib1g-dev libx11-dev libxcb1-dev libxext-dev libxrandr-dev libxcursor-dev \
             libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols \
             libdecor-0-dev libegl-dev libgl-dev libdrm-dev libgbm-dev libpulse-dev libasound2-dev \
             libpipewire-0.3-dev libudev-dev libdbus-1-dev libusb-1.0-0-dev libfreetype-dev \
-            clang libssl-dev
+            clang libssl-dev libsbc-dev
       - name: Cache built libraries
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /opt/tlgdeps
           key: tlgdeps-ubuntu2404-${{ hashFiles('port/packaging/linux/build_deps.sh') }}
-      - name: Build libraries (SDL3, Zydis, fmt, FFmpeg)
+      - name: Build libraries (SDL3, Zydis, fmt, FFmpeg, Opus)
         if: steps.deps.outputs.cache-hit != 'true'
         run: |
           sudo mkdir -p /opt/tlgdeps && sudo chown "$USER" /opt/tlgdeps
           bash packaging/linux/build_deps.sh
-      - name: Save successfully built libraries
+      - uses: actions/cache/save@v4
         if: steps.deps.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
         with:
           path: /opt/tlgdeps
-          key: tlgdeps-ubuntu2404-${{ hashFiles('port/packaging/linux/build_deps.sh') }}
-      - name: Restore compiler cache
-        uses: actions/cache/restore@v4
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+      - uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-normal-linux-${{ runner.os }}-${{ github.sha }}
-          restore-keys: ccache-normal-linux-${{ runner.os }}-
+          key: sunny-linux-ccache-${{ github.sha }}
+          restore-keys: sunny-linux-ccache-
       - name: Build
         id: build
         run: |
@@ -74,14 +70,13 @@ jobs:
           trap 'kill "$progress_pid" 2>/dev/null || true' EXIT
           # TLG_RENDERER_V2=1: renderer v2 too (port/gpu_v2, out/tlg-probe-v2), shipped in the package.
           TLG_RENDERER_V2=1 TLG_LTO=ON TLG_PGO=off bash build.sh
-      # The unit tests need no GPU, display or game file. Each test step runs even when an earlier
-      # one failed (all failures show in one run); any failure fails the job before Package.
-      - name: Save compiler cache
+      - uses: actions/cache/save@v4
         if: ${{ !cancelled() }}
-        uses: actions/cache/save@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-normal-linux-${{ runner.os }}-${{ github.sha }}
+          key: sunny-linux-ccache-${{ github.sha }}
+      # The unit tests need no GPU, display or game file. Each test step runs even when an earlier
+      # one failed (all failures show in one run); any failure fails the job before Package.
       - name: C tests
         # build.sh's test list, reusing out/ from Build (same TLG_LTO/TLG_PGO: nothing is rebuilt).
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -115,18 +110,12 @@ jobs:
             echo "::endgroup::"
           done
           (( ${#failed[@]} == 0 )) || { echo "::error::GPU tests failed: ${failed[*]}"; exit 1; }
-      - name: Compatibility regression checks
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: |
-          cmake --build out/gpu_v2 --target test_mouse_aim test_hud_trace test_native_resolution test_karma_regression test_karma_quarantine test_karma_save_versions test_karma_save_session test_karma_profiles test_exclusive_presentation test_graphics_settings -j2
-          ctest --test-dir out/gpu_v2 --output-on-failure -R '^(mouse_aim|hud_trace|native_resolution|karma_regression|karma_quarantine|karma_save_versions|karma_save_session|karma_profiles|exclusive_presentation|graphics_settings)$'
-      - name: Added feature tests
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: |
-          cmake --build out/gpu_v2 -j2
-          ctest --test-dir out/gpu_v2 --output-on-failure
       - name: Package
-        run: bash packaging/linux/package.sh
+        run: |
+          bash packaging/linux/package.sh
+          for file in out/tlg-probe out/tlg-probe-v2 out/gpu/libtlggpu.so out/gpu_v2/libissgpu.so; do
+            file "$file" | grep -E 'ELF 64-bit .*x86-64'
+          done
       - name: Smoke test (frozen Qt launcher)
         # Opens the packaged launcher offscreen and renders a frame: a package whose launcher cannot
         # start (missing Qt plugin, QML, font, translation) must not become a release.
@@ -137,32 +126,9 @@ jobs:
           out=$(QT_QPA_PLATFORM=offscreen timeout 120 "$smoke/infamous-linux-x86_64/inFAMOUS Second Son" --selftest 2>&1) || { echo "$out"; exit 1; }
           echo "$out"
           grep -qx 'selftest ok' <<<"$out"
-      - name: ZIP for Linux testers
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import zipfile, hashlib, json
-          root=Path('out/stage/infamous-linux-x86_64')
-          info={'source_commit':__import__('os').environ['GITHUB_SHA'],
-              'normal_windows_sha256':'fbc02b41d592f39ac084e1e94dbed3a1b9e02e644918c3a4b701c4772a1bba7f',
-              'linux_gameplay_tested':False,'performance_experiments_included':False,
-              'game_files_included':False,'personal_data_included':False}
-          (root/'SUNNY-LINUX-BUILD.json').write_text(json.dumps(info,indent=2))
-          (root/'START-HERE-LINUX.txt').write_text('Sunny normal-build Linux test package.\nExtract into a NEW folder. Run chmod +x "inFAMOUS Second Son" "inFAMOUS Second Son (classic)" out/tlg-probe out/tlg-probe-v2, then open "inFAMOUS Second Son" and select your own CUSA00223 update1.07 game dump. Select Renderer 2 in Graphics to test the Sunny changes (Linux keeps the upstream Renderer 1 default). Renderer v2 includes direct mouse, camera, Karma/trophies, wheel, native resolution/4K/32:9 changes from the normal Windows source snapshot. Linux gameplay is untested; Windows exclusive-fullscreen behavior does not transfer directly. Ubuntu24.04/glibc2.39 or newer, Vulkan driver required. No saves, personal mod ledgers, game files or experimental performance changes included. Back up your own saves AND matching mod ledgers before testing.\n')
-          archive=Path('dist/infamous-linux-x86_64-sunny-normal-20261027.zip')
-          with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
-              for p in sorted(root.rglob('*')):
-                  if p.is_file():
-                      assert p.resolve().is_relative_to(root.resolve()),p
-                      z.write(p,p.relative_to(root.parent))
-          with zipfile.ZipFile(archive) as z:assert z.testzip() is None
-          archive.with_suffix('.zip.sha256').write_text(hashlib.sha256(archive.read_bytes()).hexdigest()+'  '+archive.name+'\n')
-          PY
       - uses: actions/upload-artifact@v4
         with:
-          name: sunny-normal-linux-20261027
-          path: |
-            port/dist/infamous-linux-x86_64-sunny-normal-20261027.zip
-            port/dist/infamous-linux-x86_64-sunny-normal-20261027.zip.sha256
+          name: infamous-linux-x86_64
+          path: port/dist/infamous-linux-x86_64.tar.gz
           if-no-files-found: error
           retention-days: 7

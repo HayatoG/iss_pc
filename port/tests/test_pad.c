@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include "../src/runtime_pad.c"
+#include "test_pad_audio_stubs.h"
 // runtime_mouse_aim.c (the native aim hook) needs the guest; pad tests run without it.
 int runtime_mouse_aim_installed(void) { return 0; }
 int runtime_power_wheel_gameplay(void) { return 1; }
@@ -78,6 +79,7 @@ int main(void) {
     assert(fd>=0);
     close(fd);
     setenv("TLG_PAD_FILE",path,1);
+    setenv("TLG_PAD_THREAD","0",1); /* sampled on this thread: a pump is seen by the next read */
     setenv("SDL_VIDEODRIVER","dummy",1);
     /* Only the virtual test controller is a gamepad, whatever is plugged in. */
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,"0x1d50/0x6189");
