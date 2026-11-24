@@ -4,6 +4,10 @@
 
 /* The settings menu of the GPU library restarts through probe.c, which tests do not link. */
 void runtime_restart(void) { abort(); }
+/* The in-game overlay's live mods live in probe.c too: none are live in tests. */
+int runtime_overlay_mod_available(int id) { (void)id; return 0; }
+int runtime_overlay_mod_get(int id) { (void)id; return 0; }
+unsigned char runtime_overlay_mod_original_byte(unsigned long long at, unsigned char current) { (void)at; return current; }
 #include <assert.h>
 #include <pthread.h>
 #include <stdint.h>
