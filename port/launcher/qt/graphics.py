@@ -13,6 +13,7 @@ from .logic import backports_table, shader_cache, tlg_run
 from .rowsmodel import RowsModel
 import dlss_setup  # noqa: E402  (launcher/dlss_setup.py: the NVIDIA DLL, the bridge, the download)
 import native_resolution  # noqa: E402  (launcher/native_resolution.py: output + internal resolution)
+import perf_report  # noqa: E402  (launcher/perf_report.py: what held the last session's frame rate back)
 import preset_share  # noqa: E402  (launcher/preset_share.py; logic put the folder on sys.path)
 
 # (id, kind, live) of the options kept in settings.json. live: also in the Insert menu.
@@ -390,6 +391,173 @@ class Graphics(QObject):
             return self.t('gfx_preset_now', name=self.t('gfx_preset_' + current))
         name = self._imported_name()
         return self.t('ps_profile_imported', name=name) if name else self.t('gfx_preset_custom')
+
+    # -- your last session: what held the frame rate back (2026-11-24) ---------------------------------
+    def _perf_report(self):
+        """perf_report.read of the newest game log; read again only when the log changed."""
+        if 'perf' in self.probes:
+            return self.probes['perf']()
+        log = perf_report.latest_log(tlg_run.LOG_DIR)
+        try:
+            stamp = (str(log), log.stat().st_mtime_ns) if log else None
+        except OSError:
+            stamp = None
+        if stamp != getattr(self, '_perf_stamp', 0):
+            self._perf_stamp = stamp
+            self._perf_cache = perf_report.read(log) if log else None
+        return self._perf_cache
+
+    def _perf_log(self):
+        """The newest log's path (the session being described), '' without one."""
+        if 'perf_log' in self.probes:
+            return self.probes['perf_log']()
+        stamp = getattr(self, '_perf_stamp', None)
+        return stamp[0] if stamp else ''
+
+    def _perf(self):
+        """(key, values) of perf_report.verdict for the newest game log."""
+        return perf_report.verdict(self._perf_report())
+
+    @Property(str, notify=changed)
+    def perfNotes(self):
+        """Hitches, video memory nearly full, settings changed mid-session: one short sentence each."""
+        return ' '.join(self.t('gfx_perf_note_' + key, **values)
+                        for key, values in perf_report.notes(self._perf_report()))
+
+    @Property(str, notify=changed)
+    def perfCompare(self):
+        """After an Apply, the next session against the one before it; '' until there is one."""
+        record = self.settings.get('perf_last_apply')
+        report = self._perf_report()
+        after = perf_report.summary(report)
+        if not isinstance(record, dict) or not after or self._perf_log() in ('', record.get('log')):
+            return ''
+        if perf_report.verdict(report)[0] in ('none', 'classic', 'short'):
+            return ''
+        before = record.get('before') or {}
+        base_id = record.get('base') or ''
+        base = self.t('gfx_preset_' + base_id) if base_id else self.t('gfx_perf_your_setup')
+        text = self.t('gfx_perf_compare', base=base, before=before.get('fps', '?'), after=after['fps'])
+        if before.get('p99_ms') and after.get('p99_ms'):
+            text += ' ' + self.t('gfx_perf_compare_p99', before=before['p99_ms'], after=after['p99_ms'])
+        return text
+
+    @Property(str, notify=changed)
+    def perfText(self):
+        """One plain sentence about the last play session, '' when there is nothing to say."""
+        key, values = self._perf()
+        if key in ('none', 'classic'):
+            return ''
+        values = dict(values)
+        # With the card's own time per frame (GPU_FRAME_MS, 2026-11-24 builds) the verdict is measured.
+        sure = values.pop('sure', False) and key in ('gpu', 'cpu')
+        return self.t('gfx_perf_' + key + ('_sure' if sure else ''), **values)
+
+    @Property(str, notify=changed)
+    def perfTone(self):
+        """good: room to spare; warn: a part of the PC held it back; '' : nothing measured yet."""
+        key, _ = self._perf()
+        return {'limit': 'good', 'ceiling': 'good', 'gpu': 'warn', 'cpu': 'warn'}.get(key, '')
+
+    @Slot()
+    def refreshPerf(self):
+        """The Graphics tab calls this when it is shown: a session may have ended since."""
+        self.changed.emit()
+
+    # LOD distance steps the suggestions move along (the menu's own range is 0.25-4).
+    LOD_STEPS = (1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
+    FPS_CAPS = (30, 60, 120, 240)
+
+    def _value(self, rid):
+        item = gfxlogic.item_by_id(rid)
+        state = self.backend.fix_states.get(rid)
+        return item.default if state is None else state
+
+    def _suggestions(self):
+        """[(row id, new value)] that answer the last session's verdict, from the current setup:
+        less work when the graphics card or the processor held it back, more detail when the PC had
+        room to spare. The frame rate cap moves only for the processor (steadier motion)."""
+        key, values = self._perf()
+        if key not in ('gpu', 'cpu', 'limit', 'ceiling'):
+            return []
+        changes = []
+        lod = float(self._value('menu:lod_scale'))
+        floor = int(float(self._value('menu:quality_floor')))
+        vram_full = bool((self._perf_report() or {}).get('vram_full'))
+        if vram_full or key in ('gpu', 'cpu'):
+            # Video memory nearly full: fewer detailed models even when the frame rate had room.
+            lower = [s for s in self.LOD_STEPS if s < lod - 1e-6]
+            if lower:
+                changes.append(('menu:lod_scale', f'{lower[-1]:g}'))
+            if floor < 12 and key in ('gpu', 'cpu'):
+                changes.append(('menu:quality_floor', str(min(12, floor + 2))))
+            if key == 'cpu':
+                cap = int(self._value('menu:fps_limit') or 0)
+                fits = [c for c in self.FPS_CAPS if c <= values.get('fps', 0) * 0.95 and (cap == 0 or c < cap)]
+                if fits:
+                    changes.append(('menu:fps_limit', str(fits[-1])))
+        else:
+            higher = [s for s in self.LOD_STEPS if s > lod + 1e-6 and s <= 2.0]
+            if higher:
+                changes.append(('menu:lod_scale', f'{higher[0]:g}'))
+            if floor > 0:
+                changes.append(('menu:quality_floor', '0'))
+        return changes
+
+    def _shown(self, rid, value):
+        if rid == 'menu:fps_limit' and str(value) == '0':
+            return self.t('gfx_perf_unlimited')
+        return f'{float(value):g}x' if rid == 'menu:lod_scale' else str(value)
+
+    @Property(bool, notify=changed)
+    def perfCanApply(self):
+        """A suggestion exists for the newest session and was not applied yet."""
+        return bool(self._suggestions()) and getattr(self, '_perf_applied', None) != getattr(self, '_perf_stamp', 0)
+
+    @Property(str, notify=changed)
+    def perfMessage(self):
+        return getattr(self, '_perf_msg', '')
+
+    def _change_lines(self, changes):
+        return [self.t('gfx_perf_change', name=self.t_pair(gfxlogic.item_by_id(rid).name),
+                       old=self._shown(rid, self._value(rid)), new=self._shown(rid, value))
+                for rid, value in changes]
+
+    @Property(str, notify=changed)
+    def perfPlan(self):
+        """What "Apply" would change, shown before the click; '' when nothing would."""
+        if not self.perfCanApply:
+            return ''
+        return self.t('gfx_perf_plan', changes='; '.join(self._change_lines(self._suggestions())))
+
+    @Slot()
+    def applyPerfSuggestions(self):
+        """Saves the current setup plus the suggestions as Renderer V2 - Custom Personal Graphics, selects
+        it and says what changed. The preset that was selected is left as it was."""
+        changes = self._suggestions()
+        if not changes:
+            return
+        current = gfxlogic.matching_preset(self.settings, self.backend.fix_states)
+        base = self.t('gfx_preset_' + current) if current else self.t('gfx_perf_your_setup')
+        # The personal preset starts from exactly what is set now; each change below is remembered too.
+        self.settings['graphics_mode'] = gfxlogic.PERSONAL_ID
+        gfxlogic.remember_personal(self.settings, self.backend.fix_states)
+        tlg_run.save_settings(self.settings)
+        lines = self._change_lines(changes)
+        for rid, value in changes:
+            self.setValue(rid, value)
+        gfxlogic.remember_personal(self.settings, self.backend.fix_states)
+        # Kept to compare the next session with this one (perfCompare).
+        self.settings['perf_last_apply'] = {'log': self._perf_log(), 'base': current or '',
+                                            'before': perf_report.summary(self._perf_report())}
+        tlg_run.save_settings(self.settings)
+        self._perf_applied = getattr(self, '_perf_stamp', 0)
+        self._perf_msg = self.t('gfx_perf_applied', base=base, changes='; '.join(lines))
+        self.rebuild()
+        self.changed.emit()
+
+    def t_pair(self, pair):
+        return self.backend.t_.pair(pair)
 
     # -- share: export and import a configuration file -------------------------------------------------------
     @Property(str, notify=changed)

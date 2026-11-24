@@ -12,6 +12,9 @@ Item {
     readonly property var experimentalPresets: ["renderer_v2_12gb", "renderer_v2", "renderer_v2_native",
                                                 "rec1", "current", "amd", "rx580", "seco", "apolar_amd", "apolar_rtx", "apolar_gtx"]
     property bool showExperimental: Graphics.presets.some(function (p) { return p.active && page.experimentalPresets.indexOf(p.id) >= 0 })
+    // A play session may have ended since the tab was last shown: read the newest game log again.
+    Component.onCompleted: Graphics.refreshPerf()
+    onVisibleChanged: if (visible) Graphics.refreshPerf()
 
     // A grid that wraps: 4 cards per line on a wide window, fewer on a narrow one; every card of
     // the grid gets the height of the tallest, so the lines stay even whatever the text.
@@ -115,6 +118,44 @@ Item {
                     color: Theme.chip; border.width: 1; border.color: Graphics.presets.some(function (p) { return p.active }) ? page.accent : Theme.warn
                     Text { id: now; anchors.centerIn: parent; text: Graphics.presetText; color: Theme.textChip
                            font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.Bold }
+                }
+            }
+            // What held the frame rate back in the last play session, from the game's own log (2026-11-24).
+            PolishCard {
+                visible: Graphics.perfText !== ""
+                width: parent.width; height: perfCol.implicitHeight + 24; radius: 12
+                color: Theme.card; border.width: 1
+                border.color: Graphics.perfTone === "warn" ? Qt.rgba(Theme.warn.r, Theme.warn.g, Theme.warn.b, 0.55)
+                            : Graphics.perfTone === "good" ? Qt.rgba(Theme.ok.r, Theme.ok.g, Theme.ok.b, 0.55) : Theme.cardLine
+                Column {
+                    id: perfCol
+                    anchors.verticalCenter: parent.verticalCenter; x: 16; width: parent.width - 32; spacing: 4
+                    Text { text: Theme.tr("gfx_perf_title"); font.family: Theme.fontText; font.pixelSize: 16; font.weight: Font.Bold
+                           color: Graphics.perfTone === "warn" ? Theme.warn : Graphics.perfTone === "good" ? Theme.ok : "#fff" }
+                    Text { width: parent.width; text: Graphics.perfText; wrapMode: Text.WordWrap; color: Theme.textSoft
+                           font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
+                    // Hitches, video memory nearly full, settings changed mid-session (2026-11-24 logs).
+                    Text { visible: Graphics.perfNotes !== ""; width: parent.width; text: Graphics.perfNotes
+                           wrapMode: Text.WordWrap; color: Theme.textSoft; font.family: Theme.fontText; font.pixelSize: 14
+                           lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
+                    // The session after an Apply, against the one before it.
+                    Text { visible: Graphics.perfCompare !== ""; width: parent.width; text: Graphics.perfCompare
+                           wrapMode: Text.WordWrap; color: Theme.ok; font.family: Theme.fontText; font.pixelSize: 14
+                           font.weight: Font.DemiBold }
+                    Text { width: parent.width; text: Theme.tr("gfx_perf_source"); wrapMode: Text.WordWrap; color: Theme.textDim
+                           font.family: Theme.fontText; font.pixelSize: 12 }
+                    // The suggested changes and the button that saves them as the personal preset.
+                    Text { visible: Graphics.perfPlan !== ""; width: parent.width; topPadding: 6; text: Graphics.perfPlan
+                           wrapMode: Text.WordWrap; color: "#fff"; font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.DemiBold }
+                    Row {
+                        visible: Graphics.perfCanApply; spacing: 12; topPadding: 4
+                        GhostButton { objectName: "perfApply"; compact: true; text: Theme.tr("gfx_perf_apply")
+                                      onClicked: Graphics.applyPerfSuggestions() }
+                    }
+                    Text { visible: Graphics.perfCanApply; width: parent.width; text: Theme.tr("gfx_perf_apply_what")
+                           wrapMode: Text.WordWrap; color: Theme.textDim; font.family: Theme.fontText; font.pixelSize: 12 }
+                    NoteBar { visible: Graphics.perfMessage !== ""; width: parent.width; text: Graphics.perfMessage
+                              bar: Theme.ok; textColor: Theme.textSoft }
                 }
             }
             // Current presets first; the older and card-specific ones sit behind the "Experimental presets"
