@@ -10,7 +10,7 @@ static inline int iss_mod_relative(unsigned char *out,uintptr_t next,uintptr_t t
 static inline int iss_mod_block(unsigned char *out,const unsigned char *code,unsigned length,const IssModFix *fix,unsigned count,uintptr_t base){
     memcpy(out,code,length);
     for(unsigned i=0;i<count;i++){
-        if(fix[i].pos+4>length||fix[i].next>length||!iss_mod_relative(out+fix[i].pos,(uintptr_t)out+fix[i].next,base+fix[i].target))return 0;
+        if((unsigned)fix[i].pos+4u>length||(unsigned)fix[i].next>length||!iss_mod_relative(out+fix[i].pos,(uintptr_t)out+fix[i].next,base+fix[i].target))return 0;
     }
     return 1;
 }
