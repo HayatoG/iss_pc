@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Output and internal resolution of the game's "native rendering" (renderer v2, update 1.07).
 
-The game reads two keys of tlg.ini: iss_native_output (0 = off, 1..5 = a display preset) and
+The game reads two keys of tlg.ini: iss_native_output (0 = off, 1..7 = a display preset) and
 iss_native_percent (25..200, the 3D scene as a percent of that output). The player thinks in
 "render 720p, show 1440p", so the launchers offer the internal resolution as a height and store
 the percent that gives it.
@@ -18,9 +18,10 @@ translator falls back to the Tk table, so one entry serves both.
 import backports_table
 
 # Index = value of iss_native_output. Index 0 is "off".
-OUTPUTS = ((0, 0), (1920, 1080), (2560, 1440), (3440, 1440), (3840, 2160), (5120, 1440))
+OUTPUTS = ((0, 0), (1920, 1080), (2560, 1440), (3440, 1440), (3840, 2160), (5120, 1440),
+           (2560, 1080), (3840, 1080))   # 6, 7: the 1080-line ultrawides (2026-11-05), added last
 OUTPUT_LABELS = ('', '1080p · 1920×1080', '1440p · 2560×1440', '3440×1440 (21:9)', '4K · 3840×2160',
-                 '5120×1440 (32:9)')
+                 '5120×1440 (32:9)', '2560×1080 (21:9)', '3840×1080 (32:9)')
 # Internal resolution steps: scene heights offered to the player.
 STEPS = (540, 720, 900, 1080, 1440, 2160)
 PERCENT_MIN, PERCENT_MAX = 25, 200

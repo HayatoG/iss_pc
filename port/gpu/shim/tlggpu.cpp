@@ -511,6 +511,7 @@ extern "C" void tlggpu_input_settings(TlgGpuInputSettings* out) {
     out->rumble = s.rumble ? 1 : 0;
     out->sensitivity = s.mouse_sensitivity;
     std::snprintf(out->key_map, sizeof(out->key_map), "%s", s.key_map.c_str());
+    std::snprintf(out->key_binds, sizeof(out->key_binds), "%s", TlgSettings::KeyBinds().c_str());
 }
 
 extern "C" void tlggpu_mouse_pad_hud(int active, float x, float y, int touching, int clicking) {

@@ -168,6 +168,30 @@ Item {
                 width: parent.width; spacing: 10
                 Repeater { model: Backend.chips; Chip { text: modelData.text; level: modelData.level } }
             }
+            Column {   // verify game files: every art file's size and SHA-256 against the reference list
+                width: parent.width; spacing: 6
+                visible: Backend.gameDir !== ""
+                Row {
+                    spacing: 12
+                    GhostButton {
+                        compact: true
+                        text: Backend.verifyRunning ? Theme.tr("verify_stop") : Theme.tr("verify_button")
+                        onClicked: Backend.verifyRunning ? Backend.stopVerify() : Backend.verifyGame()
+                    }
+                    Text { visible: Backend.verifyRunning; anchors.verticalCenter: parent.verticalCenter
+                           text: Math.floor(Math.max(0, Backend.verifyProgress) * 100) + "%"; color: Theme.textMuted
+                           font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.Bold }
+                }
+                Rectangle {
+                    visible: Backend.verifyRunning
+                    width: parent.width; height: 4; radius: 2; color: Theme.cardLine
+                    Rectangle { width: parent.width * Math.max(0, Backend.verifyProgress); height: parent.height; radius: 2; color: page.accent }
+                }
+                Text { visible: Backend.verifyText !== ""; width: parent.width; text: Backend.verifyText; wrapMode: Text.WordWrap
+                       color: Backend.verifyLevel === "ok" ? Theme.ok : Backend.verifyLevel === "bad" ? Theme.bad
+                            : Backend.verifyLevel === "warn" ? Theme.warn : Theme.textDim
+                       font.family: Theme.fontText; font.pixelSize: 12; lineHeight: 1.25; lineHeightMode: Text.ProportionalHeight }
+            }
             Column {   // light glare (occlusion): same file/env path as the other switches
                 width: parent.width; spacing: 6
                 Row {

@@ -35,6 +35,13 @@ namespace Vulkan {
 class Instance;
 class CommandRecorder;
 
+/// ISS_NATIVE_PASSES_SAFE_CMD (default on): held around the native segments' command pool
+/// operations (allocate, reset, begin, end, free) and around executing one of their secondaries
+/// into a primary. NVIDIA's driver faulted in vkResetCommandBuffer of a segment's secondary
+/// (nvoglv64+0xdac501, a read of 0x50) while the recorder thread executed others.
+std::mutex& SecondaryPoolMutex();
+bool SecondaryPoolSafe();
+
 struct RenderAttachment {
     vk::ImageView image_view;
     vk::ImageLayout image_layout;
@@ -584,6 +591,14 @@ public:
         }
     }
 
+    /// ISS_UPLOAD_QUEUE: the commands recorded so far copy data the copy engine writes (timeline
+    /// semaphore tick): the submission's transfers wait for it (its other work does not).
+    void AddUploadWait(vk::Semaphore semaphore, u64 tick) noexcept {
+        AssertCpRecordingLane();
+        upload_wait.semaphore = semaphore;
+        upload_wait.tick = std::max(upload_wait.tick, tick);
+    }
+
     /// Sets the function waiting for the work given to RequireBeforeSubmit (called under
     /// submit_mutex, before each submission depending on it).
     void SetSubmitDependency(std::function<void(u64)>&& wait) {
@@ -600,6 +615,23 @@ public:
     [[nodiscard]] bool IsRendering() const noexcept {
         return is_rendering;
     }
+
+    /// ISS_NATIVE_PASS_MERGE: a native segment leaves its secondary-buffer rendering open, so the
+    /// next segment on the same targets executes in it (BeginSecondaryRendering reuses it).
+    /// Anything else recorded first (DirectCommandBuffer, Stream, CommandBuffer) closes it: such a
+    /// rendering allows nothing but executes.
+    void KeepSecondaryOpen() noexcept {
+        merged_secondary_open =
+            is_rendering &&
+            rendering_flags == vk::RenderingFlagBits::eContentsSecondaryCommandBuffers;
+    }
+    [[nodiscard]] bool SecondaryOpenFor(const RenderState& state) const noexcept {
+        return merged_secondary_open && render_state == state;
+    }
+    /// Executes a native segment's secondary in the open secondary-buffer rendering.
+    void ExecuteSecondary(vk::CommandBuffer secondary);
+    /// Closes the rendering KeepSecondaryOpen left open (the merge guard).
+    void CloseMergedSecondary();
 
     /// Sets the object notified of rendering scope changes (nullptr: none).
     void SetRenderingObserver(RenderingObserver* observer) noexcept {
@@ -629,6 +661,9 @@ public:
     /// recording thread (Stream()). For CommandRecorder.
     [[nodiscard]] vk::CommandBuffer DirectCommandBuffer() const noexcept {
         AssertCpRecordingLane();
+        if (merged_secondary_open) [[unlikely]] {
+            const_cast<Scheduler*>(this)->CloseMergedSecondary();
+        }
         session_used = true;
         return direct_cmdbuf;
     }
@@ -656,6 +691,35 @@ public:
     /// gpu_profile = 2: GPU timestamps around a compute dispatch, counted for its shader.
     void ProfileDispatchBegin(u64 shader_hash);
     void ProfileDispatchEnd();
+    /// gpu_profile = 3: GPU timestamps just outside a render pass (BeginRenderingScope /
+    /// EndRendering), counted by its target size, attachments and secondary-buffer mode.
+    void ProfilePassBegin(u64 key);
+    void ProfilePassEnd();
+    /// gpu_profile = 4: the fragment shader of a graphics pipeline being bound (pass labels).
+    void ProfilePassShader(u64 fragment_hash);
+    /// gpu_profile = 4: what the command processor records between its timed passes and
+    /// dispatches (CommandRecorder), so each untimed GPU gap carries what ran in it.
+    enum ProfileNoteKind : u32 {
+        NoteBarrier, NoteCopyBuffer, NoteBufferToImage, NoteImageToBuffer, NoteCopyImage,
+        NoteResolve, NoteClear, NoteFillUpdate, NoteQuery, NoteDispatch, NoteKinds
+    };
+    void ProfileNote(u32 kind, u32 image_barriers = 0) noexcept {
+        if (profile_notes) {
+            profile_note_kinds |= 1u << kind;
+            profile_note_barriers += image_barriers;
+        }
+    }
+    bool profile_notes{};
+    u32 profile_note_kinds{};
+    u32 profile_note_barriers{};
+
+    /// ISS_BARRIER_TRACE=1 (diagnostic, off by default): which code records each pipeline
+    /// barrier through CommandRecorder, what it synchronizes and what work is around it,
+    /// reported every 5 s as BARRIER_TRACE lines (caller = exe offset, for llvm-symbolizer).
+    enum TraceKind : u32 { TraceBeginRendering = NoteKinds, TraceEndRendering, TraceKindCount };
+    bool barrier_trace{};
+    void TraceBarrier(const vk::DependencyInfo& info, void* caller);
+    void TraceWork(u32 kind);
 
     /// gpu_profile: reads the timestamps of the submissions the GPU has finished (command
     /// processor thread, once per guest frame).
@@ -759,6 +823,7 @@ private:
         u64 tick;
     };
     boost::container::static_vector<CrossWait, 3> cross_waits;
+    CrossWait upload_wait{}; ///< ISS_UPLOAD_QUEUE: see AddUploadWait.
     std::mutex submitted_mutex;
     std::condition_variable submitted_cv;
     DynamicState dynamic_state;
@@ -788,6 +853,7 @@ private:
     vk::RenderingFlags rendering_flags{}; ///< of the open rendering scope
     void BeginRenderingScope(const RenderState& new_state);
     bool is_rendering = false;
+    bool merged_secondary_open = false; ///< ISS_NATIVE_PASS_MERGE (KeepSecondaryOpen).
     RenderingObserver* rendering_observer{};
     tracy::VkCtxScope* profiler_scope{};
 
@@ -833,6 +899,23 @@ class CommandRecorder {
 public:
     explicit CommandRecorder(Scheduler& scheduler_) noexcept : scheduler{&scheduler_} {}
     explicit CommandRecorder(vk::CommandBuffer cmdbuf) noexcept : fixed{cmdbuf} {}
+
+    /// gpu_profile = 4: what kind of untimed GPU work this records (Scheduler::ProfileNote).
+    void Note(u32 kind, u32 image_barriers = 0) const noexcept {
+        if (scheduler) {
+            scheduler->ProfileNote(kind, image_barriers);
+            if (scheduler->barrier_trace && kind != Scheduler::NoteBarrier) {
+                scheduler->TraceWork(kind);
+            }
+        }
+    }
+
+    /// ISS_BARRIER_TRACE: work that is not a Note() kind (render pass begin / end).
+    void TraceWork(u32 kind) const {
+        if (scheduler && scheduler->barrier_trace) {
+            scheduler->TraceWork(kind);
+        }
+    }
 
     /// A bound state of the command buffer changes (BindCache::epoch).
     void NoteBind() const noexcept {
@@ -1030,14 +1113,20 @@ public:
     }
 
     void dispatch(u32 x, u32 y, u32 z) const {
+        Note(Scheduler::NoteDispatch);
         Record([=](vk::CommandBuffer c) { c.dispatch(x, y, z); });
     }
 
     void dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) const {
+        Note(Scheduler::NoteDispatch);
         Record([=](vk::CommandBuffer c) { c.dispatchIndirect(buffer, offset); });
     }
 
     void pipelineBarrier2(const vk::DependencyInfo& info) const {
+        Note(Scheduler::NoteBarrier, info.imageMemoryBarrierCount);
+        if (scheduler && scheduler->barrier_trace) {
+            scheduler->TraceBarrier(info, __builtin_return_address(0));
+        }
         if (const vk::CommandBuffer c = Direct()) {
             c.pipelineBarrier2(info);
             return;
@@ -1052,6 +1141,7 @@ public:
     }
 
     void beginRendering(const vk::RenderingInfo& info) const {
+        TraceWork(Scheduler::TraceBeginRendering);
         if (const vk::CommandBuffer c = Direct()) {
             c.beginRendering(info);
             return;
@@ -1065,11 +1155,13 @@ public:
     }
 
     void endRendering() const {
+        TraceWork(Scheduler::TraceEndRendering);
         Record([](vk::CommandBuffer c) { c.endRendering(); });
     }
 
     void copyBuffer(vk::Buffer src, vk::Buffer dst,
                     vk::ArrayProxy<const vk::BufferCopy> const& regions) const {
+        Note(Scheduler::NoteCopyBuffer);
         if (const vk::CommandBuffer c = Direct()) {
             c.copyBuffer(src, dst, regions);
             return;
@@ -1082,6 +1174,7 @@ public:
 
     void copyBufferToImage(vk::Buffer src, vk::Image dst, vk::ImageLayout layout,
                            vk::ArrayProxy<const vk::BufferImageCopy> const& regions) const {
+        Note(Scheduler::NoteBufferToImage);
         if (const vk::CommandBuffer c = Direct()) {
             c.copyBufferToImage(src, dst, layout, regions);
             return;
@@ -1094,6 +1187,7 @@ public:
 
     void copyImageToBuffer(vk::Image src, vk::ImageLayout layout, vk::Buffer dst,
                            vk::ArrayProxy<const vk::BufferImageCopy> const& regions) const {
+        Note(Scheduler::NoteImageToBuffer);
         if (const vk::CommandBuffer c = Direct()) {
             c.copyImageToBuffer(src, layout, dst, regions);
             return;
@@ -1107,6 +1201,7 @@ public:
     void copyImage(vk::Image src, vk::ImageLayout src_layout, vk::Image dst,
                    vk::ImageLayout dst_layout,
                    vk::ArrayProxy<const vk::ImageCopy> const& regions) const {
+        Note(Scheduler::NoteCopyImage);
         if (const vk::CommandBuffer c = Direct()) {
             c.copyImage(src, src_layout, dst, dst_layout, regions);
             return;
@@ -1122,6 +1217,7 @@ public:
     void resolveImage(vk::Image src, vk::ImageLayout src_layout, vk::Image dst,
                       vk::ImageLayout dst_layout,
                       vk::ArrayProxy<const vk::ImageResolve> const& regions) const {
+        Note(Scheduler::NoteResolve);
         if (const vk::CommandBuffer c = Direct()) {
             c.resolveImage(src, src_layout, dst, dst_layout, regions);
             return;
@@ -1137,6 +1233,7 @@ public:
     void clearColorImage(vk::Image image, vk::ImageLayout layout,
                          const vk::ClearColorValue& color,
                          vk::ArrayProxy<const vk::ImageSubresourceRange> const& ranges) const {
+        Note(Scheduler::NoteClear);
         if (const vk::CommandBuffer c = Direct()) {
             c.clearColorImage(image, layout, color, ranges);
             return;
@@ -1149,11 +1246,13 @@ public:
 
     void fillBuffer(vk::Buffer buffer, vk::DeviceSize offset, vk::DeviceSize size,
                     u32 data) const {
+        Note(Scheduler::NoteFillUpdate);
         Record([=](vk::CommandBuffer c) { c.fillBuffer(buffer, offset, size, data); });
     }
 
     void updateBuffer(vk::Buffer buffer, vk::DeviceSize offset, vk::DeviceSize size,
                       const void* data) const {
+        Note(Scheduler::NoteFillUpdate);
         if (const vk::CommandBuffer c = Direct()) {
             c.updateBuffer(buffer, offset, size, data);
             return;
@@ -1174,6 +1273,7 @@ public:
     void copyQueryPoolResults(vk::QueryPool pool, u32 first, u32 count, vk::Buffer dst,
                               vk::DeviceSize offset, vk::DeviceSize stride,
                               vk::QueryResultFlags flags) const {
+        Note(Scheduler::NoteQuery);
         Record([=](vk::CommandBuffer c) {
             c.copyQueryPoolResults(pool, first, count, dst, offset, stride, flags);
         });

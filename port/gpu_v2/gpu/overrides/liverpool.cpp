@@ -1742,6 +1742,125 @@ static void EndSegment(const SegmentCensus& seg) {
     std::fprintf(stderr, "SEGMENT_CENSUS inherited_keys%s\n", keys.c_str());
 }
 
+// ISS_SYNC_TRACE=1 (diagnostics, off by default): how often the game itself asks the GPU to wait
+// or flush caches (EVENT_WRITE by event type, ACQUIRE_MEM, EOS/EOP, RELEASE_MEM, WAIT_REG_MEM),
+// graphics ring vs asynchronous compute rings, to compare with the barriers the port adds from
+// its own hazard tracking (ISS_BARRIER_TRACE). Packets inside native segments are not seen here.
+namespace sync_trace {
+enum Kind : u32 { Acquire, Eos, Eop, Release, WaitMem, NumKinds };
+struct Counts {
+    std::array<std::atomic<u64>, 64> events{};
+    std::array<std::atomic<u64>, NumKinds> kinds{};
+};
+inline Counts gfx, asc;
+inline std::atomic<u64> report_ns{};
+static bool Enabled() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_SYNC_TRACE");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
+static void Event(Counts& c, u32 type) {
+    c.events[type & 63].fetch_add(1, std::memory_order_relaxed);
+}
+static void Kind(Counts& c, u32 kind) {
+    c.kinds[kind].fetch_add(1, std::memory_order_relaxed);
+}
+/// Any command processor thread: prints and clears the counts every 5 s (one thread wins).
+static void MaybeReport() {
+    const u64 now = Common::Perf::NowNs();
+    u64 last = report_ns.load(std::memory_order_relaxed);
+    if (now - last < 5'000'000'000ULL ||
+        !report_ns.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+        return;
+    }
+    const double seconds = last ? double(now - last) / 1e9 : 5.0;
+    for (Counts* c : {&gfx, &asc}) {
+        std::string events;
+        for (u32 t = 0; t < 64; ++t) {
+            const u64 n = c->events[t].exchange(0, std::memory_order_relaxed);
+            if (n) events += fmt::format(" ev{}={:.0f}", t, n / seconds);
+        }
+        std::string kinds;
+        static constexpr const char* names[] = {"acquire", "eos", "eop", "release", "waitmem"};
+        for (u32 k = 0; k < NumKinds; ++k) {
+            kinds += fmt::format(" {}={:.0f}", names[k],
+                                 c->kinds[k].exchange(0, std::memory_order_relaxed) / seconds);
+        }
+        std::fprintf(stderr, "SYNC_TRACE %s per s:%s |%s\n", c == &gfx ? "gfx" : "asc",
+                     kinds.c_str(), events.c_str());
+    }
+}
+} // namespace sync_trace
+
+// The deferred label writes of a compute ring's RELEASE_MEMs land in the ring's order. With
+// ISS_ASC_NATIVE_QUEUE they are written by two completion threads (the compute queue's for
+// AscRelease, the graphics queue's for DeferUnifiedFence); without an order, a write of an older
+// counter value could land after a newer one and leave the game waiting for a value already passed
+// (LABEL_BACKWARDS, 2026-11-02). A write waits for the ring's earlier ones at most 100 ms.
+namespace label_order {
+constexpr u32 NumRings = 64;
+inline std::array<std::atomic<u64>, NumRings> issued{};
+inline std::array<std::atomic<u64>, NumRings> done{};
+inline std::mutex mutex;
+inline std::condition_variable cv;
+/// Command processor, in packet order: the ring's next ticket.
+static u64 Issue(u32 ring) {
+    return ring < NumRings ? issued[ring].fetch_add(1, std::memory_order_relaxed) + 1 : 0;
+}
+/// Completion thread: waits until the ring's earlier tickets are written (bounded). Returns 0 in
+/// turn at once, 1 after waiting, 2 timed out (diagnostics).
+static int WaitTurn(u32 ring, u64 ticket) {
+    if (!ticket || ring >= NumRings) return 0;
+    if (done[ring].load(std::memory_order_acquire) + 1 >= ticket) return 0;
+    std::unique_lock lock{mutex};
+    const bool ok = cv.wait_for(lock, std::chrono::milliseconds{100}, [&] {
+        return done[ring].load(std::memory_order_acquire) + 1 >= ticket;
+    });
+    return ok ? 1 : 2;
+}
+static void Done(u32 ring, u64 ticket) {
+    if (!ticket || ring >= NumRings) return;
+    u64 seen = done[ring].load(std::memory_order_relaxed);
+    while (seen < ticket &&
+           !done[ring].compare_exchange_weak(seen, ticket, std::memory_order_release)) {
+    }
+    { std::scoped_lock lock{mutex}; }
+    cv.notify_all();
+}
+} // namespace label_order
+
+// A WAIT_REG_MEM that has not been satisfied for 2 s (a likely deadlock): what it waits for, what
+// memory holds and where both GPU queues are, printed once per wait. Diagnostics only.
+struct LongWaitWatch {
+    u64 start_ns = Common::Perf::NowNs();
+    bool reported = false;
+    void Check(const char* queue, u32 vqid, const PM4CmdWaitRegMem& wait,
+               Vulkan::Rasterizer* rasterizer) {
+        // ISS_LONG_WAIT_MS=<n> (default 2000): how long a wait lasts before it is reported.
+        static const u64 threshold_ns = [] {
+            const char* p = std::getenv("ISS_LONG_WAIT_MS");
+            return (p ? std::strtoull(p, nullptr, 10) : 2000ull) * 1'000'000ull;
+        }();
+        if (reported || Common::Perf::NowNs() - start_ns < threshold_ns) return;
+        reported = true;
+        const bool memory = wait.mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
+        const VAddr addr = wait.Address<VAddr>();
+        const u32 current = memory ? *reinterpret_cast<const u32*>(addr) : 0;
+        u32 pending = 0;
+        const bool has_pending = memory && rasterizer && rasterizer->PendingUnifiedLabel(addr, pending);
+        std::fprintf(stderr,
+                     "LONG_WAIT queue=%s vqid=%u addr=0x%llx memory=%d function=%u ref=0x%x "
+                     "mask=0x%x current=0x%x pending_label=%d(0x%x) %s\n",
+                     queue, vqid, (unsigned long long)addr, int(memory),
+                     u32(wait.function.Value()), wait.ref, wait.mask, current,
+                     int(has_pending), pending,
+                     rasterizer ? rasterizer->AscDebugState().c_str() : "");
+        std::fflush(stderr);
+    }
+};
+
 // ISS_PASS_COST: the class of a graphics packet (fast_draw.inl PassCostTick): 1 draw,
 // 2 dispatch, 3.. packets that write or wait on memory, 0 the rest.
 static u32 PassCostClass(PM4ItOpcode opcode) {
@@ -2920,6 +3039,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWrite: {
                 const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
+                if (rasterizer) rasterizer->NoteGuestSync();
+                if (sync_trace::Enabled()) {
+                    sync_trace::Event(sync_trace::gfx, u32(event->event_type.Value()));
+                    sync_trace::MaybeReport();
+                }
                 LOG_DEBUG(Render, "Encountered EventWrite: event_type = {}, event_index = {}",
                           magic_enum::enum_name(event->event_type.Value()),
                           magic_enum::enum_name(event->event_index.Value()));
@@ -2952,6 +3076,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::EventWriteEos: {
+                if (rasterizer) rasterizer->NoteGuestSync();
+                if (sync_trace::Enabled()) {
+                    sync_trace::Kind(sync_trace::gfx, sync_trace::Eos); sync_trace::MaybeReport();
+                }
                 if (pipe_deferred) {
                     break; // Queued to the draw pipe worker (RunDeferredFence).
                 }
@@ -3028,6 +3156,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::EventWriteEop: {
+                if (rasterizer) rasterizer->NoteGuestSync();
+                if (sync_trace::Enabled()) {
+                    sync_trace::Kind(sync_trace::gfx, sync_trace::Eop); sync_trace::MaybeReport();
+                }
                 if (pipe_deferred) {
                     break; // Queued to the draw pipe worker (RunDeferredFence).
                 }
@@ -3283,6 +3415,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::AcquireMem: {
                 // const auto* acquire_mem = reinterpret_cast<PM4CmdAcquireMem*>(header);
+                if (rasterizer) rasterizer->NoteGuestSync();
+                if (sync_trace::Enabled()) {
+                    sync_trace::Kind(sync_trace::gfx, sync_trace::Acquire); sync_trace::MaybeReport();
+                }
                 break;
             }
             case PM4ItOpcode::Rewind: {
@@ -3299,6 +3435,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::WaitRegMem: {
+                if (rasterizer) rasterizer->NoteGuestSync();
+                if (sync_trace::Enabled()) {
+                    sync_trace::Kind(sync_trace::gfx, sync_trace::WaitMem); sync_trace::MaybeReport();
+                }
                 if (pipe_deferred) {
                     break; // Holds in the draw pipe's order (RunDeferredFence).
                 }
@@ -3349,8 +3489,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                         break;
                     }
                 }
-                while (!wait_reg_mem->Test(regs.reg_array)) {
-                    YIELD_GFX();
+                {
+                    LongWaitWatch watch;
+                    while (!wait_reg_mem->Test(regs.reg_array)) {
+                        watch.Check("gfx", 0, *wait_reg_mem, rasterizer);
+                        YIELD_GFX();
+                    }
                 }
                 OnWaitRegMemSatisfied(*wait_reg_mem);
                 break;
@@ -3731,6 +3875,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
             break;
         }
         case PM4ItOpcode::AcquireMem: {
+            if (rasterizer) rasterizer->NoteGuestSync();
+            if (sync_trace::Enabled()) {
+                sync_trace::Kind(sync_trace::asc, sync_trace::Acquire); sync_trace::MaybeReport();
+            }
             break;
         }
         case PM4ItOpcode::Rewind: {
@@ -3972,6 +4120,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
             break;
         }
         case PM4ItOpcode::WaitRegMem: {
+            if (rasterizer) rasterizer->NoteGuestSync();
+            if (sync_trace::Enabled()) {
+                sync_trace::Kind(sync_trace::asc, sync_trace::WaitMem); sync_trace::MaybeReport();
+            }
             if (pipe_deferred) {
                 break; // Holds in the draw pipe's order (RunDeferredFence).
             }
@@ -3992,13 +4144,21 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
                     break;
                 }
             }
-            while (!wait_reg_mem->Test(compute_regs.reg_array)) {
-                YIELD_ASC_QUEUE(vqid);
+            {
+                LongWaitWatch watch;
+                while (!wait_reg_mem->Test(compute_regs.reg_array)) {
+                    watch.Check("asc", vqid, *wait_reg_mem, rasterizer);
+                    YIELD_ASC_QUEUE(vqid);
+                }
             }
             OnWaitRegMemSatisfied(*wait_reg_mem);
             break;
         }
         case PM4ItOpcode::ReleaseMem: {
+            if (rasterizer) rasterizer->NoteGuestSync();
+            if (sync_trace::Enabled()) {
+                sync_trace::Kind(sync_trace::asc, sync_trace::Release); sync_trace::MaybeReport();
+            }
             if (pipe_deferred) {
                 break; // Queued to the draw pipe worker (RunDeferredFence).
             }
@@ -4018,6 +4178,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
             const VAddr dst = packet.Address<VAddr>();
             iss::timeline::Emit("asc_release_mem", reinterpret_cast<u64>(this), vqid, dst,
                                 packet.DataDWord(), u32(selection));
+            // label_order: this release's place among the ring's label writes.
+            const u64 label_ticket = !CpSplitActive() && rasterizer && direct_write_bytes != 0
+                                         ? label_order::Issue(vqid)
+                                         : 0;
             if (CpSplitActive() && direct_write_bytes) {
                 const auto write = [packet,pipe_id=queue.pipe_id] {
                     packet.SignalFence(
@@ -4042,8 +4206,14 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
                            return rasterizer->DeferUnifiedFence(dst, direct_write_bytes, value, irq,
                                                                 std::move(write));
                        }(
-                                                     [packet, pipe_id = queue.pipe_id] {
-                           // ISS_UNIFIED_MEMORY: label and interrupt when the GPU is done.
+                                                     [packet, pipe_id = queue.pipe_id, ring = vqid,
+                                                      label_ticket] {
+                           // ISS_UNIFIED_MEMORY: label and interrupt when the GPU is done, after
+                           // the ring's earlier labels (label_order).
+                           const int turn = label_order::WaitTurn(ring, label_ticket);
+                           const u64 done_before =
+                               ring < label_order::NumRings ? label_order::done[ring].load() : 0;
+                           SCOPE_EXIT { label_order::Done(ring, label_ticket); };
                            u64 value = 0;
                            u32 num_bytes = sizeof(u64);
                            switch (packet.data_sel.Value()) {
@@ -4060,6 +4230,47 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
                            default:
                                value = GetGpuPerfCounter();
                                break;
+                           }
+                           {
+                               // Diagnostics: a counter label written backwards (a later write of
+                               // a smaller value landing after a larger one, e.g. two queues'
+                               // completion threads racing) leaves a guest waiting forever.
+                               const u32 before = *packet.Address<const u32*>();
+                               const u32 now = u32(value);
+                               // The previous write of this address by this path (ring, ticket).
+                               struct LastWrite { u64 ticket; u32 ring; u32 value; };
+                               static std::mutex last_mutex;
+                               static std::unordered_map<VAddr, LastWrite> last_writes;
+                               LastWrite previous{};
+                               {
+                                   std::scoped_lock lock{last_mutex};
+                                   auto& slot = last_writes[packet.Address<VAddr>()];
+                                   previous = slot;
+                                   slot = {label_ticket, ring, now};
+                               }
+                               if (now < before && before - now < 0x100000u) {
+                                   std::fprintf(stderr,
+                                                "LABEL_BACKWARDS_PREV ring=%u ticket=%llu value=0x%x "
+                                                "(0 ticket: no earlier write by this path)\n",
+                                                previous.ring, (unsigned long long)previous.ticket,
+                                                previous.value);
+                                   static std::atomic<u32> logged{0};
+                                   if (logged.fetch_add(1) < 32) {
+#ifdef _WIN32
+                                       const auto thread_id = GetCurrentThreadId();
+#else
+                                       const auto thread_id = gettid();
+#endif
+                                       std::fprintf(stderr,
+                                                    "LABEL_BACKWARDS addr=0x%llx before=0x%x new=0x%x "
+                                                    "thread=%lu ring=%u ticket=%llu done_before=%llu "
+                                                    "turn=%d\n",
+                                                    (unsigned long long)packet.Address<VAddr>(),
+                                                    before, now, static_cast<unsigned long>(thread_id), ring,
+                                                    (unsigned long long)label_ticket,
+                                                    (unsigned long long)done_before, turn);
+                                   }
+                               }
                            }
                            Core::Memory::Instance()->TryWriteBacking(
                                packet.Address<void*>(), &value, num_bytes);
@@ -4080,6 +4291,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
                     });
                 if (rasterizer && direct_write_bytes)
                     rasterizer->OnGpuThreadWrite(dst,direct_write_bytes);
+                // Written now (not deferred): the ring's later labels need not wait for it.
+                label_order::Done(vqid, label_ticket);
             }
             switch (release_mem->data_sel.Value()) {
             case DataSelect::Data32Low:
@@ -4098,7 +4311,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, u6
             break;
         }
         case PM4ItOpcode::EventWrite: {
-            // const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
+            if (rasterizer) rasterizer->NoteGuestSync();
+            if (sync_trace::Enabled()) {
+                const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
+                sync_trace::Event(sync_trace::asc, u32(event->event_type.Value())); sync_trace::MaybeReport();
+            }
             break;
         }
         default:

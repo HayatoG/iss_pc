@@ -49,7 +49,7 @@ inline State Decode(Save save,const Record& bytes){
  State state{};memcpy(&state,bytes.data()+44,sizeof(state));Validate(state);return state;
 }
 inline std::filesystem::path Directory(const std::filesystem::path& root){
- auto parent=root/"karma-saves-v2",dir=parent/"CUSA00223-01.07";
+ auto parent=root/"karma-saves-v2",dir=parent/(KarmaSaveTitle::Get()+"-01.07");
  for(const auto& p:{root,parent,dir})if(std::filesystem::is_symlink(std::filesystem::symlink_status(p)))throw std::runtime_error("Save state links refused");
  return dir;
 }

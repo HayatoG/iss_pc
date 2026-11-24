@@ -779,6 +779,8 @@ u32 Rasterizer::NativeRecorderExecute(const iss::native_gbuffer::Batch& b, u64 c
                                       const std::function<void(u32)>& set_registers,
                                       const std::function<void(const u32*)>& begin_draw,
                                       const std::function<void()>& end_draw) {
+    // ISS_GUEST_SYNC_BARRIERS: packets of this native range were not seen by the command processor.
+    SCOPE_EXIT { NoteGuestSync(); };
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::RecorderExecute};
     using namespace NativeRecorder;
     auto& c = cp_stats;

@@ -39,7 +39,7 @@ inline constexpr int kExtraPrefs = sizeof(kExtraKeys) / sizeof(kExtraKeys[0]);
 struct Values {
     // Native scene dimensions, applied once at startup; independent of output upscaling.
     std::atomic<int> iss_native_output{0}, iss_native_percent{100};
-    std::atomic<bool> iss_native_hud_edges{false};
+    std::atomic<bool> iss_native_hud_edges{true};  // 2026-11-07: HUD at screen edges by default
     /// FSR 3.1 temporal upscaling of the inFAMOUS image (renderer v2, gpu_v2/gpu/iss_temporal_upscaler.h). Read
     /// per frame; with it off the renderer behaves as before. Needs the game hooks (src/iss_temporal_hook.h).
     std::atomic<bool> iss_temporal{false};
@@ -86,7 +86,13 @@ struct Values {
     std::atomic<int> exclusive_status{0}; // 0 off, 1 waiting, 2 acquired, -1 unavailable
     std::atomic<const char*> exclusive_problem{nullptr};
     std::atomic<bool> vsync{true};
-    std::atomic<int> fps_limit{0};
+    /// Adaptive VSync (renderer v2, 2026-11-05, off by default): the display's FifoRelaxed mode,
+    /// where a late frame is shown at once instead of waiting a whole extra refresh. For GPUs
+    /// without Mailbox that run near 30/60 FPS. Live; TLG_PRESENT_MODE still overrides it.
+    std::atomic<bool> vsync_relaxed{false};
+    /// 60 by default (2026-11-05): renderer v2 now applies it (videoout_driver.cpp), and evenly
+    /// paced 60 FPS measured far steadier in fights than uncapped (3% vs 30-53% frame jumps).
+    std::atomic<int> fps_limit{60};
     /// Off by default (2026-10-16): a draw whose pipeline was still compiling was skipped, and the
     /// object vanished for a frame (grey flashes when the camera turns). Measured in the city with the
     /// first-run cache: 0 skipped draws against 85, same FPS, better worst frame (67 ms against 117).
@@ -172,7 +178,7 @@ struct Values {
     /// Keyboard and mouse button remap (TLG_KEY_MAP syntax); written by Load only, read once.
     std::string key_map;
     // Append experimental settings so established renderer field offsets stay stable.
-    std::atomic<int> iss_native_ui_16_9{1};
+    std::atomic<int> iss_native_ui_16_9{0};  // 2026-11-07: UI canvas of the screen's own shape by default
     /// Upscaler behind iss_temporal (renderer v2): 0 FSR 3.1, 1 NVIDIA DLSS. DLSS needs a bridge DLL and the
     /// player's own nvngx_dlss.dll (iss_temporal_dlss.h); without them the renderer uses FSR 3.1. Read at start.
     std::atomic<int> iss_temporal_backend{0};
@@ -186,10 +192,17 @@ struct Values {
     std::atomic<bool> iss_power_switch_enabled{true};
     std::atomic<int> iss_power_keys[4]{62,63,64,65}; // SDL F5/F6/F7/F8
     std::atomic<bool> iss_power_instant{true};
+    std::atomic<bool> iss_pad_speaker{true}; // controller-speaker sounds on/off (Insert > Controls)
     std::atomic<float> iss_power_glow{2.04f};
+    /// In-game keyboard & mouse bindings (tlg.ini key_binds, TLG_KEY_MAP syntax, only what differs from
+    /// the defaults). Changed by the menu while the game reads it: use KeyBinds()/SetKeyBinds().
+    std::string key_binds;
 };
 
 Values& Get();
+/// Thread-safe access to Values::key_binds (the bindings window writes it, the pad thread reads it).
+std::string KeyBinds();
+void SetKeyBinds(const std::string& value);
 
 /// Reads the file, then the environment overrides. Called once at start.
 void Load();

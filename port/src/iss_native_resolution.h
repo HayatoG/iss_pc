@@ -14,9 +14,11 @@
 #include <errno.h>
 #include "iss_native_exposure.h"
 
-enum { ISS_NATIVE_PRESETS = 6, ISS_NATIVE_SITE_COUNT = 18 };
-static const uint32_t iss_native_widths[] = {0,1920,2560,3440,3840,5120};
-static const uint32_t iss_native_heights[] = {0,1080,1440,1440,2160,1440};
+/* 6 and 7 (2026-11-05): the 1080-line ultrawides, 2560x1080 (21:9) and 3840x1080 (32:9). Added at
+ * the end so a saved iss_native_output keeps its meaning. */
+enum { ISS_NATIVE_PRESETS = 8, ISS_NATIVE_SITE_COUNT = 18 };
+static const uint32_t iss_native_widths[] = {0,1920,2560,3440,3840,5120,2560,3840};
+static const uint32_t iss_native_heights[] = {0,1080,1440,1440,2160,1440,1080,1080};
 typedef struct IssNativeConfig { int output, percent, hud_edges;
 #ifdef __cplusplus
     int ui_16_9=0;
@@ -51,10 +53,12 @@ static inline int iss_native_integer(const char *s,int min,int max,int *out) {
     *out=(int)n; return 1;
 }
 /* Strict parsing: malformed native settings reject the request, not a silently
- * clamped substitute resolution. Missing keys default to off/100% and the
- * corrected 16:9 menu canvas. Explicit existing choices remain respected. */
+ * clamped substitute resolution. Missing keys default to off/100%, the UI canvas of
+ * the screen's own shape and the HUD at the screen edges (2026-11-07: menus laid out
+ * by the game for wide screens, checked in play at 3440x1440). Explicit existing
+ * choices remain respected. */
 static inline int iss_native_config(FILE *f, IssNativeConfig *c) {
-    *c=(IssNativeConfig){0,100,0,1,0};
+    *c=(IssNativeConfig){0,100,1,0,0};
     if (!f) return 1;
     char line[1024]; int valid=1;
     while (fgets(line,sizeof(line),f)) {

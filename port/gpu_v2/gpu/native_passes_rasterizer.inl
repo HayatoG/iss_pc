@@ -239,10 +239,15 @@ static std::vector<u32> InheritedWords(const AmdGpu::Regs& regs, const u32* mask
 // (native_passes.cpp), on whichever thread holds it.
 struct LanePool {
     vk::CommandPool pool{};
+    /// ISS_NATIVE_PASSES_SAFE_CMD: secondaries replaced by a fresh one instead of reset, each
+    /// with the tick current when it was replaced; freed once the GPU is past it.
+    std::deque<std::pair<vk::CommandBuffer, u64>> replaced;
 };
 
 struct Rec {
     vk::CommandBuffer cmd{};
+    /// The tick the command processor last executed it in (0: never).
+    std::atomic<u64> exec_tick{};
     u32 generation{}; ///< of the segment it records for
     bool begun{};
     bool needs_reset{};
@@ -869,17 +874,47 @@ static bool Begin(np::Segment& s, Rec& r, const Template& t) {
         }));
         *s.lane_user = lane;
     }
+    const bool safe = SecondaryPoolSafe();
+    std::unique_lock pool_lock{SecondaryPoolMutex(), std::defer_lock};
+    if (safe) pool_lock.lock();
+    const auto device = g.instance->GetDevice();
+    const u64 gpu_tick = g.scheduler->GetWorkSemaphore()->KnownGpuTick();
+    if (r.cmd && r.needs_reset) {
+        // Reused only once the GPU is done with it (the segment retired); a reset before that
+        // would be a bug of the recycling, counted here.
+        static std::atomic<u32> early{};
+        if (const u64 exec = r.exec_tick.load(std::memory_order_relaxed);
+            exec > gpu_tick && early.fetch_add(1, std::memory_order_relaxed) < 20)
+            std::fprintf(stderr, "NATIVE_PASSES_EARLY_REUSE exec_tick=%llu gpu_tick=%llu\n",
+                         (unsigned long long)exec, (unsigned long long)gpu_tick);
+        if (safe) {
+            // A fresh secondary instead of resetting this one: it is freed once the GPU is past
+            // the tick current now (by then nothing recorded before can still use it).
+            lane->replaced.emplace_back(r.cmd, g.scheduler->CurrentTick());
+            r.cmd = vk::CommandBuffer{};
+        } else {
+            r.cmd.reset();
+        }
+    }
+    if (safe) {
+        std::vector<vk::CommandBuffer> done;
+        while (!lane->replaced.empty() && lane->replaced.front().second <= gpu_tick &&
+               done.size() < 64) {
+            done.push_back(lane->replaced.front().first);
+            lane->replaced.pop_front();
+        }
+        if (!done.empty()) device.freeCommandBuffers(lane->pool, done);
+    }
     if (!r.cmd) {
         const vk::CommandBufferAllocateInfo info{
             .commandPool = lane->pool,
             .level = vk::CommandBufferLevel::eSecondary,
             .commandBufferCount = 1,
         };
-        if (g.instance->GetDevice().allocateCommandBuffers(&info, &r.cmd) != vk::Result::eSuccess)
+        if (device.allocateCommandBuffers(&info, &r.cmd) != vk::Result::eSuccess)
             return false;
-    } else if (r.needs_reset) {
-        r.cmd.reset();
     }
+    r.exec_tick.store(0, std::memory_order_relaxed);
     const vk::CommandBufferInheritanceRenderingInfo rendering{
         .colorAttachmentCount = t.num_colors,
         .pColorAttachmentFormats = t.color_formats.data(),
@@ -1288,7 +1323,12 @@ static np::DrawResult Record(np::Segment& s, void* regs_ptr, u64 key, const u32*
 static bool Close(np::Segment& s) {
     auto* r = static_cast<Rec*>(s.recording);
     if (!r || !r->begun || r->templates.empty()) return false;
-    r->cmd.end();
+    if (SecondaryPoolSafe()) {
+        std::scoped_lock lock{SecondaryPoolMutex()};
+        r->cmd.end();
+    } else {
+        r->cmd.end();
+    }
     r->begun = false;
     // Its buffer reads, sorted and merged (ranges of one buffer up to 64 KB apart).
     auto& reads = r->reads;
@@ -1540,6 +1580,8 @@ void Rasterizer::NativePassesSetup() {
 bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
                                    const std::function<void(const u32*)>& begin_draw,
                                    const std::function<void()>& end_draw, u64& tick) {
+    // ISS_GUEST_SYNC_BARRIERS: packets of this native range were not seen by the command processor.
+    SCOPE_EXIT { NoteGuestSync(); };
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::RecorderExecute};
     using namespace NativePasses;
     auto& c = cp_stats;
@@ -1914,7 +1956,15 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
         needs_barrier |= Rt().IsBufferAccessed(rd.buffer, rd.offset, rd.size, false);
     if (needs_barrier) runtime.FlushBarriers();
     iss::cp_path::Switch(iss::cp_path::RecDraws);
-    if (r->bb_segment) {
+    // ISS_NATIVE_PASS_MERGE=1: the previous segment left its rendering open and nothing was
+    // recorded since (the scheduler closes it otherwise): this one executes in it. Its segment
+    // marker would be a command in that rendering, so it has none (its draws keep theirs).
+    static const bool pass_merge = [] {
+        const char* p = std::getenv("ISS_NATIVE_PASS_MERGE");
+        return p && p[0] == '1';
+    }();
+    const bool continuing = pass_merge && scheduler.SecondaryOpenFor(render);
+    if (r->bb_segment && !continuing) {
         // GPU black box: the segment as one command of the command processor's queue.
         static thread_local std::vector<VideoCore::ImageId> bb_images;
         bb_images.clear();
@@ -1931,10 +1981,20 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
                               bb_ctx);
     }
     scheduler.BeginSecondaryRendering(render);
-    scheduler.Recorder().Record([cmd = r->cmd](vk::CommandBuffer primary) {
-        primary.executeCommands(cmd);
-    });
-    scheduler.EndRendering();
+    if (pass_merge) {
+        scheduler.ExecuteSecondary(r->cmd);
+        scheduler.KeepSecondaryOpen();
+    } else {
+        scheduler.Recorder().Record([cmd = r->cmd](vk::CommandBuffer primary) {
+            if (SecondaryPoolSafe()) {
+                std::scoped_lock lock{SecondaryPoolMutex()};
+                primary.executeCommands(cmd);
+            } else {
+                primary.executeCommands(cmd);
+            }
+        });
+        scheduler.EndRendering();
+    }
     scheduler.GetDynamicState().Invalidate();
     fast_draw.valid = false;
     for (const u32* packet : s.draw_packets) {
@@ -1948,6 +2008,7 @@ bool Rasterizer::NativePassExecute(iss::native_passes::Segment& s,
         Rt().AccessBuffer(rd.buffer, rd.offset, rd.size, vk::PipelineStageFlagBits2::eAllGraphics,
                           vk::AccessFlagBits2::eShaderRead);
     tick = scheduler.CurrentTick();
+    r->exec_tick.store(tick, std::memory_order_relaxed);
     ++c.executed;
     c.draws += s.draw_packets.size();
     if (indirect_first) {

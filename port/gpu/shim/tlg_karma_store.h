@@ -1,5 +1,6 @@
 #pragma once
 #include "../../src/iss_karma.h"
+#include "tlg_karma_save_title.h"
 #include <filesystem>
 #include <fstream>
 #include <array>
@@ -40,7 +41,7 @@ inline void WriteNew(const fs::path& path,const IssKarmaSnapshot& s){
  if(!SameOriginal(Read(path),s))throw std::runtime_error("Snapshot verification failed");
 }
 inline int Load(const fs::path& root,IssKarmaSnapshot& out){
- const auto dir=root/"karma-original"/"CUSA00223-01.07-user1";
+ const auto dir=root/"karma-original"/(KarmaSaveTitle::Get()+"-01.07-user1");
  if(!fs::exists(dir))return 0;
  if(fs::is_symlink(fs::symlink_status(root/"karma-original"))||fs::is_symlink(fs::symlink_status(dir)))throw std::runtime_error("Snapshot directory links refused");
  const auto original=Read(dir/"original.bin");
@@ -48,7 +49,7 @@ inline int Load(const fs::path& root,IssKarmaSnapshot& out){
  if(!SameOriginal(original,out))throw std::runtime_error("Snapshot originals do not match");return 1;
 }
 inline void Save(const fs::path& root,const IssKarmaSnapshot& s){
- const auto parent=root/"karma-original",dir=parent/"CUSA00223-01.07-user1";
+ const auto parent=root/"karma-original",dir=parent/(KarmaSaveTitle::Get()+"-01.07-user1");
  fs::create_directories(parent);if(fs::is_symlink(fs::symlink_status(parent)))throw std::runtime_error("Snapshot directory links refused");
  if(fs::create_directory(dir)){
   IssKarmaSnapshot original=s;memset(original.added,0,sizeof(original.added));WriteNew(dir/"original.bin",original);

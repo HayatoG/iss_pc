@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <thread>
@@ -1387,8 +1388,25 @@ PipelineCache::~PipelineCache() {
 // not fit (an image of another type, a formatted buffer...) gets its own permutation, as before.
 // ---------------------------------------------------------------------------------------------
 } // namespace Vulkan
+#ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
+#endif
+namespace iss::shader_swap {
+std::string ExeDirectory() {
+#ifdef _WIN32
+    char path[MAX_PATH]{};
+    const DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+    std::string dir(path, n);
+    const size_t slash = dir.find_last_of("\\/");
+    return slash == std::string::npos ? std::string{"."} : dir.substr(0, slash);
+#else
+    std::error_code error;
+    const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
+    return error ? "." : executable.parent_path().string();
+#endif
+}
+} // namespace iss::shader_swap
 namespace Vulkan {
 /// ISS_AOT_TRACE=1: names the module and offset of an access violation before the probe's
 /// handler ends the process.

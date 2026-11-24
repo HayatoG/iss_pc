@@ -398,6 +398,9 @@ bool WindowSDL::PollEvents() {
         }
         if (TlgOverlay::HandleEvent(event) || HandleMouse(event)) {
             if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+                std::fprintf(stderr, "PORT_CLOSE_EVENT type=%s (overlay/mouse handled)\n",
+                             event.type == SDL_EVENT_QUIT ? "quit" : "window_close_requested");
+                std::fflush(stderr);
                 is_open = false;
             }
             continue;
@@ -426,9 +429,25 @@ bool WindowSDL::PollEvents() {
             break;
         }
         case SDL_EVENT_QUIT:
-        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED: {
+            // Why the window closes: QUIT alone comes from the console (Ctrl+C/Break), a signal
+            // or the end of the Windows session; CLOSE_REQUESTED from WM_CLOSE (Alt+F4, the title
+            // bar or taskbar, or another program). The window in front tells which program.
+            const auto flags = SDL_GetWindowFlags(window);
+            char front[256] = "?";
+#ifdef _WIN32
+            if (HWND fg = GetForegroundWindow()) {
+                GetWindowTextA(fg, front, sizeof(front));
+            }
+#endif
+            std::fprintf(stderr, "PORT_CLOSE_EVENT type=%s mod=0x%x focused=%d front=\"%s\"\n",
+                         event.type == SDL_EVENT_QUIT ? "quit" : "window_close_requested",
+                         unsigned(SDL_GetModState()), (flags & SDL_WINDOW_INPUT_FOCUS) ? 1 : 0,
+                         front);
+            std::fflush(stderr);
             is_open = false;
             break;
+        }
         default:
             break;
         }

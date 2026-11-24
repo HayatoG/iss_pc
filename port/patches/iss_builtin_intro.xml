@@ -5,7 +5,7 @@
   </TitleID>
   <Metadata Title="inFAMOUS Second Son" Name="Skip intro movie" Note="Returns immediately from the boot splash movie start. It skips the logo movie before the title screen; story cutscenes are unchanged." Author="junminlee2004" PatchVer="1.0" AppVer="01.07" AppElf="eboot.bin" isEnabled="false">
     <PatchList>
-      <Line Type="mask" Address="55 48 89 E5 41 57 41 56 53 48 83 EC 18 4C 8B 3D ?? ?? ?? ?? 49 89 FE 49 8B 07 48 89 45 E0 49 8B 46" Offset="0" Value="C3" />
+      <Line Type="mask" Address="55 48 89 E5 41 57 41 56 53 48 83 EC 18 4C 8B 3D ?? ?? ?? ?? 49 89 FE 49 8B 07 48 89 45 E0 49 8B 46" Offset="0x400000" Value="C3" />
     </PatchList>
   </Metadata>
   <Metadata Title="inFAMOUS Second Son" Name="Disable motion blur" Note="Disables camera motion blur through the engine's own blur-off branch. CUSA00223 update 1.07 only. Applies on the next launch; disable and restart to restore. Does not remove atmospheric fog or depth of field." Author="junminlee2004 (native-port adaptation)" PatchVer="1.0" AppVer="01.07" AppElf="eboot.bin" isEnabled="false">

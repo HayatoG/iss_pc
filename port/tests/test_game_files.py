@@ -141,6 +141,7 @@ class ParamSfoCheckTests(unittest.TestCase):
     def check(self, game, layout=run.EBOOT_107):
         run._inspected.clear()
         with mock.patch.object(run, 'eboot_layout', side_effect=lambda path: layout), \
+                mock.patch.object(run, 'ART_MIN_FILES', len(run.ART_REQUIRED)), \
                 mock.patch.object(run, 'external_tls_relocations', side_effect=lambda path: 0), \
                 mock.patch.object(run, 'PROBE', game / 'eboot.bin'):
             return run.check_game(game)
@@ -149,6 +150,8 @@ class ParamSfoCheckTests(unittest.TestCase):
         game = Path(tmp)
         for name in ('eboot.bin', 'sce_module/libc.prx', 'sce_module/libSceFios2.prx'):
             write(game / name, b'x')
+        for name in run.ART_REQUIRED:
+            write(game / 'art' / name, b'x')
         if app_ver:
             write(game / 'sce_sys' / 'param.sfo', param_sfo(app_ver))
         return game

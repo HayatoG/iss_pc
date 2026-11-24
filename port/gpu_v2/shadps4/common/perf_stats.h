@@ -543,6 +543,9 @@ struct Tuning {
     std::array<std::atomic<u64>, MaxRelaxedSites> relaxed_sites{};
     std::atomic<u32> num_relaxed_sites{0};
     std::atomic<bool> relaxed_all{false};
+    /// Where the game's executable was loaded (iss_gpu_install_image): relaxed_sites are offsets
+    /// from it. MemoryPatcher::g_eboot_address stays 0 in this port.
+    std::atomic<u64> relaxed_image_base{0};
     /// The compute work of the guest's asynchronous compute queues runs on a GPU queue of its
     /// own, alongside the graphics work, as on the PS4 (dispatches reading or writing images
     /// stay on the graphics queue). Dependencies between the queues are tracked per 256 KB of

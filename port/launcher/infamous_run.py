@@ -398,9 +398,29 @@ TEXT = {
                   'para o sce_sys/ da pasta do jogo; veja "Arquivos do jogo necessÃ¡rios" no README.'),
     'unreadable': ('{detail} could not be read (damaged, incomplete or still encrypted): dump it again from the PS4.',
                    'NÃ£o deu para ler o {detail} (danificado, incompleto ou ainda criptografado): faÃ§a o dump de novo no PS4.'),
+    'other_title': ('{detail}: this is not the US edition (CUSA00223). The game runs, but the mouse camera, native '
+                    'rendering, trophies, the karma switcher and the other US-only features stay off.',
+                    '{detail}: esta não é a edição americana (CUSA00223). O jogo abre, mas a câmera pelo mouse, a '
+                    'renderização nativa, os troféus, o seletor de karma e os outros recursos só da edição americana '
+                    'ficam desligados.'),
+    'no_art': ('{detail} is missing: the game\'s art files (the art folder, about 27 GB) are not all there, so the '
+               'game would start to a black screen. Copy the whole base game folder, then update 1.07 over it.',
+               'Falta o {detail}: os arquivos de arte do jogo (a pasta art, cerca de 27 GB) não estão completos e o '
+               'jogo abriria com a tela preta. Copie a pasta inteira do jogo base e depois o update 1.07 por cima.'),
+    'small_art': ('the art folder has only {detail} files; the full game has about 1,800 files (27 GB). Some may be missing '
+                  'or not downloaded yet (OneDrive, an unfinished copy).',
+                  'a pasta art tem só {detail} arquivos; o jogo completo tem cerca de 1.800 arquivos (27 GB). Alguns podem '
+                  'estar faltando ou ainda não baixados (OneDrive, cópia incompleta).'),
 }
 # Problems that are reported but do not block Play.
-WARNINGS = {'other_eboot', 'old_param'}
+WARNINGS = {'other_eboot', 'old_param', 'other_title', 'small_art'}
+# The edition the port's direct mouse, native rendering, trophies and karma switcher are made for.
+TITLE_US = 'CUSA00223'
+# Art files the game opens at every start, the same in every edition and language (without them it
+# starts to a black screen), and the least number of files a complete art folder has (1,819 in US 1.07).
+ART_REQUIRED = ('cache/all_shaders.xpps', 'cache/psarc/music_a.psarc', 'cache/psarc/music_b.psarc',
+                'cache/psarc/music_c.psarc', 'ui/vshell/save_icon.png')
+ART_MIN_FILES = 1000
 
 
 def message(key, portuguese=None, **fmt):
@@ -454,6 +474,108 @@ def _cached(path, kind, inspect):
     return _inspected[key]
 
 
+def verify_list_path(title=TITLE_US):
+    """The reference list of a complete 1.07 art/ folder of this edition (tools/verify), shipped with
+    the package: CUSA00223 (US) or CUSA00004 (EU; same code, other language packs)."""
+    return PORT_DIR / 'tools' / 'verify' / f'{title}-107-art.json'
+
+
+def verify_game(game_dir, progress=None, stopped=None):
+    """Full check of the game folder's art/ files against the reference list: every file's size,
+    then its SHA-256. progress(done_bytes, total_bytes) is called while reading; stopped() returning
+    True ends the check early. Returns {'state': 'ok'|'bad'|'stopped'|'nolist'|'other_title',
+    'missing': [...], 'size': [...], 'content': [...], 'files': n, 'bytes': n, 'title': id}."""
+    import hashlib
+    game = Path(game_dir)
+    result = {'state': 'ok', 'missing': [], 'size': [], 'content': [], 'files': 0, 'bytes': 0,
+              'title': game_title(game)}
+    try:
+        reference = json.loads(verify_list_path(result['title'] or TITLE_US).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        # No list for this edition: say so (other_title) rather than "the list is missing".
+        result['state'] = 'other_title' if result['title'] and result['title'] != TITLE_US else 'nolist'
+        return result
+    if result['title'] and result['title'] != reference.get('title_id'):
+        result['state'] = 'other_title'
+        return result
+    entries = reference['files']
+    result['files'] = len(entries)
+    total = sum(size for _, size, _ in entries)
+    result['bytes'] = total
+    done = 0
+    to_hash = []
+    for rel, size, digest in entries:      # sizes first: missing or cut-short files show at once
+        path = game / rel
+        try:
+            actual = path.stat().st_size
+        except OSError:
+            result['missing'].append(rel)
+            done += size
+            continue
+        if actual != size:
+            result['size'].append(rel)
+            done += size
+            continue
+        to_hash.append((rel, size, digest))
+    for rel, size, digest in to_hash:
+        h = hashlib.sha256()
+        try:
+            with open(game / rel, 'rb') as f:
+                while True:
+                    if stopped and stopped():
+                        result['state'] = 'stopped'
+                        return result
+                    block = f.read(8 << 20)
+                    if not block:
+                        break
+                    h.update(block)
+                    done += len(block)
+                    if progress:
+                        progress(done, total)
+        except OSError:
+            result['missing'].append(rel)
+            continue
+        if h.hexdigest() != digest:
+            result['content'].append(rel)
+    if progress:
+        progress(total, total)
+    if result['missing'] or result['size'] or result['content']:
+        result['state'] = 'bad'
+    return result
+
+
+US_107_ELF_SHA256 = 'b3afd173a379f83e1e408e71fdef22b78f93092d332b79decd48a18a08bfc605'
+
+
+def eu_same_code(game_dir, title):
+    """True for EU 1.07 (CUSA00004) whose eboot is the US 1.07 executable, byte for byte: the
+    game then turns the US 1.07 features on for it too (probe.c iss_feature_title)."""
+    if title != 'CUSA00004' or mod_patches.game_app_version(game_dir) != APP_VER_107:
+        return False
+    eboot = Path(game_dir) / 'eboot.bin'
+
+    def digest(path):
+        import hashlib
+        from infamous_patches import read_eboot_elf
+        elf = read_eboot_elf(path.parent)
+        return hashlib.sha256(elf).hexdigest() if elf is not None else ''
+    try:
+        _scripts()
+        return _cached(eboot, 'sha256', digest) == US_107_ELF_SHA256
+    except (OSError, ValueError, ImportError):
+        return False
+
+
+def game_title(game_dir):
+    """TITLE_ID of the game folder's param.sfo ("CUSA00223"), or None when it cannot be read."""
+    try:
+        _scripts()
+        from prepare import sfo
+        return sfo((Path(game_dir) / 'sce_sys/param.sfo').read_bytes()).get('TITLE_ID')
+    except (OSError, ValueError, KeyError, ImportError):
+        return None
+
+
 def check_game(game_dir):
     """Problems that keep the game from starting, as (key, detail) pairs; empty means ready.
     Keys in WARNINGS are only reported."""
@@ -473,6 +595,20 @@ def check_game(game_dir):
                     problems.append(('old_param', f'sce_sys/param.sfo (APP_VER {version})'))
         except (OSError, ValueError, KeyError, StopIteration) as error:
             problems.append(('unreadable', f'eboot.bin ({error})'))
+    title = game_title(game)
+    if title and title != TITLE_US and not eu_same_code(game, title):
+        problems.append(('other_title', title))
+    art = game / 'art'
+    missing_art = next((rel for rel in ART_REQUIRED if not (art / rel).is_file()), None)
+    if missing_art:
+        problems.append(('no_art', f'art/{missing_art}'))
+    else:
+        try:
+            count = _cached(art, 'art_files', lambda path: sum(len(names) for _, _, names in os.walk(path)))
+        except OSError:
+            count = None
+        if count is not None and count < ART_MIN_FILES:
+            problems.append(('small_art', f'{count:,}'))
     for module in MODULES:
         path = game / 'sce_module' / module
         if not path.is_file():
@@ -1039,6 +1175,11 @@ def main(argv=None):
     sys.stdout.flush()
     return process.wait()
 
+
+# DualSense controller output (2026-11-06): lightbar, controller-speaker routing/gain and the added
+# Concrete cue. Wraps launch() for Renderer v2 on Windows; see iss_controller_feedback.py.
+import iss_controller_feedback
+iss_controller_feedback.install(globals())
 
 if __name__ == '__main__':
     sys.exit(main())

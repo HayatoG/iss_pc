@@ -28,6 +28,8 @@
 #include <cstdio>
 #include <ctime>
 #include <string>
+#include <string_view>
+#include <fmt/format.h>
 #include "gpu_blackbox.h" // gpu_blackbox.inl
 #include "pause_guard.h"
 
@@ -266,6 +268,9 @@ struct Scheduler::GpuProfile {
         u64 begin; ///< Query numbers (monotonic, the ring index is the number modulo NumQueries).
         u64 end;
         u64 hash;
+        u64 shader{}; ///< gpu_profile = 4, passes: the fragment shader of the pass's first draw.
+        u32 gap_kinds{};    ///< gpu_profile = 4: ProfileNote kinds recorded just before it.
+        u32 gap_barriers{}; ///< and the image barriers among them.
     };
     struct Session {
         u64 tick{};
@@ -277,6 +282,8 @@ struct Scheduler::GpuProfile {
         bool readback{};
         bool active{};
         std::vector<Dispatch> dispatches;
+        std::vector<Dispatch> passes; ///< gpu_profile = 3: hash is the pass key.
+        u32 tail_kinds{}; ///< gpu_profile = 4: kinds recorded after the last timed piece.
     };
 
     explicit GpuProfile(const Instance& instance) : device{instance.GetDevice()} {
@@ -345,13 +352,160 @@ struct Scheduler::GpuProfile {
     u64 open_dispatch{NoQuery};
     u64 open_hash{};
     std::unordered_map<u64, std::pair<u64, u64>> shader_ns; ///< hash: GPU ns, dispatches.
+    u64 open_pass{NoQuery};
+    u64 open_pass_key{};
+    std::unordered_map<u64, std::pair<u64, u64>> pass_ns; ///< pass key: GPU ns, passes.
+    /// gpu_profile = 4: the fragment shader bound last (ProfilePassShader) and the one of the
+    /// open pass's first draw; GPU time per (pass key, shader); the busy time of each session
+    /// outside its timed passes and dispatches, by gap length (< 5, 20, 100, 500 us, longer)
+    /// and where it lies (before the first timed piece, between pieces, after the last).
+    u64 last_shader{};
+    u64 open_pass_shader{};
+    u32 open_dispatch_kinds{}, open_dispatch_barriers{}, open_pass_kinds{}, open_pass_barriers{};
+    /// Untimed GPU time by the kinds recorded in the gap (bit mask): ns, gaps, image barriers;
+    /// long gaps (>= 100 us) also by what follows them (pass key or shader hash, bit 63 = pass).
+    std::unordered_map<u32, std::array<u64, 3>> gap_by_kinds, long_gap_by_kinds;
+    std::unordered_map<u64, std::pair<u64, u64>> long_gap_next;
+    std::unordered_map<u64, std::pair<u64, u64>> pass_shader_ns; ///< key ^ shader: ns, passes.
+    std::unordered_map<u64, std::pair<u64, u64>> pass_shader_key; ///< same key: pass key, shader.
+    std::array<u64, 5> gap_ns{}, gap_count{};
+    u64 gap_head_ns{}, gap_tail_ns{}, covered_ns{}, session_busy_ns{};
     u64 report_start_ns{};
     std::vector<u64> results;
 };
 
+#ifdef _WIN32
+extern "C" char __ImageBase; // linker-defined start of this executable's image
+static u64 ImageBase() {
+    return reinterpret_cast<u64>(&__ImageBase);
+}
+#else
+static u64 ImageBase() {
+    return 0;
+}
+#endif
+
+namespace {
+// ISS_BARRIER_TRACE=1: per caller statistics of the barriers recorded through CommandRecorder.
+struct BarrierTraceStats {
+    u64 count{}, back_to_back{}, images{}, buffers{}, globals{};
+    u64 src_stages{}, dst_stages{}, src_access{}, dst_access{};
+    std::array<u64, Scheduler::TraceKindCount + 1> prev{}, next{};
+};
+struct BarrierTraceState {
+    u32 prev = Scheduler::TraceKindCount; // what was recorded last (TraceKindCount = nothing yet)
+    BarrierTraceStats* pending{};          // the last barrier, waiting for the work after it
+};
+struct BarrierTrace {
+    std::mutex mutex;
+    std::unordered_map<const Scheduler*, BarrierTraceState> state;
+    std::unordered_map<u64, BarrierTraceStats> stats; // key: caller exe offset, scheduler bit 63
+    std::unordered_map<const Scheduler*, const char*> names;
+    u64 report_start_ns{};
+};
+BarrierTrace& GetBarrierTrace() {
+    static BarrierTrace trace;
+    return trace;
+}
+bool BarrierTraceEnabled() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_BARRIER_TRACE");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
+const char* TraceKindName(u32 kind) {
+    static constexpr const char* names[] = {"barrier", "copy_buffer", "buffer_to_image",
+                                            "image_to_buffer", "copy_image", "resolve", "clear",
+                                            "fill_update", "query", "dispatch", "begin_render",
+                                            "end_render", "start"};
+    return kind < std::size(names) ? names[kind] : "?";
+}
+} // namespace
+
+void Scheduler::TraceBarrier(const vk::DependencyInfo& info, void* caller_address) {
+    const u64 caller = reinterpret_cast<u64>(caller_address) - ImageBase();
+    BarrierTrace& trace = GetBarrierTrace();
+    std::scoped_lock lock{trace.mutex};
+    trace.names[this] = name;
+    const u64 key = caller | (std::string_view{name ? name : ""} == "graphics" ? 0 : (1ULL << 63));
+    BarrierTraceStats& s = trace.stats[key];
+    BarrierTraceState& st = trace.state[this];
+    ++s.count;
+    if (st.prev == NoteBarrier) ++s.back_to_back;
+    ++s.prev[std::min<u32>(st.prev, TraceKindCount)];
+    if (st.pending) ++st.pending->next[NoteBarrier];
+    s.images += info.imageMemoryBarrierCount;
+    s.buffers += info.bufferMemoryBarrierCount;
+    s.globals += info.memoryBarrierCount;
+    auto add = [&](const auto& b) {
+        s.src_stages |= static_cast<u64>(b.srcStageMask);
+        s.dst_stages |= static_cast<u64>(b.dstStageMask);
+        s.src_access |= static_cast<u64>(b.srcAccessMask);
+        s.dst_access |= static_cast<u64>(b.dstAccessMask);
+    };
+    for (u32 i = 0; i < info.memoryBarrierCount; ++i) add(info.pMemoryBarriers[i]);
+    for (u32 i = 0; i < info.bufferMemoryBarrierCount; ++i) add(info.pBufferMemoryBarriers[i]);
+    for (u32 i = 0; i < info.imageMemoryBarrierCount; ++i) add(info.pImageMemoryBarriers[i]);
+    st.prev = NoteBarrier;
+    st.pending = &s;
+
+    const u64 now = Common::Perf::NowNs();
+    if (trace.report_start_ns == 0) trace.report_start_ns = now;
+    if (now - trace.report_start_ns < 5'000'000'000ULL) return;
+    const double seconds = static_cast<double>(now - trace.report_start_ns) / 1e9;
+    trace.report_start_ns = now;
+    std::vector<std::pair<u64, BarrierTraceStats>> all(trace.stats.begin(), trace.stats.end());
+    std::sort(all.begin(), all.end(),
+              [](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+    u64 total = 0, b2b = 0;
+    for (const auto& [k, v] : all) { total += v.count; b2b += v.back_to_back; }
+    std::fprintf(stderr, "BARRIER_TRACE total %.0f/s, right after another barrier %.0f/s, %zu callers\n",
+                 total / seconds, b2b / seconds, all.size());
+    for (size_t i = 0; i < std::min<size_t>(all.size(), 20); ++i) {
+        const auto& [k, v] = all[i];
+        auto top = [&](const auto& hist) {
+            std::string out;
+            std::vector<std::pair<u64, u32>> h;
+            for (u32 j = 0; j < hist.size(); ++j) if (hist[j]) h.push_back({hist[j], j});
+            std::sort(h.rbegin(), h.rend());
+            for (size_t j = 0; j < std::min<size_t>(h.size(), 3); ++j)
+                out += fmt::format("{}{} {:.0f}%", j ? "," : "", TraceKindName(h[j].second),
+                                   100.0 * h[j].first / v.count);
+            return out;
+        };
+        std::fprintf(stderr,
+                     "BARRIER_TRACE %s exe+0x%llx: %.0f/s, after barrier %.0f/s, per barrier img %.1f "
+                     "buf %.1f mem %.1f, src 0x%llx/0x%llx dst 0x%llx/0x%llx, before: %s | after: %s\n",
+                     (k >> 63) ? "other" : "gfx", static_cast<unsigned long long>(k & ~(1ULL << 63)),
+                     v.count / seconds, v.back_to_back / seconds,
+                     static_cast<double>(v.images) / v.count, static_cast<double>(v.buffers) / v.count,
+                     static_cast<double>(v.globals) / v.count,
+                     static_cast<unsigned long long>(v.src_stages),
+                     static_cast<unsigned long long>(v.src_access),
+                     static_cast<unsigned long long>(v.dst_stages),
+                     static_cast<unsigned long long>(v.dst_access), top(v.prev).c_str(),
+                     top(v.next).c_str());
+    }
+    trace.stats.clear();
+    for (auto& [sched, state] : trace.state) state.pending = nullptr;
+}
+
+void Scheduler::TraceWork(u32 kind) {
+    BarrierTrace& trace = GetBarrierTrace();
+    std::scoped_lock lock{trace.mutex};
+    BarrierTraceState& st = trace.state[this];
+    if (st.pending) {
+        ++st.pending->next[std::min<u32>(kind, TraceKindCount)];
+        st.pending = nullptr;
+    }
+    st.prev = kind;
+}
+
 Scheduler::Scheduler(const Instance& instance, vk::Queue queue_, const char* name_)
     : instance{instance}, queue{queue_ ? queue_ : instance.GetGraphicsQueue()}, name{name_},
       work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+    barrier_trace = BarrierTraceEnabled();
     GpuCrashDiag::g_instance.store(&instance, std::memory_order_relaxed);
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
@@ -382,6 +536,9 @@ void Scheduler::AllowThreadedRecording() {
 
 vk::CommandBuffer Scheduler::CommandBuffer() {
     AssertCpRecordingLane();
+    if (merged_secondary_open) [[unlikely]] {
+        CloseMergedSecondary();
+    }
     // The caller records in the command buffer without going through CommandRecorder: what it
     // binds is not known here.
     session_used = true;
@@ -400,6 +557,9 @@ vk::CommandBuffer Scheduler::CommandBuffer() {
 
 CommandStream& Scheduler::Stream() {
     AssertCpRecordingLane();
+    if (merged_secondary_open) [[unlikely]] {
+        CloseMergedSecondary();
+    }
     session_used = true;
     // Batches of commands go to the recording thread while the next ones are recorded.
     // ISS_RECORDER_BATCH=N: commands per batch (measured: with 256 the recording thread is
@@ -542,6 +702,27 @@ void Scheduler::BeginSecondaryRendering(const RenderState& new_state) {
     BeginRenderingScope(new_state);
 }
 
+// ISS_PASS_BREAK_TRACE=1 (diagnostics, off by default): why render passes end. A pass that
+// begins on exactly the targets the previous one ended with was split for nothing visible to the
+// targets (a copy, barrier or dispatch in between): counted by the code that ended the previous
+// pass (return address, as an offset in the executable). Command processor scheduler only.
+namespace {
+struct PassBreakTrace {
+    bool has_last{};
+    RenderState last{};
+    u64 last_caller{};
+    u64 passes{}, same{}, report_ns{};
+    std::unordered_map<u64, u64> callers;
+};
+bool PassBreakTraceEnabled() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_PASS_BREAK_TRACE");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
+PassBreakTrace pass_break_trace;
+} // namespace
 void Scheduler::BeginRendering(const RenderState& new_state) {
     AssertCpRecordingLane();
     if (is_rendering && render_state == new_state && !rendering_flags) {
@@ -553,6 +734,30 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
 }
 
 void Scheduler::BeginRenderingScope(const RenderState& new_state) {
+    if (threading_allowed && PassBreakTraceEnabled()) {
+        auto& t = pass_break_trace;
+        ++t.passes;
+        if (t.has_last && t.last == new_state) {
+            ++t.same;
+            ++t.callers[t.last_caller];
+        }
+        const u64 now = Common::Perf::NowNs();
+        if (now - t.report_ns >= 5'000'000'000ULL) {
+            const double seconds = t.report_ns ? double(now - t.report_ns) / 1e9 : 5.0;
+            std::vector<std::pair<u64, u64>> top(t.callers.begin(), t.callers.end());
+            std::sort(top.begin(), top.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+            std::fprintf(stderr, "PASS_BREAK passes/s=%.0f same_targets/s=%.0f image_base=0x%llx\n",
+                         t.passes / seconds, t.same / seconds, (unsigned long long)ImageBase());
+            for (size_t i = 0; i < top.size() && i < 12; ++i) {
+                std::fprintf(stderr, "PASS_BREAK caller=+0x%llx %.0f/s\n",
+                             (unsigned long long)top[i].first, top[i].second / seconds);
+            }
+            t.passes = t.same = 0;
+            t.callers.clear();
+            t.report_ns = now;
+        }
+    }
     is_rendering = true;
     render_state = new_state;
 
@@ -602,16 +807,60 @@ void Scheduler::BeginRenderingScope(const RenderState& new_state) {
     };
 
     const CommandRecorder cmdbuf = Recorder();
+    if (profile) {
+        // Outside the pass: a secondary-buffer pass allows nothing but executes inside.
+        ProfilePassBegin(u64{render_state.width} | u64{render_state.height} << 16 |
+                         u64{render_state.num_color_attachments} << 32 |
+                         u64{db.has_depth} << 36 | u64{render_state.num_layers} << 40 |
+                         u64{rendering_flags ? 1u : 0u} << 56);
+    }
     cmdbuf.beginRendering(rendering_info);
     if (rendering_observer) {
         rendering_observer->OnBeginRendering(cmdbuf);
     }
 }
 
+void Scheduler::CloseMergedSecondary() {
+    merged_secondary_open = false;
+    EndRendering();
+}
+
+std::mutex& SecondaryPoolMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+bool SecondaryPoolSafe() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_NATIVE_PASSES_SAFE_CMD");
+        return !p || p[0] != '0';
+    }();
+    return enabled;
+}
+
+void Scheduler::ExecuteSecondary(vk::CommandBuffer secondary) {
+    // The open rendering is the one the secondary goes in: the guard must not close it here.
+    merged_secondary_open = false;
+    Recorder().Record([secondary](vk::CommandBuffer primary) {
+        if (SecondaryPoolSafe()) {
+            std::scoped_lock lock{SecondaryPoolMutex()};
+            primary.executeCommands(secondary);
+        } else {
+            primary.executeCommands(secondary);
+        }
+    });
+}
+
 void Scheduler::EndRendering() {
     AssertCpRecordingLane();
+    merged_secondary_open = false;
     if (!is_rendering) {
         return;
+    }
+    if (threading_allowed && PassBreakTraceEnabled()) {
+        auto& t = pass_break_trace;
+        t.has_last = true;
+        t.last = render_state;
+        t.last_caller = reinterpret_cast<u64>(__builtin_return_address(0)) - ImageBase();
     }
     const CommandRecorder cmdbuf = Recorder();
     if (rendering_observer) {
@@ -619,6 +868,9 @@ void Scheduler::EndRendering() {
     }
     is_rendering = false;
     cmdbuf.endRendering();
+    if (profile) {
+        ProfilePassEnd();
+    }
 }
 
 vk::CommandBuffer Scheduler::UploadCommandBuffer() {
@@ -768,6 +1020,48 @@ void Scheduler::EndSession() {
     }
 }
 
+// The last queue submissions of every scheduler (which semaphore values each waits for and
+// signals), printed by the ISS_ASC_NATIVE_QUEUE hang watchdog to show a cross-queue wait cycle.
+namespace {
+struct SubmitRecord {
+    const char* name{};
+    u32 waits{}, signals{};
+    std::array<std::pair<u64, u64>, 8> wait{};
+    std::array<std::pair<u64, u64>, 4> signal{};
+};
+std::mutex submit_history_mutex;
+std::array<SubmitRecord, 48> submit_history{};
+u64 submit_history_next = 0;
+} // namespace
+
+void RecordSubmitHistory(const char* name, const SubmitInfo& info) {
+    std::scoped_lock lock{submit_history_mutex};
+    auto& r = submit_history[submit_history_next++ % submit_history.size()];
+    r.name = name;
+    r.waits = std::min<u32>(info.num_wait_semas, 8);
+    r.signals = std::min<u32>(info.num_signal_semas, 4);
+    for (u32 i = 0; i < r.waits; ++i)
+        r.wait[i] = {u64(VkSemaphore(info.wait_semas[i])), info.wait_ticks[i]};
+    for (u32 i = 0; i < r.signals; ++i)
+        r.signal[i] = {u64(VkSemaphore(info.signal_semas[i])), info.signal_ticks[i]};
+}
+
+void DumpSubmitHistory() {
+    std::scoped_lock lock{submit_history_mutex};
+    const u64 count = std::min<u64>(submit_history_next, submit_history.size());
+    for (u64 k = submit_history_next - count; k < submit_history_next; ++k) {
+        const auto& r = submit_history[k % submit_history.size()];
+        std::string line = fmt::format("SUBMIT_HISTORY {} signal:", r.name ? r.name : "?");
+        for (u32 i = 0; i < r.signals; ++i)
+            line += fmt::format(" {:x}={}", r.signal[i].first & 0xFFFFFF, r.signal[i].second);
+        line += " wait:";
+        for (u32 i = 0; i < r.waits; ++i)
+            line += fmt::format(" {:x}>={}", r.wait[i].first & 0xFFFFFF, r.wait[i].second);
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
+    std::fflush(stderr);
+}
+
 void Scheduler::AddCrossWait(vk::Semaphore semaphore, u64 tick) {
     AssertCpRecordingLane();
     for (auto& wait : cross_waits) {
@@ -794,6 +1088,11 @@ void Scheduler::TakeCrossWaits(SubmitInfo& info) {
         info.AddWait(wait.semaphore, wait.tick);
     }
     cross_waits.clear();
+    if (upload_wait.tick != 0) {
+        // ISS_UPLOAD_QUEUE: only the copies out of the upload ring need the copy engine's data.
+        info.AddWait(upload_wait.semaphore, upload_wait.tick, vk::PipelineStageFlagBits::eTransfer);
+        upload_wait = {};
+    }
 }
 
 void Scheduler::WaitSubmitted(u64 tick) {
@@ -967,6 +1266,7 @@ void Scheduler::SubmitToQueue(std::span<const vk::CommandBuffer> cmd_buffers, Su
     }
     const u64 submit_begin_ns = iss::timeline::enabled ? Common::Perf::NowNs() : 0;
     GpuCrashDiag::NoteSubmit(this, name);
+    RecordSubmitHistory(name, info);
     auto submit_result = queue.submit(submit_info, info.fence);
     const u64 submit_end_ns = iss::timeline::enabled ? Common::Perf::NowNs() : 0;
     if (iss::timeline::enabled) {
@@ -1040,6 +1340,9 @@ void Scheduler::ProfileSessionBegin() {
     }
     prof.current.begin = number;
     prof.current.active = true;
+    profile_notes = Common::Perf::GetTuning().gpu_profile.load(std::memory_order_relaxed) >= 4;
+    profile_note_kinds = 0;
+    profile_note_barriers = 0;
     Recorder().Record([pool = prof.pool, index = prof.Index(number)](vk::CommandBuffer c) {
         c.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, pool, index);
     });
@@ -1055,6 +1358,8 @@ void Scheduler::ProfileSessionEnd() {
         return;
     }
     prof.current.end = number;
+    prof.current.tail_kinds = std::exchange(profile_note_kinds, 0);
+    profile_note_barriers = 0;
     Recorder().Record([pool = prof.pool, index = prof.Index(number)](vk::CommandBuffer c) {
         c.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, pool, index);
     });
@@ -1091,6 +1396,8 @@ void Scheduler::ProfileDispatchBegin(u64 shader_hash) {
     }
     prof.open_dispatch = number;
     prof.open_hash = shader_hash;
+    prof.open_dispatch_kinds = std::exchange(profile_note_kinds, 0);
+    prof.open_dispatch_barriers = std::exchange(profile_note_barriers, 0);
     // Written once the work before the dispatch is done.
     Recorder().Record([pool = prof.pool, index = prof.Index(number)](vk::CommandBuffer c) {
         c.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, pool, index);
@@ -1112,10 +1419,76 @@ void Scheduler::ProfileDispatchEnd() {
         .begin = begin,
         .end = number,
         .hash = prof.open_hash,
+        .gap_kinds = prof.open_dispatch_kinds,
+        .gap_barriers = prof.open_dispatch_barriers,
     });
+    // What the timed dispatch itself recorded is not gap work.
+    profile_note_kinds = 0;
+    profile_note_barriers = 0;
     Recorder().Record([pool = prof.pool, index = prof.Index(number)](vk::CommandBuffer c) {
         c.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, pool, index);
     });
+}
+
+void Scheduler::ProfilePassBegin(u64 key) {
+    if (!profile || !profile->current.active ||
+        Common::Perf::GetTuning().gpu_profile.load(std::memory_order_relaxed) < 3) {
+        return;
+    }
+    GpuProfile& prof = *profile;
+    u64 number;
+    if (!prof.Allocate(number)) {
+        return;
+    }
+    prof.open_pass = number;
+    prof.open_pass_key = key;
+    prof.open_pass_shader = 0;
+    prof.open_pass_kinds = std::exchange(profile_note_kinds, 0);
+    prof.open_pass_barriers = std::exchange(profile_note_barriers, 0);
+    // Written once the work before the pass is done.
+    Recorder().Record([pool = prof.pool, index = prof.Index(number)](vk::CommandBuffer c) {
+        c.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, pool, index);
+    });
+}
+
+void Scheduler::ProfilePassEnd() {
+    if (!profile || profile->open_pass == GpuProfile::NoQuery) {
+        return;
+    }
+    GpuProfile& prof = *profile;
+    const u64 begin = std::exchange(prof.open_pass, GpuProfile::NoQuery);
+    // A pass begun in an earlier session: its query was read with that session.
+    if (!prof.current.active || begin < prof.current.first) {
+        return;
+    }
+    u64 number;
+    if (!prof.Allocate(number)) {
+        return;
+    }
+    prof.current.passes.push_back(GpuProfile::Dispatch{
+        .begin = begin,
+        .end = number,
+        .hash = prof.open_pass_key,
+        .shader = prof.open_pass_shader ? prof.open_pass_shader : prof.last_shader,
+        .gap_kinds = prof.open_pass_kinds,
+        .gap_barriers = prof.open_pass_barriers,
+    });
+    profile_note_kinds = 0;
+    profile_note_barriers = 0;
+    Recorder().Record([pool = prof.pool, index = prof.Index(number)](vk::CommandBuffer c) {
+        c.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, pool, index);
+    });
+}
+
+void Scheduler::ProfilePassShader(u64 fragment_hash) {
+    if (!profile || Common::Perf::GetTuning().gpu_profile.load(std::memory_order_relaxed) < 4) {
+        return;
+    }
+    GpuProfile& prof = *profile;
+    prof.last_shader = fragment_hash;
+    if (prof.open_pass != GpuProfile::NoQuery && prof.open_pass_shader == 0) {
+        prof.open_pass_shader = fragment_hash;
+    }
 }
 
 void Scheduler::CollectProfile() {
@@ -1203,6 +1576,90 @@ void Scheduler::CollectProfile() {
                 Common::Perf::Add(Common::Perf::GpuProfileComputeNs, ns);
                 Common::Perf::Add(Common::Perf::GpuProfileDispatches);
             }
+            for (const auto& pass : session.passes) {
+                if (pass.end - session.first >= session.count) {
+                    continue;
+                }
+                const u64 begin = stamp(pass.begin);
+                const u64 finish = stamp(pass.end);
+                if (finish < begin) {
+                    continue;
+                }
+                auto& [pass_total, pass_count] = prof.pass_ns[pass.hash];
+                pass_total += to_ns(finish - begin);
+                ++pass_count;
+                if (Common::Perf::GetTuning().gpu_profile.load(std::memory_order_relaxed) >= 4) {
+                    const u64 combined = pass.hash ^ (pass.shader * 0x9E3779B97F4A7C15ull);
+                    auto& [total, count] = prof.pass_shader_ns[combined];
+                    total += to_ns(finish - begin);
+                    ++count;
+                    prof.pass_shader_key[combined] = {pass.hash, pass.shader};
+                }
+            }
+            // gpu_profile = 4: the session's busy time outside its timed pieces.
+            const u64 session_start = stamp(session.begin);
+            const u64 session_end = stamp(session.end);
+            if (Common::Perf::GetTuning().gpu_profile.load(std::memory_order_relaxed) >= 4 &&
+                session_end > session_start) {
+                struct Piece {
+                    u64 b, e, label;
+                    u32 kinds, barriers;
+                    bool operator<(const Piece& o) const { return b < o.b; }
+                };
+                std::vector<Piece> pieces;
+                pieces.reserve(session.dispatches.size() + session.passes.size());
+                const auto add = [&](const GpuProfile::Dispatch& d, u64 label) {
+                    if (d.end - session.first >= session.count ||
+                        d.begin - session.first >= session.count) {
+                        return;
+                    }
+                    const u64 b = std::max(stamp(d.begin), session_start);
+                    const u64 e = std::min(stamp(d.end), session_end);
+                    if (e > b) pieces.push_back({b, e, label, d.gap_kinds, d.gap_barriers});
+                };
+                for (const auto& d : session.dispatches) add(d, d.hash & ~(u64{1} << 63));
+                for (const auto& p : session.passes) add(p, p.hash | (u64{1} << 63));
+                std::sort(pieces.begin(), pieces.end());
+                const auto label_gap = [&](u64 gap, u32 kinds, u32 barriers, u64 next) {
+                    auto& all = prof.gap_by_kinds[kinds];
+                    all[0] += gap; ++all[1]; all[2] += barriers;
+                    if (gap >= 100'000) {
+                        auto& longer = prof.long_gap_by_kinds[kinds];
+                        longer[0] += gap; ++longer[1]; longer[2] += barriers;
+                        auto& [ns, count] = prof.long_gap_next[next];
+                        ns += gap; ++count;
+                    }
+                };
+                u64 cursor = session_start, covered = 0;
+                bool first = true;
+                for (const auto& piece : pieces) {
+                    if (piece.b > cursor) {
+                        const u64 gap = to_ns(piece.b - cursor);
+                        if (first) {
+                            prof.gap_head_ns += gap;
+                        } else {
+                            const size_t bucket = gap < 5'000 ? 0 : gap < 20'000 ? 1
+                                                : gap < 100'000 ? 2 : gap < 500'000 ? 3 : 4;
+                            prof.gap_ns[bucket] += gap;
+                            ++prof.gap_count[bucket];
+                        }
+                        label_gap(gap, piece.kinds, piece.barriers, piece.label);
+                    }
+                    first = false;
+                    if (piece.e > cursor) {
+                        covered += to_ns(piece.e - std::max(piece.b, cursor));
+                        cursor = piece.e;
+                    }
+                }
+                if (session_end > cursor) {
+                    const u64 gap = to_ns(session_end - cursor);
+                    if (pieces.empty()) prof.gap_head_ns += gap;
+                    else prof.gap_tail_ns += gap;
+                    label_gap(gap, session.tail_kinds | (1u << 31), 0, ~u64{0});
+                }
+                prof.covered_ns += covered;
+                prof.session_busy_ns += to_ns(session_end - session_start);
+            }
         }
         prof.pending.pop_front();
     }
@@ -1212,6 +1669,120 @@ void Scheduler::CollectProfile() {
     }
     const double seconds = static_cast<double>(now - prof.report_start_ns) / 1e9;
     prof.report_start_ns = now;
+    if (!prof.pass_ns.empty()) {
+        std::vector<std::pair<u64, std::pair<u64, u64>>> passes(prof.pass_ns.begin(),
+                                                                prof.pass_ns.end());
+        prof.pass_ns.clear();
+        std::sort(passes.begin(), passes.end(),
+                  [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+        u64 pass_total = 0;
+        for (const auto& entry : passes) {
+            pass_total += entry.second.first;
+        }
+        std::fprintf(stderr, "PERF_GPU_PASS total %.1f ms/s in %zu kinds\n",
+                     pass_total / 1e6 / seconds, passes.size());
+        for (size_t i = 0; i < passes.size() && i < 15; ++i) {
+            const auto& [key, stats] = passes[i];
+            std::fprintf(stderr,
+                         "PERF_GPU_PASS %ux%u colors %u depth %u layers %u %s: %.2f ms/s, %.0f "
+                         "passes/s, %.1f us avg\n",
+                         unsigned(key & 0xFFFF), unsigned((key >> 16) & 0xFFFF),
+                         unsigned((key >> 32) & 0xF), unsigned((key >> 36) & 0xF),
+                         unsigned((key >> 40) & 0xFFFF), (key >> 56) ? "native" : "direct",
+                         stats.first / 1e6 / seconds, stats.second / seconds,
+                         stats.second ? stats.first / 1e3 / static_cast<double>(stats.second)
+                                      : 0.0);
+        }
+    }
+    if (prof.session_busy_ns != 0) {
+        const auto ms = [&](u64 ns) { return ns / 1e6 / seconds; };
+        std::fprintf(stderr,
+                     "PERF_GPU_GAP sessions %.1f ms/s, timed %.1f ms/s, untimed: before first "
+                     "%.1f, after last %.1f, between: <5us %.1f (%.0f/s) 5-20us %.1f (%.0f/s) "
+                     "20-100us %.1f (%.0f/s) 100-500us %.1f (%.0f/s) >500us %.1f (%.0f/s) ms/s\n",
+                     ms(prof.session_busy_ns), ms(prof.covered_ns), ms(prof.gap_head_ns),
+                     ms(prof.gap_tail_ns), ms(prof.gap_ns[0]), prof.gap_count[0] / seconds,
+                     ms(prof.gap_ns[1]), prof.gap_count[1] / seconds, ms(prof.gap_ns[2]),
+                     prof.gap_count[2] / seconds, ms(prof.gap_ns[3]), prof.gap_count[3] / seconds,
+                     ms(prof.gap_ns[4]), prof.gap_count[4] / seconds);
+        prof.session_busy_ns = prof.covered_ns = prof.gap_head_ns = prof.gap_tail_ns = 0;
+        prof.gap_ns = {};
+        prof.gap_count = {};
+        static constexpr const char* names[] = {"barrier", "copy_buffer", "buffer_to_image",
+                                                "image_to_buffer", "copy_image", "resolve",
+                                                "clear", "fill_update", "query", "dispatch"};
+        const auto kinds_text = [](u32 kinds) {
+            std::string text;
+            for (u32 i = 0; i < std::size(names); ++i) {
+                if (kinds & (1u << i)) {
+                    if (!text.empty()) text += '+';
+                    text += names[i];
+                }
+            }
+            if (kinds & (1u << 31)) text += text.empty() ? "session_end" : "+session_end";
+            return text.empty() ? std::string{"nothing_recorded"} : text;
+        };
+        const auto report = [&](const char* tag,
+                                std::unordered_map<u32, std::array<u64, 3>>& by_kinds) {
+            std::vector<std::pair<u32, std::array<u64, 3>>> sorted(by_kinds.begin(), by_kinds.end());
+            by_kinds.clear();
+            std::sort(sorted.begin(), sorted.end(),
+                      [](const auto& a, const auto& b) { return a.second[0] > b.second[0]; });
+            for (size_t i = 0; i < sorted.size() && i < 10; ++i) {
+                const auto& [kinds, s] = sorted[i];
+                std::fprintf(stderr, "%s %s: %.1f ms/s, %.0f gaps/s, %.1f us avg, %.1f image barriers avg\n",
+                             tag, kinds_text(kinds).c_str(), ms(s[0]), s[1] / seconds,
+                             s[1] ? s[0] / 1e3 / double(s[1]) : 0.0,
+                             s[1] ? double(s[2]) / double(s[1]) : 0.0);
+            }
+        };
+        report("PERF_GPU_GAP_KINDS", prof.gap_by_kinds);
+        report("PERF_GPU_LONG_GAP_KINDS", prof.long_gap_by_kinds);
+        std::vector<std::pair<u64, std::pair<u64, u64>>> next(prof.long_gap_next.begin(),
+                                                              prof.long_gap_next.end());
+        prof.long_gap_next.clear();
+        std::sort(next.begin(), next.end(),
+                  [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+        for (size_t i = 0; i < next.size() && i < 12; ++i) {
+            const auto& [label, s] = next[i];
+            if (label == ~u64{0}) {
+                std::fprintf(stderr, "PERF_GPU_LONG_GAP_BEFORE session end: %.1f ms/s, %.0f/s\n",
+                             ms(s.first), s.second / seconds);
+            } else if (label >> 63) {
+                const u64 key = label & ~(u64{1} << 63);
+                std::fprintf(stderr,
+                             "PERF_GPU_LONG_GAP_BEFORE pass %ux%u colors %u depth %u %s: %.1f ms/s, %.0f/s\n",
+                             unsigned(key & 0xFFFF), unsigned((key >> 16) & 0xFFFF),
+                             unsigned((key >> 32) & 0xF), unsigned((key >> 36) & 0xF),
+                             ((key >> 56) & 0x7F) ? "native" : "direct", ms(s.first),
+                             s.second / seconds);
+            } else {
+                std::fprintf(stderr, "PERF_GPU_LONG_GAP_BEFORE dispatch %016llx: %.1f ms/s, %.0f/s\n",
+                             (unsigned long long)label, ms(s.first), s.second / seconds);
+            }
+        }
+    }
+    if (!prof.pass_shader_ns.empty()) {
+        std::vector<std::pair<u64, std::pair<u64, u64>>> shaders(prof.pass_shader_ns.begin(),
+                                                                 prof.pass_shader_ns.end());
+        prof.pass_shader_ns.clear();
+        std::sort(shaders.begin(), shaders.end(),
+                  [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+        for (size_t i = 0; i < shaders.size() && i < 25; ++i) {
+            const auto& [combined, stats] = shaders[i];
+            const auto [key, shader] = prof.pass_shader_key[combined];
+            std::fprintf(stderr,
+                         "PERF_GPU_PASS_SHADER %ux%u colors %u depth %u %s fs %016llx: %.2f ms/s, "
+                         "%.0f passes/s, %.1f us avg\n",
+                         unsigned(key & 0xFFFF), unsigned((key >> 16) & 0xFFFF),
+                         unsigned((key >> 32) & 0xF), unsigned((key >> 36) & 0xF),
+                         (key >> 56) ? "native" : "direct", (unsigned long long)shader,
+                         stats.first / 1e6 / seconds, stats.second / seconds,
+                         stats.second ? stats.first / 1e3 / static_cast<double>(stats.second)
+                                      : 0.0);
+        }
+        prof.pass_shader_key.clear();
+    }
     if (prof.shader_ns.empty()) {
         return;
     }

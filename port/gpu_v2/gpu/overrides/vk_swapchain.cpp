@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <string>
 #include <cstdlib>
 #include <limits>
 #include "common/assert.h"
@@ -72,6 +73,11 @@ void Swapchain::ReleaseExclusive(){
 bool Swapchain::SyncExclusiveState(){
     const bool wanted=window.WantsExclusive();
     if(wanted!=exclusive_requested)needs_recreation=true;
+    // Adaptive VSync toggled in the menu: the present mode is chosen at swapchain creation.
+    static bool relaxed_seen=TlgSettings::Get().vsync_relaxed.load(std::memory_order_relaxed);
+    if(const bool relaxed=TlgSettings::Get().vsync_relaxed.load(std::memory_order_relaxed);relaxed!=relaxed_seen){
+        relaxed_seen=relaxed;needs_recreation=true;
+    }
     if(!window.CanPresent()){
         ReleaseExclusive();return false;
     }
@@ -414,13 +420,40 @@ void Swapchain::FindPresentMode() {
         return;
     }
 
-    const auto requested_mode = EmulatorSettings.GetPresentMode();
+    // Which modes this display offers (2026-11-05: an RX 560 XT log only said Mailbox was missing).
+    static bool modes_logged = false;
+    if (!modes_logged) {
+        modes_logged = true;
+        std::string list;
+        for (const auto mode : modes) list += (list.empty() ? "" : ", ") + vk::to_string(mode);
+        std::fprintf(stderr, "PRESENT_MODES supported: %s\n", list.c_str());
+    }
+
+    // TLG_PRESENT_MODE (explicit) wins; otherwise the menu's Adaptive VSync picks FifoRelaxed.
+    const char* explicit_mode = std::getenv("TLG_PRESENT_MODE");
+    const auto requested_mode =
+        (!explicit_mode || !*explicit_mode) &&
+                TlgSettings::Get().vsync_relaxed.load(std::memory_order_relaxed)
+            ? std::string("FifoRelaxed")
+            : EmulatorSettings.GetPresentMode();
+    static std::string last_requested;
+    if (requested_mode != last_requested) {
+        last_requested = requested_mode;
+        std::fprintf(stderr, "PRESENT_MODE requested: %s%s\n", requested_mode.c_str(),
+                     explicit_mode && *explicit_mode ? " (TLG_PRESENT_MODE)" : "");
+    }
     if (requested_mode == "Mailbox") {
         present_mode = vk::PresentModeKHR::eMailbox;
     } else if (requested_mode == "Fifo") {
         present_mode = vk::PresentModeKHR::eFifo;
     } else if (requested_mode == "Immediate") {
         present_mode = vk::PresentModeKHR::eImmediate;
+    } else if (requested_mode == "FifoRelaxed") {
+        // TLG_PRESENT_MODE=FifoRelaxed (opt-in): vsync while frames are on time, a late frame is
+        // shown at once (may tear) instead of waiting a whole extra refresh. For GPUs without
+        // Mailbox that run near 30/60 FPS: plain Fifo turns a 34 ms frame into 50 ms (30 -> 20
+        // FPS steps). Falls back to Fifo below where the display does not offer it.
+        present_mode = vk::PresentModeKHR::eFifoRelaxed;
     } else {
         LOG_ERROR(Render_Vulkan, "Unknown present mode {}, defaulting to Mailbox.",
                   EmulatorSettings.GetPresentMode());

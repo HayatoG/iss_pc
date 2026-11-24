@@ -228,6 +228,14 @@ def game_problem_text(t, problems):
     return t(key, detail=detail) if key in tlg_run.TEXT else detail
 
 
+def game_version_text(folder):
+    """'1.07 · CUSA00223' from the game folder's param.sfo (APP_VER, TITLE_ID); '?' for what it cannot read."""
+    version = tlg_run.mod_patches.game_app_version(folder) if folder else None
+    if version and version[:1] == '0':
+        version = version[1:]
+    return f"{version or '?'} · {tlg_run.game_title(folder) or '?'}"
+
+
 def game_state(settings, problems=None):
     """('none'|'ok'|'bad', problems without 'not_built', port_built)."""
     folder = settings.get('game_dir') or ''
@@ -257,7 +265,14 @@ def compute_chips(settings, t, gpu='checking', pad=None, problems=None, states=N
     elif state == 'bad':
         chips.append((t('chip_game_bad', problem=game_problem_text(t, tlg_run.blocking(game_problems))), 'bad'))
     else:
-        chips.append((t('chip_game_ok', version='1.07'), 'ok'))
+        # Warnings (game starts, something is off) show in yellow with a short text; otherwise the
+        # update and edition read from the folder's param.sfo, not a fixed "1.07".
+        warnings = [p for p in game_problems if p[0] in tlg_run.WARNINGS]
+        if warnings:
+            key, detail = warnings[0]
+            chips.append((t('chip_game_warn_' + key, detail=detail), 'warn'))
+        else:
+            chips.append((t('chip_game_ok', version=game_version_text(settings.get('game_dir') or '')), 'ok'))
     if not built:
         chips.append((t('chip_port_missing'), 'bad'))
     states = tlg_run.experimental_states(settings) if states is None else states

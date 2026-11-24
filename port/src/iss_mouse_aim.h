@@ -44,6 +44,7 @@ extern "C" {
 #endif
 void runtime_mouse_aim_attach(uintptr_t base);
 int runtime_mouse_aim_installed(void);
+int runtime_mouse_aim_camera_live(void);
 int runtime_mouse_aim_motion(float dx,float dy,float sensitivity,int invert_y,int active);
 void __attribute__((ms_abi)) runtime_mouse_aim_camera(float *angles,const void *data,const void *context);
 #ifdef __cplusplus

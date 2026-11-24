@@ -201,9 +201,13 @@ static int rollback_purchases(unsigned char *a){
     if(!shard_change(a,purchases.target_balance,0))return 0;
     purchases=(IssPurchaseJournal){0};return save_purchases();
 }
+/* Optional extra work on this game thread, registered by the loader (e.g. the added Concrete
+ * controller cue, which must not post sound from inside the game's own sound call). */
+void (*volatile runtime_karma_extra_tick)(void);
 /* Called only on the game's own camera update thread, never from the overlay. */
 void __attribute__((ms_abi)) runtime_karma_tick(void){
     runtime_power_wheel_tick();
+    if(runtime_karma_extra_tick)runtime_karma_extra_tick();
     if(!image || inside)return;
     unsigned char *a=image+ISS_KARMA_ATTRIBUTES;
     float score;memcpy(&score,a+0xc0,4);

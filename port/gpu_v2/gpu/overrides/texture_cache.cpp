@@ -4,6 +4,8 @@
 #include <atomic>
 #include <algorithm>
 #include <filesystem>
+#include <mutex>
+#include <set>
 #include <thread>
 #include <unordered_map>
 #include "gpu_blackbox.h"
@@ -332,6 +334,17 @@ bool TextureCache::DumpImageToFile(VAddr address, std::string_view prefix, u32 w
                                   image.info.num_bits, vk::to_string(image.info.pixel_format));
     const auto file = IOFile{dir / name, FileAccessMode::Create};
     file.WriteRaw<u8>(download.mapped, download_size);
+    // The guest's own bytes at the image (as the CPU last left them; tiled images in the game's
+    // layout), to tell a stale cached image from memory the CPU rewrote.
+    if (const u64 guest_size = image.info.guest_size; guest_size && guest_size <= (256ull << 20)) {
+        std::vector<u8> host(guest_size);
+        Core::Memory::Instance()->CopySparseMemory(image.info.guest_address, host.data(), guest_size);
+        const auto host_file = IOFile{dir / (name + ".host"), FileAccessMode::Create};
+        host_file.WriteRaw<u8>(host.data(), guest_size);
+        LOG_INFO(Render_Vulkan, "DUMP image {:x} guest bytes: {} ({} bytes, tiled {}, cpu modified {})",
+                 address, name + ".host", guest_size, bool(image.info.props.is_tiled),
+                 u32(image.flags));
+    }
     LOG_INFO(Render_Vulkan,
              "DUMP image {:x} written: {} ({} bytes, {} layers, gpu modified {}, last used tick {})",
              address, name, download_size, image.info.resources.layers,
@@ -409,9 +422,54 @@ bool TextureCache::HasImagesInRange(VAddr addr, size_t size) const {
 
 static std::atomic<u64> tex_streak_images{};
 
+// ISS_IMAGE_COST_TRACE=1 (diagnostics, off by default): where the command processor's time goes
+// when the game streams in new textures (2026-10-28: frames of 45-108 ms with 50-190 new images
+// each, ~1 ms of it uploads). Totals every ~300 collector ticks: the lock wait and the whole
+// FindImage call of the lookups that created an image, the image object (Vulkan image + memory),
+// its registration (page tracking), and the image views created.
+namespace {
+struct ImageCost {
+    std::atomic<u64> created{}, lock_ns{}, find_ns{}, insert_ns{}, register_ns{}, max_find_ns{};
+    std::atomic<u64> views{}, view_ns{}, max_view_ns{};
+};
+ImageCost image_cost;
+bool ImageCostTrace() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_IMAGE_COST_TRACE");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
+void NoteMax(std::atomic<u64>& max, u64 value) {
+    u64 seen = max.load(std::memory_order_relaxed);
+    while (value > seen && !max.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+    }
+}
+} // namespace
+
+// ISS_IMAGE_WRITE_TRACE=<address hex> (diagnostics): logs the guest writes renderer v2 notices on
+// the image at that address, and when its pages are tracked or untracked (the night lighting:
+// the game blanks the sun shadow mask, the cached image kept the daytime one, 2026-11-03).
+static VAddr ImageWriteTraceAddress() {
+    static const VAddr address = [] {
+        const char* p = std::getenv("ISS_IMAGE_WRITE_TRACE");
+        return p ? VAddr(std::strtoull(p, nullptr, 16)) : VAddr{0};
+    }();
+    return address;
+}
+static void TraceImageWrite(const char* what, VAddr image_address, VAddr addr, u64 size, u32 flags) {
+    static std::atomic<u32> lines{};
+    if (lines.fetch_add(1, std::memory_order_relaxed) < 400)
+        std::fprintf(stderr, "IMAGE_WRITE_TRACE %s image=%llx at=%llx+%llx flags=%u\n", what,
+                     (unsigned long long)image_address, (unsigned long long)addr,
+                     (unsigned long long)size, flags);
+}
+
 void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     const auto pages_start = PageManager::GetPageAddr(addr);
     const auto pages_end = PageManager::GetNextPageAddr(addr + size - 1);
+    if (const VAddr traced = ImageWriteTraceAddress(); traced && addr < traced + (4ull << 20) && traced < addr + size)
+        TraceImageWrite("cpu-write-fault", traced, addr, size, 0);
     // Every guest write fault comes here, mostly for pages without images: answered without the
     // lock the command processor takes for every texture it binds. An image registered after
     // this check protects its pages after registering, so its writes fault again.
@@ -449,18 +507,20 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
         }
     });
     // ISS_TEX_FAULT_STREAK_KB (default 0, opt-in): a guest thread writing on through image
-    // pages it faults on one after the other gets the images of the next window marked maybe
-    // dirty now (hashed, untracked: re-uploaded at their next use only if their bytes changed),
-    // as their faults would do one by one. Every ~2 s the game copies ~11 MB over a pool of
-    // small textures at 0x2093xxxxx-0x209Fxxxxx: ~2850 faults, one per image, a 45 ms frame
-    // (the "mini frame skips", 2026-10-17).
+    // pages it faults on one after the other gets the images of the next window marked CPU
+    // dirty now (untracked: re-uploaded at their next use), as their faults would do one by
+    // one. Every ~2 s the game copies ~11 MB over a pool of small textures at
+    // 0x2093xxxxx-0x209Fxxxxx: ~2850 faults, one per image, a 45 ms frame (the "mini frame
+    // skips", 2026-10-17).
     static const u64 streak_bytes = [] {
         const char* setting = std::getenv("ISS_TEX_FAULT_STREAK_KB");
-        // Native ultrawide streaming freeze, 2026-10-22: the speculative
-        // MarkAsMaybeDirty below can hash a GPU-protected page while holding
-        // mutex. Its nested read fault queues a readback and waits for the CP,
-        // which can itself be waiting for this mutex in FindImage. Keep normal
-        // per-page invalidation; do not hash ahead from the guest fault handler.
+        // Native ultrawide streaming freeze, 2026-10-22: the first version marked the window
+        // with MarkAsMaybeDirty, which can hash a GPU-protected page while holding mutex. Its
+        // nested read fault queues a readback and waits for the CP, which can itself be waiting
+        // for this mutex in FindImage. This path now never reads guest memory: it only sets
+        // flags and untracks, and skips images the GPU wrote or that are already dirty.
+        // UpdateImage re-tracks an image before uploading it, so a guest write still to come
+        // after an early upload faults again and is seen.
         const u64 kb = setting ? std::strtoull(setting, nullptr, 10) : 0;
         return std::min<u64>(kb, 4096) * 1024;
     }();
@@ -477,12 +537,14 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
             ForEachImageInRegion(ahead, streak_bytes, [&](ImageId image_id, Image& image) {
                 if (image.info.guest_address >= ahead &&
                     image.info.guest_address + image.info.guest_size <= ahead_end &&
-                    image.IsTracked())
+                    image.IsTracked() &&
+                    False(image.flags & (ImageFlagBits::GpuModified | ImageFlagBits::Dirty)))
                     marked.push_back(image_id);
             });
             for (const ImageId image_id : marked) {
                 BumpImageGeneration(image_id);
-                MarkAsMaybeDirty(image_id, slot_images[image_id]);
+                slot_images[image_id].flags |= ImageFlagBits::CpuDirty;
+                UntrackImage(image_id);
             }
             next_page = ahead_end >> 12;
             tex_streak_images.fetch_add(marked.size(), std::memory_order_relaxed);
@@ -498,6 +560,8 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
     }
     Common::Perf::Add(Common::Perf::TexInvalidateLocked);
     std::scoped_lock lock{mutex};
+    if (const VAddr traced = ImageWriteTraceAddress(); traced && address < traced + (4ull << 20) && traced < address + max_size)
+        TraceImageWrite("gpu-write", traced, address, max_size, 0);
     ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
         // Only consider images that match base address.
         // TODO: Maybe also consider subresources
@@ -1008,7 +1072,10 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     const auto& info = desc.info;
     ASSERT(info.guest_address != 0);
 
+    const bool cost_trace = ImageCostTrace();
+    const u64 find_start_ns = cost_trace ? Common::Perf::NowNs() : 0;
     std::scoped_lock lock{mutex};
+    const u64 locked_ns = cost_trace ? Common::Perf::NowNs() : 0;
     const auto is_perfect_match = [&](const Image& cache_image) {
         if (cache_image.info.guest_address != info.guest_address) {
             return false;
@@ -1094,8 +1161,19 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     // Create and register a new image
     if (!image_id) {
+        const u64 insert_start_ns = cost_trace ? Common::Perf::NowNs() : 0;
         image_id = slot_images.insert(instance, runtime, slot_image_views, info);
+        const u64 inserted_ns = cost_trace ? Common::Perf::NowNs() : 0;
         RegisterImage(image_id);
+        if (cost_trace) {
+            const u64 now = Common::Perf::NowNs();
+            image_cost.created.fetch_add(1, std::memory_order_relaxed);
+            image_cost.lock_ns.fetch_add(locked_ns - find_start_ns, std::memory_order_relaxed);
+            image_cost.insert_ns.fetch_add(inserted_ns - insert_start_ns, std::memory_order_relaxed);
+            image_cost.register_ns.fetch_add(now - inserted_ns, std::memory_order_relaxed);
+            image_cost.find_ns.fetch_add(now - find_start_ns, std::memory_order_relaxed);
+            NoteMax(image_cost.max_find_ns, now - find_start_ns);
+        }
         if (info.props.is_tiled) {
             // Tiled layouts decoded differently since the upstream detiling fix (#5196): 128 bit
             // elements in display micro tiling, macro tiled images with micro tiled small mips,
@@ -1238,6 +1316,19 @@ void TextureCache::EraseSurfaceMeta(VAddr address) {
 ImageView& TextureCache::FindViewMemoized(ImageId image_id, const ImageViewInfo& info,
                                         bool ensure_guest_samples) {
     Image& image = slot_images[image_id];
+    if (ImageCostTrace() && !texture_lookup_memo_enabled) {
+        // Views are created inside FindView: count the calls that grew the image's view list.
+        const size_t views_before = image.backing->image_view_ids.size();
+        const u64 start_ns = Common::Perf::NowNs();
+        ImageView& view = image.FindView(info, ensure_guest_samples);
+        if (image.backing->image_view_ids.size() > views_before) {
+            const u64 ns = Common::Perf::NowNs() - start_ns;
+            image_cost.views.fetch_add(1, std::memory_order_relaxed);
+            image_cost.view_ns.fetch_add(ns, std::memory_order_relaxed);
+            NoteMax(image_cost.max_view_ns, ns);
+        }
+        return view;
+    }
     if (!texture_lookup_memo_enabled) return image.FindView(info, ensure_guest_samples);
     ++lookup_counts.view_queries;
     // Image::FindView can convert between guest/host MSAA backing. A hit must
@@ -1265,10 +1356,40 @@ ImageView& TextureCache::FindViewMemoized(ImageId image_id, const ImageViewInfo&
     return result;
 }
 
+// ISS_IMAGE_WRITE_TRACE: a GPU write (render target, depth, storage image) to an image overlapping
+// the traced one, with its own address, size and format (at most once per image and kind).
+static void TraceImageGpuWrite(const char* what, ImageId id, const Image& image) {
+    const VAddr traced = ImageWriteTraceAddress();
+    if (!traced) return;
+    const VAddr begin = image.info.guest_address, end = begin + image.info.guest_size;
+    if (end <= traced || begin >= traced + 0x3c0000) return;
+    static std::mutex mutex;
+    static std::set<std::pair<u32, std::string>> seen;
+    std::scoped_lock lock{mutex};
+    if (!seen.insert({id.index, what}).second || seen.size() > 200) return;
+    std::fprintf(stderr, "IMAGE_WRITE_TRACE %s image=%llx+%llx %ux%ux%u layers %u fmt %s tiled %d id %u\n",
+                 what, (unsigned long long)begin, (unsigned long long)image.info.guest_size,
+                 image.info.size.width, image.info.size.height, image.info.size.depth,
+                 image.info.resources.layers, vk::to_string(image.info.pixel_format).c_str(),
+                 int(bool(image.info.props.is_tiled)), id.index);
+}
+
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
     AssertNoAscTextureAccess();
     Image& image = slot_images[image_id];
+    // ISS_IMAGE_RELOAD_TEST=<address hex> (experiment): the sampled image at that address is
+    // uploaded again from guest memory at every bind, dropping the GPU's copy (night lighting).
+    static const VAddr reload_test = [] {
+        const char* p = std::getenv("ISS_IMAGE_RELOAD_TEST");
+        return p ? VAddr(std::strtoull(p, nullptr, 16)) : VAddr{0};
+    }();
+    if (reload_test && image.info.guest_address == reload_test && desc.type != BindingType::Storage) {
+        image.flags &= ~ImageFlagBits::GpuModified;
+        image.flags |= ImageFlagBits::CpuDirty;
+        BumpImageGeneration(image_id);
+    }
     if (desc.type == BindingType::Storage) {
+        TraceImageGpuWrite("storage-write", image_id, image);
         image.flags |= ImageFlagBits::GpuModified;
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
             image.info.guest_address != 0) {
@@ -1283,6 +1404,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc) {
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     AssertNoAscTextureAccess();
     Image& image = slot_images[image_id];
+    TraceImageGpuWrite("render-target", image_id, image);
     image.flags |= ImageFlagBits::GpuModified;
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
@@ -1312,6 +1434,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
 ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc) {
     AssertNoAscTextureAccess();
     Image& image = slot_images[image_id];
+    TraceImageGpuWrite("depth-target", image_id, image);
     image.flags |= ImageFlagBits::GpuModified;
     image.usage.depth_target = 1u;
     UpdateImage(image_id);
@@ -1613,6 +1736,8 @@ void TextureCache::TrackImage(ImageId image_id) {
     if (image_begin == image.track_addr && image_end == image.track_addr_end) {
         return;
     }
+    if (image_begin == ImageWriteTraceAddress() && image_begin)
+        TraceImageWrite("track", image_begin, image_begin, image.info.guest_size, u32(image.flags));
 
     if (!image.IsTracked()) {
         // Re-track the whole image
@@ -1665,6 +1790,9 @@ void TextureCache::UntrackImage(ImageId image_id) {
     if (!image.IsTracked()) {
         return;
     }
+    if (image.info.guest_address == ImageWriteTraceAddress() && ImageWriteTraceAddress())
+        TraceImageWrite("untrack", image.info.guest_address, image.track_addr,
+                        image.track_addr_end - image.track_addr, u32(image.flags));
     const auto addr = image.track_addr;
     const auto size = image.track_addr_end - image.track_addr;
     image.track_addr = 0;
@@ -1924,6 +2052,19 @@ void TextureCache::RunGarbageCollector() {
     SCOPE_EXIT {
         ++gc_tick;
     };
+    if (ImageCostTrace() && gc_tick % 300 == 0) {
+        const auto take = [](std::atomic<u64>& v) { return v.exchange(0, std::memory_order_relaxed); };
+        const u64 created = take(image_cost.created), views = take(image_cost.views);
+        const auto ms = [](u64 ns) { return double(ns) / 1e6; };
+        std::fprintf(stderr,
+                     "IMAGE_COST created=%llu find_ms=%.1f lock_wait_ms=%.1f insert_ms=%.1f "
+                     "register_ms=%.1f max_find_ms=%.2f | views=%llu view_ms=%.1f max_view_ms=%.2f\n",
+                     (unsigned long long)created, ms(take(image_cost.find_ns)),
+                     ms(take(image_cost.lock_ns)), ms(take(image_cost.insert_ns)),
+                     ms(take(image_cost.register_ns)), ms(take(image_cost.max_find_ns)),
+                     (unsigned long long)views, ms(take(image_cost.view_ns)),
+                     ms(take(image_cost.max_view_ns)));
+    }
     gc_scheduler_ticks[gc_tick % gc_scheduler_ticks.size()] = scheduler.CurrentTick();
 
     // GPL adaptation of axylpup/shadPS4 PurgeOldRenderSize. Run only on the

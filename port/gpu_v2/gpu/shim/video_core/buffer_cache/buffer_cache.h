@@ -51,6 +51,7 @@ namespace VideoCore {
 class TextureCache;
 class MemoryTracker;
 class PageManager;
+class EngineUploads;
 
 /// A GPU queue the command processor records work for: the graphics queue, or the compute queue
 /// running the work of the guest's asynchronous compute queues alongside it (asc_queue). Each
@@ -794,6 +795,9 @@ private:
     u32 blocks_per_arena_page{};
     u32 blocks_per_arena_page_shift{};
 
+    /// ISS_UPLOAD_QUEUE=1: the copy engine's queue and device memory ring (buffer_cache.cpp).
+    /// Declared before the upload worker, whose thread calls it, so it is destroyed after it.
+    std::unique_ptr<EngineUploads> engine_uploads;
     /// Upload worker (async_uploads) and the deferred protections of the upload being prepared.
     std::unique_ptr<UploadWorker> upload_worker;
     std::vector<std::pair<u64, u64>> deferred_pages;

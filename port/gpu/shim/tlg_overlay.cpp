@@ -20,6 +20,8 @@ inline bool Mark(unsigned) { return false; }
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <string>
+#include <tuple>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -424,6 +426,11 @@ void ImageTab() {
         ChoiceRow(TL("Display mode", "Modo de exibição"), s.display_mode, G::DisplayModeCount == 3 ? modes : G::DisplayModeNames.data(),
                   nullptr, G::DisplayModeCount, TL("Windowed, borderless window or exclusive fullscreen.", "Janela, janela sem borda ou tela cheia exclusiva."));
         CheckRow("VSync", s.vsync, TL("Waits for the monitor: no tearing, a little more input delay.", "Espera o monitor: sem tearing, um pouco mais de atraso de entrada."));
+#ifdef TLG_RENDERER_V2
+        CheckRow(TL("Adaptive VSync (weaker PCs)", "VSync adaptativo (PCs mais fracos)"), s.vsync_relaxed,
+                 TL("For PCs running near 30 or 60 FPS: a late frame is shown at once (may tear a little) instead of waiting a whole extra refresh, so the frame rate stops dropping in steps (30 -> 20 -> 15). Applies right away. Has no effect if your display does not offer it.",
+                    "Para PCs perto de 30 ou 60 FPS: um quadro atrasado aparece na hora (pode ter um pouco de tearing) em vez de esperar mais uma atualização inteira, e o FPS para de cair em degraus (30 -> 20 -> 15). Vale na hora. Sem efeito se a tela não oferecer."));
+#endif
         ImGui::EndTable();
     }
     const int iw = s.image_width, ih = s.image_height, ww = s.window_width, wh = s.window_height;
@@ -599,7 +606,7 @@ void PerformanceTab() {
         static_assert(sizeof(fps_labels) / sizeof(fps_labels[0]) == G::FpsLimits.size(),
                       "Every FPS limit must have a matching dropdown label");
         ChoiceRow(TL("Frame rate limit", "Limite de FPS"), s.fps_limit, fps_labels, G::FpsLimits.data(), int(G::FpsLimits.size()),
-                  TL("Caps the presented frames. The game runs at 30 FPS (as on PS4).", "Limita os quadros apresentados. O jogo roda a 30 FPS (como no PS4)."));
+                  TL("Caps the frame rate with evenly spaced frames. 60 gives the steadiest pacing in big fights.", "Limita o FPS com quadros espaçados por igual. 60 dá o ritmo mais estável em lutas grandes."));
         static const char* const queued_labels[] = {TL("1 (lowest latency)", "1 (menor atraso)"), "2", TL("Unlimited", "Sem limite")};
         ChoiceRow(TL("Frames queued", "Quadros na fila"), s.frames_queued, queued_labels, G::FramesQueued.data(),
                   int(G::FramesQueued.size()), TL("More frames queued: steadier FPS, slower response to input.", "Mais quadros na fila: FPS mais estável, resposta mais lenta."));
@@ -710,14 +717,429 @@ void FixesSection() {
 
 void OpenGuide(); // the graffiti guide (below, with the save dialogs)
 
+// ---- Keyboard & mouse bindings window (2026-11-06; like shadPS4's mapping dialog) -------------------
+// Every PS4 control, the stick directions included, bound to a key or mouse button. Click a control,
+// then press the key / click the mouse button / scroll the wheel (HandleEvent takes it before the menu).
+// Saved in tlg.ini key_binds (only what differs from the defaults) and applied at once
+// (src/runtime_pad.c runtime_pad_set_key_binds). imgui_mutex guards this state.
+extern "C" int runtime_pad_set_key_binds(const char* spec);
+extern "C" int runtime_pad_key_binding(const char* control, int which, char* out, size_t size);
+struct BindControl { const char* id; const char* en; const char* pt; const char* tag; };
+static const BindControl kBindControls[] = {
+    {"ls_up", "Move forward", "Andar para frente", "Move F"}, {"ls_down", "Move back", "Andar para trás", "Move B"},
+    {"ls_left", "Move left", "Andar para a esquerda", "Move L"}, {"ls_right", "Move right", "Andar para a direita", "Move R"},
+    {"up", "D-pad up", "Direcional cima", "D-Up"}, {"down", "D-pad down", "Direcional baixo", "D-Down"},
+    {"left", "D-pad left", "Direcional esquerda", "D-Left"}, {"right", "D-pad right", "Direcional direita", "D-Right"},
+    {"l1", "L1", "L1", "L1"}, {"l2", "L2 (aim)", "L2 (mirar)", "L2"}, {"l3", "L3", "L3", "L3"},
+    {"options", "Options", "Options", "Options"},
+    {"touchpad_left", "Touchpad left (photo mode)", "Touchpad esquerdo (modo foto)", "Photo"},
+    {"touchpad_right", "Touchpad right (pause menu)", "Touchpad direito (menu de pausa)", "Pause"},
+    {"triangle", "Triangle", "Triângulo", "Tri"}, {"circle", "Circle", "Círculo", "Circle"},
+    {"cross", "Cross", "X", "Cross"}, {"square", "Square", "Quadrado", "Square"},
+    {"r1", "R1", "R1", "R1"}, {"r2", "R2 (use power)", "R2 (usar poder)", "R2"}, {"r3", "R3", "R3", "R3"},
+    {"rs_up", "Camera up", "Câmera para cima", "Cam U"}, {"rs_down", "Camera down", "Câmera para baixo", "Cam D"},
+    {"rs_left", "Camera left", "Câmera para a esquerda", "Cam L"}, {"rs_right", "Camera right", "Câmera para a direita", "Cam R"},
+};
+constexpr int kBindCount = int(sizeof(kBindControls) / sizeof(*kBindControls));
+// The power wheel's keyboard shortcuts (tlg.ini iss_power_key_*; keyboard keys only, src/runtime_pad.c
+// power_switch_input reads them from the keyboard state). Captured as binds_capture kBindCount + i.
+struct PowerKey { const char* en; const char* pt; const char* tag; };
+static const PowerKey kPowerKeys[4] = {{"Smoke", "Fumaça", "Smoke"}, {"Neon", "Neon", "Neon"},
+                                       {"Video", "Vídeo", "Video"}, {"Concrete", "Concreto", "Concr"}};
+static bool binds_open = false;
+static int binds_capture = -1;          // control waiting for a key, -1 none; >= kBindCount: a power key
+static const char* binds_problem = "";
+// Keys nothing in this window can take: F1 (the menu), Esc (release the mouse / cancel), F10 (overlay),
+// and T / G / Y (the graffiti sensor, read straight from the keyboard).
+static bool ReservedKey(SDL_Scancode code) {
+    return code == SDL_SCANCODE_F1 || code == SDL_SCANCODE_ESCAPE || code == SDL_SCANCODE_F10 ||
+           code == SDL_SCANCODE_F9 || code == SDL_SCANCODE_F11 || // the port's own shortcuts
+           code == SDL_SCANCODE_T || code == SDL_SCANCODE_G || code == SDL_SCANCODE_Y;
+}
+static bool ReservedName(const std::string& name) {
+    const SDL_Scancode code = SDL_GetScancodeFromName(name.c_str());
+    return code != SDL_SCANCODE_UNKNOWN && ReservedKey(code);
+}
+
+static std::string BindingOf(int control, int which) {
+    char text[256];
+    return runtime_pad_key_binding(kBindControls[control].id, which, text, sizeof(text)) >= 0 ? std::string(text) : std::string();
+}
+// Saves and applies: `control` becomes `name` ("" = no key), the others keep theirs; only the controls
+// that differ from their default are written.
+static void SetBinding(int control, const std::string& name) {
+    std::string spec;
+    for (int i = 0; i < kBindCount; ++i) {
+        const std::string want = i == control ? name : BindingOf(i, 0);
+        if (want == BindingOf(i, 1)) continue;
+        if (!spec.empty()) spec += ',';
+        spec += std::string(kBindControls[i].id) + "=" + (want.empty() ? "none" : want);
+    }
+    TlgSettings::SetKeyBinds(spec);
+    TlgSettings::Save();
+    runtime_pad_set_key_binds(spec.c_str());
+}
+static void ResetBindings() {
+    TlgSettings::SetKeyBinds("");
+    TlgSettings::Save();
+    runtime_pad_set_key_binds("");
+}
+// HandleEvent, imgui_mutex held: the key or mouse button for the control being bound.
+static bool BindingCaptureEvent(const SDL_Event& event) {
+    if (binds_capture < 0) return false;
+    std::string name;
+    switch (event.type) {
+    case SDL_EVENT_KEY_DOWN: {
+        if (event.key.repeat) return true;
+        const SDL_Scancode code = event.key.scancode;
+        if (code == SDL_SCANCODE_ESCAPE) { binds_capture = -1; binds_problem = ""; return true; }
+        if (ReservedKey(code)) {
+            binds_problem = TL("F1 (menu), Esc, F9-F11 and T / G / Y (graffiti) are reserved; choose another key.",
+                               "F1 (menu), Esc, F9-F11 e T / G / Y (grafite) são reservadas; escolha outra tecla.");
+            return true;
+        }
+        if (binds_capture >= kBindCount) { // a power wheel shortcut: a keyboard key, not used by another one
+            auto& s = TlgSettings::Get();
+            const int index = binds_capture - kBindCount;
+            for (int j = 0; j < 4; ++j) {
+                if (j != index && s.iss_power_keys[j] == int(code)) {
+                    binds_problem = TL("Another power already uses that key.", "Outro poder já usa essa tecla.");
+                    return true;
+                }
+            }
+            s.iss_power_keys[index] = int(code);
+            TlgSettings::Save();
+            binds_capture = -1;
+            binds_problem = "";
+            return true;
+        }
+        const char* n = SDL_GetScancodeName(code);
+        name = n ? n : "";
+        break;
+    }
+    case SDL_EVENT_KEY_UP: case SDL_EVENT_MOUSE_BUTTON_UP: case SDL_EVENT_TEXT_INPUT: return true;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+        static const char* const names[] = {"", "Mouse Left", "Mouse Middle", "Mouse Right", "Mouse X1", "Mouse X2"};
+        if (event.button.button >= 1 && event.button.button <= 5) name = names[event.button.button];
+        break;
+    }
+    case SDL_EVENT_MOUSE_WHEEL:
+        name = event.wheel.y > 0 ? "Wheel Up" : event.wheel.y < 0 ? "Wheel Down"
+             : event.wheel.x > 0 ? "Wheel Right" : event.wheel.x < 0 ? "Wheel Left" : "";
+        break;
+    default: return false;
+    }
+    if (binds_capture >= kBindCount) { // mouse or wheel for a power key
+        binds_problem = TL("The power wheel shortcuts take keyboard keys only.", "Os atalhos da roda de poderes aceitam só teclas.");
+        return true;
+    }
+    if (name.empty() || name.find_first_of(",=|") != std::string::npos) {
+        binds_problem = TL("That key cannot be used for a binding; choose another.",
+                           "Essa tecla não pode ser usada; escolha outra.");
+        return true;
+    }
+    SetBinding(binds_capture, name);
+    binds_capture = -1;
+    binds_problem = "";
+    return true;
+}
+
+// The keyboard and mouse drawn with every key in use labelled.
+static void DrawBindingsKeyboard(const std::string (&current)[kBindCount]) {
+    // key name (lower case) -> the tags of the controls it is bound to
+    std::vector<std::pair<std::string, std::string>> uses;
+    auto lower = [](std::string t) { for (auto& c : t) c = char(std::tolower(static_cast<unsigned char>(c))); return t; };
+    {   // the power wheel shortcuts are keys in use too
+        auto& s = TlgSettings::Get();
+        for (int p = 0; p < 4; ++p) {
+            const char* n = SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[p].load()));
+            if (n && *n) uses.emplace_back(lower(n), kPowerKeys[p].tag);
+        }
+    }
+    for (int i = 0; i < kBindCount; ++i) {
+        size_t start = 0;
+        const std::string& b = current[i];
+        while (start <= b.size() && !b.empty()) {
+            const size_t bar = b.find('|', start);
+            const std::string one = lower(b.substr(start, bar == std::string::npos ? std::string::npos : bar - start));
+            bool merged = false;
+            for (auto& u : uses) if (u.first == one) { u.second += std::string("/") + kBindControls[i].tag; merged = true; }
+            if (!merged) uses.emplace_back(one, kBindControls[i].tag);
+            if (bar == std::string::npos) break;
+            start = bar + 1;
+        }
+    }
+    auto use_of = [&](const char* key_name) -> const std::string* {
+        const std::string k = lower(key_name);
+        for (auto& u : uses) if (u.first == k) return &u.second;
+        return nullptr;
+    };
+    struct Key { const char* label; const char* name; float x, y, w; };
+    std::vector<Key> keys;
+    auto row = [&](float y, float x, std::initializer_list<std::tuple<const char*, const char*, float>> items) {
+        for (const auto& [label, name, w] : items) { keys.push_back({label, name, x, y, w}); x += w; }
+    };
+    row(0, 0, {{"Esc", "Escape", 1}}); row(0, 2, {{"F1", "F1", 1}, {"F2", "F2", 1}, {"F3", "F3", 1}, {"F4", "F4", 1}});
+    row(0, 6.5f, {{"F5", "F5", 1}, {"F6", "F6", 1}, {"F7", "F7", 1}, {"F8", "F8", 1}});
+    row(0, 11, {{"F9", "F9", 1}, {"F10", "F10", 1}, {"F11", "F11", 1}, {"F12", "F12", 1}});
+    row(1.25f, 0, {{"`", "`", 1}, {"1", "1", 1}, {"2", "2", 1}, {"3", "3", 1}, {"4", "4", 1}, {"5", "5", 1}, {"6", "6", 1},
+                   {"7", "7", 1}, {"8", "8", 1}, {"9", "9", 1}, {"0", "0", 1}, {"-", "-", 1}, {"=", "=", 1}, {"Backspace", "Backspace", 2}});
+    row(2.25f, 0, {{"Tab", "Tab", 1.5f}, {"Q", "Q", 1}, {"W", "W", 1}, {"E", "E", 1}, {"R", "R", 1}, {"T", "T", 1}, {"Y", "Y", 1},
+                   {"U", "U", 1}, {"I", "I", 1}, {"O", "O", 1}, {"P", "P", 1}, {"[", "[", 1}, {"]", "]", 1}, {"\\", "\\", 1.5f}});
+    row(3.25f, 0, {{"Caps", "CapsLock", 1.75f}, {"A", "A", 1}, {"S", "S", 1}, {"D", "D", 1}, {"F", "F", 1}, {"G", "G", 1}, {"H", "H", 1},
+                   {"J", "J", 1}, {"K", "K", 1}, {"L", "L", 1}, {";", ";", 1}, {"'", "'", 1}, {"Enter", "Return", 2.25f}});
+    row(4.25f, 0, {{"Shift", "Left Shift", 2.25f}, {"Z", "Z", 1}, {"X", "X", 1}, {"C", "C", 1}, {"V", "V", 1}, {"B", "B", 1}, {"N", "N", 1},
+                   {"M", "M", 1}, {",", ",", 1}, {".", ".", 1}, {"/", "/", 1}, {"Shift", "Right Shift", 2.75f}});
+    row(5.25f, 0, {{"Ctrl", "Left Ctrl", 1.25f}, {"Win", "Left GUI", 1.25f}, {"Alt", "Left Alt", 1.25f}, {"Space", "Space", 6.25f},
+                   {"Alt", "Right Alt", 1.25f}, {"Win", "Right GUI", 1.25f}, {"Menu", "Menu", 1.25f}, {"Ctrl", "Right Ctrl", 1.25f}});
+    row(1.25f, 15.25f, {{"Ins", "Insert", 1}, {"Home", "Home", 1}, {"PgUp", "PageUp", 1}});
+    row(2.25f, 15.25f, {{"Del", "Delete", 1}, {"End", "End", 1}, {"PgDn", "PageDown", 1}});
+    row(4.25f, 16.25f, {{"Up", "Up", 1}});
+    row(5.25f, 15.25f, {{"Left", "Left", 1}, {"Down", "Down", 1}, {"Right", "Right", 1}});
+    // Sized to the window: the keyboard (22.5 units with the mouse beside it) fills the width.
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float u = std::floor(std::clamp(avail / 25.5f, ImGui::GetFontSize() * 2.4f, ImGui::GetFontSize() * 3.6f));
+    const float gap = std::max(3.0f, u * 0.10f);
+    const ImVec2 o(ImGui::GetCursorScreenPos().x + std::max(0.0f, (avail - 25.0f * u) * 0.5f), ImGui::GetCursorScreenPos().y + u * 0.15f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImFont* font = ImGui::GetFont();
+    const float small = ImGui::GetFontSize() * 0.74f;
+    const ImU32 idle = IM_COL32(22, 24, 28, 255), idle_edge = IM_COL32(58, 62, 70, 255),
+                bound = IM_COL32(28, 110, 66, 255), bound_edge = IM_COL32(53, 208, 127, 255),
+                clash = IM_COL32(120, 82, 20, 255), clash_edge = IM_COL32(235, 170, 60, 255),
+                label = IM_COL32(150, 156, 168, 255), label_on = IM_COL32(235, 255, 242, 255);
+    auto box = [&](float x, float y, float w, float h, const char* name, const std::string* use, float rounding) {
+        const ImVec2 a(o.x + x * u, o.y + y * u), b(o.x + (x + w) * u - gap, o.y + (y + h) * u - gap);
+        const bool twice = use && use->find('/') != std::string::npos;
+        dl->AddRectFilled(a, b, use ? (twice ? clash : bound) : idle, rounding);
+        dl->AddRect(a, b, use ? (twice ? clash_edge : bound_edge) : idle_edge, rounding, 0, use ? 1.5f : 1.0f);
+        const float pad = std::max(4.0f, u * 0.10f);
+        dl->PushClipRect(a, b, true);
+        dl->AddText(font, small, ImVec2(a.x + pad, a.y + pad * 0.6f), use ? label_on : label, name);
+        if (use) dl->AddText(font, small, ImVec2(a.x + pad, b.y - small - pad * 0.6f), IM_COL32(255, 255, 255, 255), use->c_str());
+        dl->PopClipRect();
+    };
+    for (const auto& k : keys) box(k.x, k.y, k.w, 1, k.label, use_of(k.name), u * 0.12f);
+    // Mouse beside the keyboard: left / wheel / right on top, the wheel's sides and the thumb buttons.
+    const float mx = 20.5f, my = 1.25f;
+    dl->AddRectFilled(ImVec2(o.x + mx * u, o.y + my * u), ImVec2(o.x + (mx + 3.0f) * u - gap, o.y + (my + 5.0f) * u - gap),
+                      IM_COL32(16, 17, 20, 255), u * 1.1f);
+    dl->AddRect(ImVec2(o.x + mx * u, o.y + my * u), ImVec2(o.x + (mx + 3.0f) * u - gap, o.y + (my + 5.0f) * u - gap),
+                idle_edge, u * 1.1f);
+    box(mx, my, 1.25f, 2.0f, "L", use_of("Mouse Left"), u * 0.35f);
+    box(mx + 1.75f, my, 1.25f, 2.0f, "R", use_of("Mouse Right"), u * 0.35f);
+    box(mx + 1.25f, my, 0.5f + gap / u, 0.65f, "", use_of("Wheel Up"), u * 0.12f);
+    box(mx + 1.25f, my + 0.67f, 0.5f + gap / u, 0.66f, "M", use_of("Mouse Middle"), u * 0.12f);
+    box(mx + 1.25f, my + 1.35f, 0.5f + gap / u, 0.65f, "", use_of("Wheel Down"), u * 0.12f);
+    box(mx - 1.35f, my + 2.4f, 1.2f, 0.85f, "X2", use_of("Mouse X2"), u * 0.12f);
+    box(mx - 1.35f, my + 3.35f, 1.2f, 0.85f, "X1", use_of("Mouse X1"), u * 0.12f);
+    box(mx + 0.4f, my + 2.6f, 2.2f, 0.75f, "Wheel L", use_of("Wheel Left"), u * 0.12f);
+    box(mx + 0.4f, my + 3.45f, 2.2f, 0.75f, "Wheel R", use_of("Wheel Right"), u * 0.12f);
+    ImGui::Dummy(ImVec2(avail, 6.6f * u));
+}
+
+void BindingsWindow() {
+    const float fs = ImGui::GetFontSize();
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(vp->WorkSize.x * 0.92f, fs * 86.0f), std::min(vp->WorkSize.y * 0.92f, fs * 54.0f)),
+                             ImGuiCond_Appearing);
+    // Black window, dark controls, green for what is selected (the launcher's green, #35d07f).
+    const ImVec4 black(0.02f, 0.02f, 0.025f, 0.98f), panel(0.07f, 0.075f, 0.085f, 1.0f), panel_hi(0.12f, 0.13f, 0.145f, 1.0f),
+                 green(0.208f, 0.816f, 0.498f, 1.0f), green_dim(0.11f, 0.43f, 0.26f, 1.0f), muted(0.62f, 0.64f, 0.69f, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, black);
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, black);
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0.04f, 0.045f, 0.05f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.18f, 0.19f, 0.21f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(0.18f, 0.19f, 0.21f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, panel);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, panel_hi);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, green_dim);
+    ImGui::PushStyleColor(ImGuiCol_TableRowBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(fs * 1.6f, fs * 1.3f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(fs * 0.7f, fs * 0.55f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(fs * 0.7f, fs * 0.38f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, fs * 0.3f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, fs * 0.45f);
+    ImGui::PushStyleVar(ImGuiStyleVar_SeparatorTextPadding, ImVec2(0.0f, fs * 0.35f));
+    bool open = binds_open;
+    const bool visible = ImGui::Begin(TL("Keyboard & mouse bindings###binds", "Teclado e mouse###binds"), &open, ImGuiWindowFlags_NoCollapse);
+    if (visible) {
+        std::string current[kBindCount];
+        for (int i = 0; i < kBindCount; ++i) current[i] = BindingOf(i, 0);
+        ImGui::PushStyleColor(ImGuiCol_Text, binds_capture >= 0 ? green : muted);
+        ImGui::TextWrapped("%s", binds_capture >= 0
+            ? TL("Press a key, click a mouse button or scroll the wheel for the green control. Esc cancels.",
+                 "Aperte uma tecla, clique um botão do mouse ou gire a roda para o controle verde. Esc cancela.")
+            : TL("Click a control, then press the key or mouse button you want for it. Changes apply at once and are saved.",
+                 "Clique um controle e aperte a tecla ou o botão do mouse que quiser. Vale na hora e fica salvo."));
+        ImGui::PopStyleColor();
+        if (*binds_problem) ImGui::TextColored(ImVec4(1.0f, 0.68f, 0.32f, 1.0f), "%s", binds_problem);
+        ImGui::Dummy(ImVec2(0, fs * 0.4f));
+        // One control: its name, then its key on a wide button and a small remove button, in table columns.
+        auto control = [&](int i) {
+            ImGui::PushID(i);
+            ImGui::TableNextRow(0, fs * 2.0f);
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(TL(kBindControls[i].en, kBindControls[i].pt));
+            ImGui::TableNextColumn();
+            const bool waiting = binds_capture == i;
+            if (waiting) {
+                ImGui::PushStyleColor(ImGuiCol_Button, green);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, green);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.02f, 0.06f, 0.03f, 1.0f));
+            }
+            const std::string shown = waiting ? std::string(TL("Press a key...", "Aperte uma tecla..."))
+                                      : current[i].empty() ? std::string(TL("(none)", "(nenhuma)")) : current[i];
+            if (ImGui::Button((shown + "###b").c_str(), ImVec2(-FLT_MIN, 0))) {
+                binds_capture = waiting ? -1 : i;
+                binds_problem = "";
+            }
+            if (waiting) ImGui::PopStyleColor(3);
+            ImGui::TableNextColumn();
+            if (ImGui::Button("x###x", ImVec2(-FLT_MIN, 0))) { SetBinding(i, ""); if (binds_capture == i) binds_capture = -1; }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TL("Remove the key from this control", "Tira a tecla deste controle"));
+            ImGui::PopID();
+        };
+        auto group = [&](const char* title, int first, int count) {
+            ImGui::PushStyleColor(ImGuiCol_Text, green);
+            ImGui::SeparatorText(title);
+            ImGui::PopStyleColor();
+            if (ImGui::BeginTable(title, 3, ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthStretch, 1.05f);
+                ImGui::TableSetupColumn("x", ImGuiTableColumnFlags_WidthFixed, fs * 1.9f);
+                for (int i = first; i < first + count; ++i) control(i);
+                ImGui::EndTable();
+            }
+            ImGui::Dummy(ImVec2(0, fs * 0.5f));
+        };
+        if (ImGui::BeginTable("##bindcols", 3, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX,
+                              ImVec2(0, 0), 0.0f)) {
+            ImGui::TableSetupColumn("left");
+            ImGui::TableSetupColumn("middle");
+            ImGui::TableSetupColumn("right");
+            ImGui::TableNextColumn();
+            group(TL("Left stick (move)", "Analógico esquerdo (andar)"), 0, 4);
+            group(TL("D-pad", "Direcional"), 4, 4);
+            group(TL("Left buttons", "Botões da esquerda"), 8, 3);
+            ImGui::TableNextColumn();
+            group(TL("Menus", "Menus"), 11, 3);
+            // The power wheel shortcuts (keyboard keys; tlg.ini iss_power_key_*).
+            ImGui::PushStyleColor(ImGuiCol_Text, green);
+            ImGui::SeparatorText(TL("Power wheel", "Roda de poderes"));
+            ImGui::PopStyleColor();
+            if (ImGui::BeginTable("##powerkeys", 2, ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthStretch, 1.05f);
+                auto& s = TlgSettings::Get();
+                for (int p = 0; p < 4; ++p) {
+                    ImGui::PushID(100 + p);
+                    ImGui::TableNextRow(0, fs * 2.0f);
+                    ImGui::TableNextColumn();
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted(TL(kPowerKeys[p].en, kPowerKeys[p].pt));
+                    ImGui::TableNextColumn();
+                    const bool waiting = binds_capture == kBindCount + p;
+                    if (waiting) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, green);
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, green);
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.02f, 0.06f, 0.03f, 1.0f));
+                    }
+                    const char* key = SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[p].load()));
+                    const std::string shown = waiting ? std::string(TL("Press a key...", "Aperte uma tecla..."))
+                                              : key && *key ? std::string(key) : std::string(TL("(none)", "(nenhuma)"));
+                    if (ImGui::Button((shown + "###p").c_str(), ImVec2(-FLT_MIN, 0))) {
+                        binds_capture = waiting ? -1 : kBindCount + p;
+                        binds_problem = "";
+                    }
+                    if (waiting) ImGui::PopStyleColor(3);
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+            ImGui::TextColored(muted, "%s", TL("Keyboard keys; hold D-pad Down for the wheel itself.",
+                                               "Teclas do teclado; segure Direcional baixo para a roda."));
+            ImGui::Dummy(ImVec2(0, fs * 0.5f));
+            ImGui::PushStyleColor(ImGuiCol_Text, green);
+            ImGui::SeparatorText(TL("Not changed here", "Não mudam aqui"));
+            ImGui::PopStyleColor();
+            ImGui::PushStyleColor(ImGuiCol_Text, muted);
+            const char* fixed[][2] = {
+                {"F1", TL("this menu", "este menu")}, {"Esc", TL("release the mouse", "soltar o mouse")}, {"F10", "overlay"},
+                {"T / G / Y", TL("graffiti sensor", "sensor do grafite")},
+                {TL("Mouse movement", "Movimento do mouse"), TL("camera", "câmera")},
+                {TL("Left Ctrl / Mouse X1", "Ctrl esq. / Mouse X1"), TL("touchpad mode (hold)", "modo touchpad (segurar)")}};
+            if (ImGui::BeginTable("##fixed", 2, ImGuiTableFlags_SizingFixedFit)) {
+                // A fixed first column wide enough for its longest entry, so the two never overlap.
+                float first = 0.0f;
+                for (const auto& row : fixed) first = std::max(first, ImGui::CalcTextSize(row[0]).x);
+                ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed, first + fs * 1.2f);
+                ImGui::TableSetupColumn("what", ImGuiTableColumnFlags_WidthStretch);
+                for (const auto& row : fixed) {
+                    ImGui::TableNextRow(0, fs * 1.5f);
+                    ImGui::TableNextColumn(); ImGui::TextUnformatted(row[0]);
+                    ImGui::TableNextColumn(); ImGui::TextWrapped("%s", row[1]);
+                }
+                ImGui::EndTable();
+            }
+            ImGui::PopStyleColor();
+            ImGui::TableNextColumn();
+            group(TL("Face buttons", "Botões de ação"), 14, 4);
+            group(TL("Right buttons", "Botões da direita"), 18, 3);
+            group(TL("Right stick (camera)", "Analógico direito (câmera)"), 21, 4);
+            ImGui::EndTable();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, green);
+        ImGui::SeparatorText(TL("Your layout", "Seu layout"));
+        ImGui::PopStyleColor();
+        ImGui::TextColored(muted, "%s", TL("Green: a key in use, with what it does. Amber: one key used for two controls.",
+                                           "Verde: tecla em uso, com o que ela faz. Âmbar: uma tecla usada em dois controles."));
+        DrawBindingsKeyboard(current);
+        ImGui::Dummy(ImVec2(0, fs * 0.4f));
+        const float bw = fs * 10.0f;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - bw * 2.0f - fs * 0.7f));
+        if (ImGui::Button(TL("Reset to defaults", "Voltar ao padrão"), ImVec2(bw, 0))) {
+            ResetBindings();
+            auto& s = TlgSettings::Get();
+            const int defaults[4] = {SDL_SCANCODE_F5, SDL_SCANCODE_F6, SDL_SCANCODE_F7, SDL_SCANCODE_F8};
+            for (int p = 0; p < 4; ++p) s.iss_power_keys[p] = defaults[p];
+            TlgSettings::Save();
+            binds_capture = -1;
+            binds_problem = "";
+        }
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, green_dim);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.15f, 0.55f, 0.33f, 1.0f));
+        if (ImGui::Button(TL("Done", "Pronto"), ImVec2(bw, 0))) { open = false; }
+        ImGui::PopStyleColor(2);
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(6);
+    ImGui::PopStyleColor(9);
+    binds_open = open;
+    if (!open) binds_capture = -1;
+}
+
 extern "C" int runtime_mouse_aim_installed(void);
 void ControlsTab() {
     auto& s = TlgSettings::Get();
+    {
+        ImGui::SeparatorText(TL("Controller speaker","Alto-falante do controle"));
+        bool speaker=s.iss_pad_speaker;
+        if(ImGui::Checkbox(TL("Play controller-speaker sounds","Tocar sons do alto-falante do controle"),&speaker)){
+            s.iss_pad_speaker=speaker;TlgSettings::Save();
+        }
+        ImGui::TextWrapped(TL("The sounds the game plays through the controller (on the DualSense speaker, or the PC speakers without one). Turning this off mutes only those; game sound and the lightbar are unchanged. Applies at once.",
+            "Os sons que o jogo toca pelo controle (no alto-falante do DualSense, ou nas caixas do PC sem ele). Desligar silencia apenas esses; o som do jogo e a barra de luz continuam. Vale na hora."));
+    }
 #ifdef TLG_RENDERER_V2
     IssPowerWheelStatus power_status{};runtime_power_wheel_status(&power_status);
     if(power_status.supported){
         ImGui::SeparatorText("Power switching test");
-        ImGui::TextWrapped("Switches apply after closing Insert. Every switch carries the current energy percentage and missile count, capped to the new power's capacity. Switching never refills resources.");
+        ImGui::TextWrapped("Switches apply after closing the menu (F1). Every switch carries the current energy percentage and missile count, capped to the new power's capacity. Switching never refills resources.");
         static const char *names[]={"Smoke","Neon","Video","Concrete"};
         bool power_enabled=s.iss_power_switch_enabled;
         if(ImGui::Checkbox("Enable quick power switching",&power_enabled)){
@@ -730,7 +1152,6 @@ void ControlsTab() {
         }
         ImGui::TextWrapped(instant?"D-pad Down + a quick stick flick switches immediately. Keep holding to open the wheel; release D-pad Down to confirm its final highlight. Left Smoke, up Neon, right Video, down Concrete.":
             "Hold D-pad Down for the wheel, choose with the right stick, then release. Hold the stick centered briefly to cancel. A quick tap keeps the normal D-pad action.");
-        ImGui::TextUnformatted("Keyboard defaults: F5 / F6 / F7 / F8.");
         float wheel_glow=s.iss_power_glow;
         if(ImGui::SliderFloat("Wheel glow",&wheel_glow,0.5f,3.0f,"%.2fx")){
             s.iss_power_glow=wheel_glow;
@@ -743,37 +1164,25 @@ void ControlsTab() {
             if(ImGui::Button(names[i]))runtime_power_wheel_request(i);
             ImGui::EndDisabled();
         }
-        static char key_names[4][40]{};
-        static bool key_names_ready=false;
-        static const char *key_problem="";
-        if(!key_names_ready){
-            for(int i=0;i<4;i++)std::snprintf(key_names[i],sizeof(key_names[i]),"%s",SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[i].load())));
-            key_names_ready=true;
-        }
-        ImGui::TextUnformatted("Shortcut keys: edit a key name, then click Apply or leave the field. Use an unused key.");
-        for(int i=0;i<4;i++){
-            ImGui::PushID(i);ImGui::SetNextItemWidth(100.0f*base_scale);
-            bool apply=ImGui::InputText(names[i],key_names[i],sizeof(key_names[i]),ImGuiInputTextFlags_EnterReturnsTrue);
-            apply=ImGui::IsItemDeactivatedAfterEdit()||apply;
-            ImGui::SameLine();apply=ImGui::Button("Apply")||apply;
-            if(apply){
-                SDL_Scancode code=SDL_GetScancodeFromName(key_names[i]);
-                bool valid=code!=SDL_SCANCODE_UNKNOWN&&code!=SDL_SCANCODE_INSERT&&code!=SDL_SCANCODE_ESCAPE&&
-                    code!=SDL_SCANCODE_F9&&code!=SDL_SCANCODE_F10&&code!=SDL_SCANCODE_F11;
-                for(int j=0;j<4;j++)if(j!=i&&s.iss_power_keys[j]==int(code))valid=false;
-                if(valid){s.iss_power_keys[i]=int(code);TlgSettings::Save();key_problem="";}
-                else key_problem="Key not applied: use a valid, distinct key. Insert, Escape and F9-F11 are reserved.";
-            }
-            ImGui::SameLine();ImGui::Text("Active: %s",SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[i].load())));
-            ImGui::PopID();
-        }
-        if(*key_problem)ImGui::TextWrapped("%s",key_problem);
+        // The shortcut keys are set in the Keyboard & mouse bindings window (Power wheel group).
+        ImGui::Text("Shortcut keys: %s / %s / %s / %s",SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[0].load())),
+            SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[1].load())),SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[2].load())),
+            SDL_GetScancodeName(SDL_Scancode(s.iss_power_keys[3].load())));
+        if(ImGui::Button("Change in Keyboard & mouse bindings...")){binds_open=true;binds_capture=-1;binds_problem="";}
         if(power_status.error)ImGui::Text("Switching stopped after verification error %d. Reload the copied save.",power_status.error);
         else if(power_status.pending)ImGui::TextUnformatted("Switch queued for gameplay.");
     }
 #endif
     // Mouse (src/runtime_pad.c): the camera settings apply at once. The buttons and the touchpad
     // mode are fixed unless TLG_KEY_MAP / TLG_MOUSE_PAD_* (or tlg.ini key_map) change them.
+    ImGui::SeparatorText(TL("Keyboard & mouse bindings", "Teclado e mouse"));
+    if (ImGui::Button(TL("Change keyboard & mouse bindings...", "Mudar teclas e botões do mouse..."))) {
+        binds_open = true;
+        binds_capture = -1;
+        binds_problem = "";
+    }
+    Help(TL("Shows a keyboard and mouse with every control; click one and press the key or button you want.",
+            "Mostra um teclado e um mouse com cada controle; clique um e aperte a tecla ou o botão que quiser."));
     ImGui::SeparatorText(TL("Mouse", "Mouse"));
     if (BeginRows("##mouse")) {
         CheckRow(TL("Mouse turns the camera", "Mouse gira a câmera"), s.mouse_enabled,
@@ -900,7 +1309,7 @@ void NativeRenderingTab() {
     const bool live_native=runtime_native_live_enabled()!=0;
     ImGui::TextWrapped("%s",live_native?"Experimental live native rendering. Select a resolution or release the internal resolution slider to queue a safe rebuild. Larger allocations still require restarting this candidate.":"Experimental native 3D rendering for CUSA00223 update 1.07. Changes apply after closing and relaunching the game.");
     const char* outputs[]={TL("Off (original game)","Desligado (jogo original)"),"1080p  1920 x 1080","1440p  2560 x 1440",
-        "3440 x 1440 (21:9)","4K  3840 x 2160","5120 x 1440 (32:9)"};
+        "3440 x 1440 (21:9)","4K  3840 x 2160","5120 x 1440 (32:9)","2560 x 1080 (21:9)","3840 x 1080 (32:9)"};
     int output=s.iss_native_output, percent=s.iss_native_percent;
     bool edges=s.iss_native_hud_edges;
     // Output first; the internal resolution is a scene height (iss_native_pick in
@@ -1025,7 +1434,7 @@ void Menu() {
         const std::string_view title = Common::ElfInfo::Instance().Title();
         const char* app_name = std::getenv("TLG_APP_NAME");
         return std::string(!title.empty() ? title : app_name && *app_name ? app_name : "The Last Guardian") +
-               PadText("  (Insert / R3+L2)", "  (Insert / RS+LT)", "  (Insert / RS+ZL)");
+               PadText("  (F1 / R3+L2)", "  (F1 / RS+LT)", "  (F1 / RS+ZL)");
     }();
     if (!ImGui::Begin(heading.c_str(), &keep_open, ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
@@ -1678,8 +2087,8 @@ void GuideBox() {
     std::snprintf(steps[3], sizeof(steps[3]), pt ? "Toque em %s de novo para voltar a andar." : "Tap %s again to walk again.", sticks);
     const char* keys = TL("Keyboard: hold T or G (can sideways), Y shakes, F sprays, the arrow keys aim.",
                           "Teclado: segure T ou G (lata de lado), Y sacode, F pinta, as setas miram.");
-    const char* again = TL("The Insert menu, Controls tab, shows this again.",
-                           "O menu Insert, aba Controle, mostra isto de novo.");
+    const char* again = TL("The F1 menu, Controls tab, shows this again.",
+                           "O menu F1, aba Controle, mostra isto de novo.");
     const float w = 640, pad = 30, inner = w - pad * 2, text_x = pad + 40;
     ImFont* font = ImGui::GetFont();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1960,7 +2369,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     }
     overlay_instance = &instance;
     initialized = true;
-    std::printf("Overlay: menu ready (Insert or R3+L2)\n");
+    std::printf("Overlay: menu ready (F1 or R3+L2)\n");
 }
 
 void UpdateTextInput(SDL_Window* window) {
@@ -2159,6 +2568,10 @@ bool HandleEvent(const SDL_Event& event) {
     }
     ImGuiIO& io = overlay_context->IO; // not made current: other threads draw with ImGui
     const bool is_open = menu_open;
+    // A control waiting for a key in the bindings window takes the next key, click or wheel.
+    if (is_open && BindingCaptureEvent(event)) {
+        return true;
+    }
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
@@ -2180,8 +2593,9 @@ bool HandleEvent(const SDL_Event& event) {
             return true;
         }
         if (down && !event.key.repeat &&
-            (event.key.key == SDLK_INSERT || (is_open && event.key.key == SDLK_ESCAPE))) {
-            SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
+            (event.key.key == SDLK_F1 || (is_open && event.key.key == SDLK_ESCAPE))) {
+            // F1 opens/closes the menu (2026-11-06, was Insert); nothing can be bound to it.
+            SetOpen(event.key.key == SDLK_F1 ? !is_open : false);
             return true;
         }
         if (!is_open) {
@@ -2491,6 +2905,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (menu_open) {
         Menu();
+        if (binds_open) BindingsWindow();
+    } else {
+        binds_capture = -1;
     }
     if (TlgSettings::Get().show_fps && !menu_open) {
         FpsCounter();

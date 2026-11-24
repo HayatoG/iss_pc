@@ -23,6 +23,16 @@ void runtime_mouse_aim_attach(uintptr_t base){
     atomic_store(&attached,base);
 }
 int runtime_mouse_aim_installed(void){return atomic_load(&attached)!=0;}
+/* The player camera update (the hooked site) runs every gameplay frame and stops in
+ * cutscenes and menus: -1 = hook not installed, 0 = idle for over 400 ms, 1 = running. */
+static atomic_uint camera_calls;
+/* How many times the player camera update has run (cutscene framing compares it frame to frame). */
+unsigned runtime_mouse_aim_camera_calls(void){return atomic_load(&camera_calls);}
+int runtime_mouse_aim_camera_live(void){
+    if(!atomic_load(&attached))return -1;
+    uint64_t last=atomic_load(&last_camera),now=mouse_aim_test_now();
+    return last && now>=last && now-last<=400000u;
+}
 /* Called by the existing pad sampler, including capture loss. No double
  * application through the mouse-to-stick path once this hook is installed. */
 int runtime_mouse_aim_motion(float dx,float dy,float sensitivity,int invert_y,int active){
@@ -50,6 +60,7 @@ int runtime_mouse_aim_motion(float dx,float dy,float sensitivity,int invert_y,in
 }
 void __attribute__((ms_abi)) runtime_mouse_aim_camera(float *angles,const void *data,const void *context){
     uint64_t now=mouse_aim_test_now();
+    atomic_fetch_add(&camera_calls,1);
     uint64_t previous=atomic_exchange(&last_camera,now);
     uint64_t motion=atomic_load(&last_motion);
     uint64_t bits=atomic_exchange(&pending,0);

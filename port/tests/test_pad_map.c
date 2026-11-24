@@ -2,12 +2,16 @@
 #define _GNU_SOURCE
 #include <assert.h>
 #include "../src/runtime_pad.c"
+#include "test_pad_audio_stubs.h"
 // runtime_mouse_aim.c (the native aim hook) needs the guest; pad tests run without it.
 int runtime_mouse_aim_installed(void) { return 0; }
 void runtime_power_wheel_status(IssPowerWheelStatus *out){memset(out,0,sizeof(*out));}
 void runtime_power_wheel_request(int index){(void)index;}
 void runtime_power_wheel_visual(int open,int choice){(void)open;(void)choice;}
 void tlggpu_power_wheel_settings(int *enabled,int keys[4],int *instant){*enabled=0;*instant=0;memset(keys,0,4*sizeof(*keys));}
+int runtime_power_wheel_gameplay(void){return 0;}
+float tlggpu_sensor_aim_scale(void){return 1.0f;}
+void tlggpu_graffiti_guide(int force){(void)force;}
 int runtime_mouse_aim_motion(float dx, float dy, float sensitivity, int invert_y, int active) { (void)dx; (void)dy; (void)sensitivity; (void)invert_y; (void)active; return 0; }
 
 /* The GPU library (not linked here): the mouse and the input settings. */
@@ -70,5 +74,26 @@ int main(void) {
     ButtonMap sides=key_map;
     assert(apply_button_map(&sides,"touchpad_right=Delete",true)==1);
     assert(pressed_by(&sides,SDL_SCANCODE_BACKSPACE)==0 && pressed_by(&sides,SDL_SCANCODE_DELETE)==CLICK_RIGHT);
-    puts("PASS: pad and key maps");
+    /* Stick directions (2026-11-06): WASD / arrows by default, rebindable like the buttons. */
+    assert(pressed_by(&key_map,SDL_SCANCODE_W)==LS_UP && pressed_by(&key_map,SDL_SCANCODE_D)==LS_RIGHT);
+    assert(pressed_by(&key_map,SDL_SCANCODE_UP)==RS_UP && pressed_by(&key_map,SDL_SCANCODE_LEFT)==RS_LEFT);
+    ButtonMap moved=key_map;
+    assert(apply_button_map(&moved,"ls_up=Up,rs_up=I",true)==2);
+    assert(pressed_by(&moved,SDL_SCANCODE_UP)==LS_UP && pressed_by(&moved,SDL_SCANCODE_W)==0);
+    assert(pressed_by(&moved,SDL_SCANCODE_I)==(RS_UP|BTN_UP));
+
+    /* The in-game bindings window: live apply over the base map, the lookup, reset. */
+    char text[128];
+    assert(runtime_pad_key_binding("cross",0,text,sizeof(text))==1 && !strcmp(text,"Space"));
+    assert(runtime_pad_key_binding("ls_left",1,text,sizeof(text))==1 && !strcmp(text,"A"));
+    assert(runtime_pad_key_binding("r2",0,text,sizeof(text))==2 && strstr(text,"F") && strstr(text,"Mouse Left"));
+    assert(runtime_pad_key_binding("nonsense",0,text,sizeof(text))==-1);
+    assert(runtime_pad_set_key_binds("cross=Mouse X1,ls_up=none")==2);
+    assert(runtime_pad_key_binding("cross",0,text,sizeof(text))==1 && !strcmp(text,"Mouse X1"));
+    assert(runtime_pad_key_binding("cross",1,text,sizeof(text))==1 && !strcmp(text,"Space")); /* default kept */
+    assert(runtime_pad_key_binding("ls_up",0,text,sizeof(text))==0 && !*text);
+    assert(runtime_pad_set_key_binds("")==0);
+    assert(runtime_pad_key_binding("cross",0,text,sizeof(text))==1 && !strcmp(text,"Space"));
+    assert(runtime_pad_key_binding("ls_up",0,text,sizeof(text))==1 && !strcmp(text,"W"));
+    puts("PASS: pad and key maps, stick directions, in-game bindings");
 }

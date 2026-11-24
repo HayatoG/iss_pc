@@ -46,9 +46,9 @@ int main(int argc,char** argv){
     assert(shared_cases()>=60);
     IssNativeConfig fresh;
     assert(iss_native_config(nullptr,&fresh));
-    assert(fresh.output==0 && fresh.percent==100 && fresh.ui_16_9==1 && fresh.hud_edges==0);
-    FILE* legacy=tmpfile();assert(legacy);fputs("iss_native_ui_16_9=0\niss_native_hud_edges=1\n",legacy);rewind(legacy);
-    assert(iss_native_config(legacy,&fresh)&&fresh.ui_16_9==0&&fresh.hud_edges==1);fclose(legacy);
+    assert(fresh.output==0 && fresh.percent==100 && fresh.ui_16_9==0 && fresh.hud_edges==1); // 2026-11-07 defaults
+    FILE* legacy=tmpfile();assert(legacy);fputs("iss_native_ui_16_9=1\niss_native_hud_edges=0\n",legacy);rewind(legacy);
+    assert(iss_native_config(legacy,&fresh)&&fresh.ui_16_9==1&&fresh.hud_edges==0);fclose(legacy);
     IssNativePlan p;
     for(int output=1;output<ISS_NATIVE_PRESETS;output++){
         assert(iss_native_plan({output,100,1},&p));
@@ -72,7 +72,10 @@ int main(int argc,char** argv){
     assert(iss_native_plan({5,100,1},&p) && p.width==5120 && p.height==1440 && p.ui_width==3840 && p.light_entries==3735552);
     assert(iss_native_plan({4,100,1},&p) && p.light_entries==4194304);
     assert(iss_native_plan({3,50,1},&p) && p.width==1720 && p.height==720);
-    for(auto c:{IssNativeConfig{0,100,1},{6,100,1},{3,0,1},{3,201,1},{3,100,2},{5,200,1}})assert(!iss_native_plan(c,&p));
+    // 6/7: the 1080-line ultrawides; their HUD canvas is the display's width at 1080 lines.
+    assert(iss_native_plan({6,100,1},&p) && p.width==2560 && p.height==1080 && p.ui_width==2560 && p.ui_height==1080);
+    assert(iss_native_plan({7,100,1},&p) && p.width==3840 && p.height==1080 && p.ui_width==3840 && p.light_entries==0x320000);
+    for(auto c:{IssNativeConfig{0,100,1},{8,100,1},{3,0,1},{3,201,1},{3,100,2},{5,200,1},{7,200,1}})assert(!iss_native_plan(c,&p));
     FILE* f=tmpfile();assert(f);fputs("iss_native_output=5\niss_native_percent=100\niss_native_hud_edges=0\n",f);rewind(f);
     IssNativeConfig c;assert(iss_native_config(f,&c) && c.output==5 && c.percent==100 && c.hud_edges==0);fclose(f);
     f=tmpfile();assert(f);fputs("iss_native_output=3\niss_native_percent=100oops\n",f);rewind(f);assert(!iss_native_config(f,&c));fclose(f);

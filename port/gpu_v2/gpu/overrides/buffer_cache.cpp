@@ -48,7 +48,10 @@
 #include <vk_mem_alloc.h>
 
 namespace iss {void ProbeNativeFeedback(const Vulkan::Instance&,Vulkan::Scheduler&);}
-namespace iss::asc_family {extern u32 family;extern bool readback;extern u32 readback_family;extern thread_local u32 pool_family;}
+#include <deque>
+#include <optional>
+#include <span>
+namespace iss::asc_family {extern u32 family;extern bool readback;extern u32 readback_family;extern u32 upload_family;extern thread_local u32 pool_family;}
 namespace iss::asc_stats {
 // Cross-queue flush causes (asc_queue). Count and CP time of each forced submit.
 // Same enum in vk_rasterizer.cpp (printed there).
@@ -663,6 +666,188 @@ std::optional<u32> FindMemoryType(const vk::PhysicalDeviceMemoryProperties& prop
     return std::nullopt;
 }
 
+/**
+ * ISS_UPLOAD_QUEUE=1 (UPLOAD-QUEUE-PLAN.md): the uploads' slow part, host staging memory across
+ * PCIe, done by the copy engine (a transfer-only queue family) into a device memory ring while the
+ * graphics queue renders. The graphics queue then copies ring -> arena where it copied staging ->
+ * arena before, with the same barriers; its submission waits for the copy engine only at its
+ * transfers. The ring is the only memory the copy engine writes, and a ring range is reused only
+ * once the graphics submission that read it is done.
+ */
+class EngineUploads {
+public:
+    static constexpr u64 RingSize = 256_MB;
+    static constexpr u64 Align = 256;
+    static constexpr u32 NumCmds = 64;
+
+    explicit EngineUploads(const Vulkan::Instance& instance_)
+        : instance{instance_}, device{instance_.GetDevice()}, queue{instance_.GetUploadQueue()},
+          ring{instance_, 0, RingSize, MemoryType::DeviceLocal, "Upload Ring"} {
+        vk::SemaphoreTypeCreateInfo type = {
+            .semaphoreType = vk::SemaphoreType::eTimeline,
+            .initialValue = 0,
+        };
+        semaphore = Vulkan::Check(device.createSemaphore(vk::SemaphoreCreateInfo{.pNext = &type}));
+        pool = Vulkan::Check(device.createCommandPool(vk::CommandPoolCreateInfo{
+            .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+            .queueFamilyIndex = iss::asc_family::upload_family,
+        }));
+        const auto allocated = Vulkan::Check(device.allocateCommandBuffers(
+            vk::CommandBufferAllocateInfo{.commandPool = pool,
+                                          .level = vk::CommandBufferLevel::ePrimary,
+                                          .commandBufferCount = NumCmds}));
+        std::copy(allocated.begin(), allocated.end(), cmds.begin());
+        std::fprintf(stderr, "PORT_UPLOAD_QUEUE ring %llu MB on family %u\n",
+                     (unsigned long long)(RingSize >> 20), iss::asc_family::upload_family);
+    }
+
+    ~EngineUploads() {
+        std::ignore = queue.waitIdle();
+        device.destroyCommandPool(pool);
+        device.destroySemaphore(semaphore);
+    }
+
+    /// Command processor: a ring range for an upload read by the session being recorded, or
+    /// nothing when the ring has no free range (the upload then takes the old path).
+    std::optional<u64> Allocate(u64 size, Vulkan::Scheduler& graphics) {
+        size = Common::AlignUp(size, Align);
+        if (size == 0 || size > RingSize / 4) {
+            ++fallbacks;
+            return std::nullopt;
+        }
+        while (!live.empty() && graphics.IsFree(live.front().tick)) {
+            live.pop_front();
+        }
+        u64 at;
+        if (live.empty()) {
+            at = head + size <= RingSize ? head : 0;
+        } else {
+            const u64 tail = live.front().begin;
+            if (head >= tail) {
+                if (head + size <= RingSize) {
+                    at = head;
+                } else if (size < tail) {
+                    at = 0;
+                } else {
+                    ++fallbacks;
+                    return std::nullopt;
+                }
+            } else if (head + size < tail) {
+                at = head;
+            } else {
+                ++fallbacks;
+                return std::nullopt;
+            }
+        }
+        live.push_back(Range{at, at + size, graphics.CurrentTick()});
+        head = at + size;
+        ++moved;
+        return at;
+    }
+
+    /// Command processor: the copy engine tick of the next upload job (in job order).
+    u64 NextTick() noexcept {
+        return ++next_tick;
+    }
+
+    const Buffer* Ring() const noexcept {
+        return &ring;
+    }
+
+    vk::Semaphore Semaphore() const noexcept {
+        return semaphore;
+    }
+
+    /// Upload worker (under its exec_mutex, in job order): the copies of a batch whose staging
+    /// memory is written, in one submission signaling its last job's tick.
+    void Submit(std::span<const UploadWorker::Job> jobs) {
+        u64 tick = 0;
+        u64 bytes = 0;
+        for (const auto& job : jobs) {
+            if (job.engine_tick != 0) {
+                tick = std::max(tick, job.engine_tick);
+                bytes += job.engine_copy.size;
+            }
+        }
+        if (tick == 0) {
+            return;
+        }
+        const u32 slot = next_cmd++ % NumCmds;
+        if (cmd_tick[slot] != 0) {
+            // That command buffer's earlier submission must be done before it is reset.
+            const vk::SemaphoreWaitInfo wait = {
+                .semaphoreCount = 1,
+                .pSemaphores = &semaphore,
+                .pValues = &cmd_tick[slot],
+            };
+            std::ignore = device.waitSemaphores(wait, UINT64_MAX);
+        }
+        const vk::CommandBuffer cmd = cmds[slot];
+        std::ignore = cmd.reset();
+        Vulkan::Check(cmd.begin(vk::CommandBufferBeginInfo{
+            .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+        }));
+        for (const auto& job : jobs) {
+            if (job.engine_tick != 0) {
+                cmd.copyBuffer(job.engine_src, job.engine_dst, job.engine_copy);
+            }
+        }
+        Vulkan::Check(cmd.end());
+        const vk::TimelineSemaphoreSubmitInfo timeline = {
+            .signalSemaphoreValueCount = 1,
+            .pSignalSemaphoreValues = &tick,
+        };
+        const vk::SubmitInfo submit = {
+            .pNext = &timeline,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &cmd,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &semaphore,
+        };
+        const auto result = queue.submit(submit);
+        if (result == vk::Result::eErrorDeviceLost) {
+            Vulkan::GpuCrashDiag::ReportDeviceLost(instance, "upload queue submit");
+        }
+        ASSERT_MSG(result == vk::Result::eSuccess, "Upload queue submit failed: {}",
+                   vk::to_string(result));
+        cmd_tick[slot] = tick;
+        ++submits;
+        submitted_bytes += bytes;
+        const u64 now = Common::Perf::NowNs();
+        if (now - report_ns >= 5'000'000'000ULL) {
+            const double seconds = report_ns ? double(now - report_ns) / 1e9 : 5.0;
+            std::fprintf(stderr,
+                         "UPLOAD_ENGINE submits/s=%.0f MB/s=%.1f moved/s=%.0f fallbacks/s=%.0f\n",
+                         submits / seconds, submitted_bytes / 1048576.0 / seconds,
+                         moved.exchange(0) / seconds, fallbacks.exchange(0) / seconds);
+            submits = 0;
+            submitted_bytes = 0;
+            report_ns = now;
+        }
+    }
+
+private:
+    struct Range {
+        u64 begin, end, tick;
+    };
+    const Vulkan::Instance& instance;
+    vk::Device device;
+    vk::Queue queue;
+    Buffer ring;
+    vk::Semaphore semaphore{};
+    vk::CommandPool pool{};
+    std::array<vk::CommandBuffer, NumCmds> cmds{};
+    std::array<u64, NumCmds> cmd_tick{};
+    u32 next_cmd{};
+    // Command processor thread.
+    std::deque<Range> live;
+    u64 head{};
+    u64 next_tick{};
+    std::atomic<u64> moved{}, fallbacks{};
+    // Upload worker side.
+    u64 submits{}, submitted_bytes{}, report_ns{};
+};
+
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                          Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
                          TextureCache& texture_cache_, PageManager& tracker)
@@ -736,6 +921,13 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     }
     upload_worker = std::make_unique<UploadWorker>(tracker);
     scheduler.SetSubmitDependency([this](u64 seq) { upload_worker->Wait(seq); });
+    if (instance.GetUploadQueue()) {
+        engine_uploads = std::make_unique<EngineUploads>(instance);
+        upload_worker->SetAfterBatch([engine = engine_uploads.get()](
+                                         std::span<const UploadWorker::Job> jobs) {
+            engine->Submit(jobs);
+        });
+    }
     if (const char* prewarm = std::getenv("ISS_PREWARM_LARGE_UPLOAD");
         prewarm && prewarm[0] == '1') {
         const u64 start_ns = Common::Perf::NowNs();
@@ -771,6 +963,8 @@ constexpr size_t UploadWorkerWakeJobs = 8;
 u64 UploadWorker::Enqueue(Job&& job) {
     u64 seq;
     bool wake;
+    // (ISS_UPLOAD_QUEUE: waking the worker for each engine job was tried: ~10k copy engine
+    // submissions/s, 87.8 vs 91.0 fps in a standing A/B, 2026-11-05. Not kept.)
     {
         std::scoped_lock lk{queue_mutex};
         queue.push_back(std::move(job));
@@ -849,6 +1043,10 @@ void UploadWorker::ExecuteQueued() {
         if (job.flush_buffer) {
             job.flush_buffer->Flush(job.flush_offset, job.flush_size);
         }
+    }
+    if (after_batch) {
+        // ISS_UPLOAD_QUEUE: the copy engine takes the written staging memory from here.
+        after_batch(batch);
     }
     Common::Perf::Add(Common::Perf::AsyncUploadJobs, batch.size());
     Common::Perf::Add(Common::Perf::AsyncUploadBytes, num_bytes);
@@ -1416,7 +1614,7 @@ bool BufferCache::IsRelaxedSite(u64 guest_rip) const {
         return true;
     }
     const u32 count = tuning.num_relaxed_sites.load(std::memory_order_acquire);
-    const u64 base = MemoryPatcher::g_eboot_address;
+    const u64 base = tuning.relaxed_image_base.load(std::memory_order_acquire);
     if (count == 0 || base == 0 || guest_rip < base) {
         return false;
     }
@@ -3504,7 +3702,9 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.memory = device_memory;
         backing.offset = memory_offset >> block_shift;
 
-        LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
+        // Debug level: ~9000 lines a session from the command processor, which can wait on the
+        // log's WriteFile (a ~340 ms freeze, 2026-11-02).
+        LOG_DEBUG(Render, "Making range start={}, end={} resident", backing.start, backing.end);
 
         const vk::SparseMemoryBind bind{
             .resourceOffset = (range.start << block_shift) - arena->cpu_addr,
@@ -3762,8 +3962,33 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
             job.flush_buffer = staging.buffer;
             job.flush_offset = staging.offset;
             job.flush_size = staging.size;
-            // The worker writes the staging memory before the submission of these copies.
-            Rt().CopyBuffer(staging.buffer, arena, copies);
+            if (Vulkan::Runtime::UploadOverlapProbe()) {
+                // UPLOAD-QUEUE-PLAN.md step 0: when the destination was last used by the GPU.
+                for (const auto& copy : copies) {
+                    Rt().NoteUploadOverlap(arena, copy.dstOffset, copy.size);
+                }
+            }
+            // ISS_UPLOAD_QUEUE: the copy engine moves the staging memory into the device ring
+            // once the worker wrote it; this copy then reads the ring (graphics queue only).
+            std::optional<u64> ring_at;
+            if (engine_uploads && ActiveQueuePtr()->index == 0 && !ComputeScratchActive()) {
+                ring_at = engine_uploads->Allocate(total_size_bytes, Sched());
+            }
+            if (ring_at) {
+                job.engine_src = staging.buffer->Handle();
+                job.engine_dst = engine_uploads->Ring()->Handle();
+                job.engine_copy = vk::BufferCopy{
+                    .srcOffset = staging.offset, .dstOffset = *ring_at, .size = total_size_bytes};
+                job.engine_tick = engine_uploads->NextTick();
+                for (auto& copy : copies) {
+                    copy.srcOffset = copy.srcOffset - staging.offset + *ring_at;
+                }
+                Rt().CopyBuffer(engine_uploads->Ring(), arena, copies);
+                Sched().AddUploadWait(engine_uploads->Semaphore(), job.engine_tick);
+            } else {
+                // The worker writes the staging memory before the submission of these copies.
+                Rt().CopyBuffer(staging.buffer, arena, copies);
+            }
             NoteQueueUpload(device_addr, size);
         }
         Sched().RequireBeforeSubmit(upload_worker->Enqueue(std::move(job)));

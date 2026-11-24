@@ -159,6 +159,8 @@ class Backend(QObject):
     guideChanged = Signal()
     scrollRequested = Signal(int)   # used by the screenshot tool
     modsChanged = Signal()
+    verifyChanged = Signal()
+    verifyStep = Signal(object, object)     # verify game files: (done bytes, total) or (None, result) at the end
 
     def __init__(self, settings=None, translator=None, probes=None):
         """probes: optional dict of callables replacing the slow/hardware ones (tests, screenshots)."""
@@ -194,6 +196,9 @@ class Backend(QObject):
         self._jobs = None        # (phase, done, total) while the shader list is being made
         self.finished.connect(self._on_finished)
         self.gameStarted.connect(self._on_game_started)
+        self._verify_running, self._verify_stop = False, False
+        self._verify_progress, self._verify_text, self._verify_level = -1.0, '', ''
+        self.verifyStep.connect(self._on_verify_step)
         self._tail = None        # logtail.LogTail of the running game's log
         self._tail_timer = QTimer(self)
         self._tail_timer.setInterval(LOG_POLL_MS)
@@ -446,6 +451,77 @@ class Backend(QObject):
     def notice(self):
         return self._message
 
+    # -- verify game files (full check of art/ against the reference list, off the UI thread) -------
+    @Property(bool, notify=verifyChanged)
+    def verifyRunning(self):
+        return self._verify_running
+
+    @Property(float, notify=verifyChanged)
+    def verifyProgress(self):
+        """0..1 while the check runs, -1 otherwise."""
+        return self._verify_progress
+
+    @Property(str, notify=verifyChanged)
+    def verifyText(self):
+        return self._verify_text
+
+    @Property(str, notify=verifyChanged)
+    def verifyLevel(self):
+        """'ok' | 'warn' | 'bad' | '' (nothing to show)."""
+        return self._verify_level
+
+    @Slot()
+    def verifyGame(self):
+        folder = self.settings.get('game_dir', '')
+        if self._verify_running or not folder:
+            return
+        self._verify_running, self._verify_stop = True, False
+        self._verify_progress, self._verify_text, self._verify_level = 0.0, self.t_('verify_running'), ''
+        self.verifyChanged.emit()
+
+        def work():
+            try:
+                result = tlg_run.verify_game(folder, progress=lambda done, total: self.verifyStep.emit(done, total),
+                                             stopped=lambda: self._verify_stop)
+            except Exception as error:   # never leave the button stuck
+                result = {'state': 'error', 'error': str(error)}
+            self.verifyStep.emit(None, result)
+        threading.Thread(target=work, daemon=True).start()
+
+    @Slot()
+    def stopVerify(self):
+        self._verify_stop = True
+
+    def _on_verify_step(self, done, value):
+        if done is not None:
+            if value:
+                progress = done / value
+                if progress - self._verify_progress >= 0.002 or progress >= 1:
+                    self._verify_progress = progress
+                    self.verifyChanged.emit()
+            return
+        r, t = value, self.t_
+        self._verify_running, self._verify_progress = False, -1.0
+        state = r.get('state')
+        if state == 'ok':
+            self._verify_level = 'ok'
+            self._verify_text = t('verify_ok', files=f"{r['files']:,}", gb=f"{r['bytes'] / 2**30:.1f}")
+        elif state == 'bad':
+            bad = r['missing'] + r['size'] + r['content']
+            names = ', '.join(bad[:3]) + (t('verify_more', n=len(bad) - 3) if len(bad) > 3 else '')
+            self._verify_level = 'bad'
+            self._verify_text = t('verify_bad', missing=len(r['missing']), size=len(r['size']),
+                                  content=len(r['content']), names=names)
+        elif state == 'stopped':
+            self._verify_level, self._verify_text = 'warn', t('verify_stopped')
+        elif state == 'other_title':
+            self._verify_level, self._verify_text = 'warn', t('verify_other_title', title=r.get('title') or '?')
+        elif state == 'nolist':
+            self._verify_level, self._verify_text = 'warn', t('verify_nolist')
+        else:
+            self._verify_level, self._verify_text = 'bad', t('verify_error', error=r.get('error', ''))
+        self.verifyChanged.emit()
+
     # -- game folder ----------------------------------------------------------------------------
     @Slot(str)
     def chooseFolder(self, url):
@@ -460,6 +536,9 @@ class Backend(QObject):
             self.settings['game_dir'] = path
             tlg_run.save_settings(self.settings)
             self._message = self.t_('folder_saved')
+            if not self._verify_running:   # an earlier result was about the old folder
+                self._verify_text, self._verify_level = '', ''
+                self.verifyChanged.emit()
         self.refresh()
 
     @Slot()

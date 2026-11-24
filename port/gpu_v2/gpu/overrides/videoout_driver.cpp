@@ -16,6 +16,8 @@
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "tlg_graphics.h"
+#include "tlg_settings.h"
 
 #include <atomic>
 
@@ -458,11 +460,12 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // BB_FPS_LIMIT=n (launcher "FPS limit", 0 = off): a flip is taken only once 1/n s passed since
     // the last one (half a vblank of tolerance, so jitter does not cost a whole tick); the guest
     // waits for its queued flip, which paces the game itself.
-    const u32 frame_limit = EmulatorSettings.GetFrameLimit();
-    const auto min_flip_interval =
-        frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit) - vblank_period / 2
-                    : std::chrono::nanoseconds(0);
-    if (frame_limit) std::fprintf(stderr, "VIDEOOUT fps_limit=%u\n", frame_limit);
+    // Without BB_FPS_LIMIT, the in-game menu's "Frame rate limit" (tlg.ini fps_limit) applies,
+    // live, never above the engine rate the patches applied (renderer v2 ignored it before
+    // 2026-11-05: fps_limit=60 still ran at 90-115 FPS).
+    const u32 launcher_limit = EmulatorSettings.GetFrameLimit();
+    u32 frame_limit = ~0u;
+    auto min_flip_interval = std::chrono::nanoseconds(0);
     auto last_flip = std::chrono::steady_clock::time_point{};
     s32 seen_flip_rate = -1;
     bool was_paused = false;
@@ -474,6 +477,23 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                          forced_flip_rate);
         }
         const s32 flip_rate = forced_flip_rate >= 0 ? forced_flip_rate : main_port.flip_rate;
+        {
+            const auto& settings = TlgSettings::Get();
+            const u32 limit =
+                launcher_limit
+                    ? launcher_limit
+                    : u32(TlgGraphics::PresentLimit(
+                          settings.fps_limit.load(std::memory_order_relaxed),
+                          settings.applied_engine_fps.load(std::memory_order_relaxed)));
+            if (limit != frame_limit) {
+                frame_limit = limit;
+                min_flip_interval = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit) -
+                                                      vblank_period / 2
+                                                : std::chrono::nanoseconds(0);
+                std::fprintf(stderr, "VIDEOOUT fps_limit=%u%s\n", frame_limit,
+                             launcher_limit ? " (BB_FPS_LIMIT)" : " (menu)");
+            }
+        }
 
         const bool paused = DebugState.IsGuestThreadsPaused();
         if (iss::timeline::enabled && paused != was_paused) {

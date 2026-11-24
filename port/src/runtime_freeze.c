@@ -405,6 +405,194 @@ static void *monitor(void *argument) {
     return NULL;
 }
 
+#ifdef _WIN32
+/* Host call stacks of every other thread (x64 unwind tables; a frame without one is taken as a
+ * leaf: its return address is at rsp), module+offset or guest+offset per frame. */
+static void describe_host_address(char *out, size_t size, DWORD64 address) {
+    HMODULE module = NULL;
+    char name[MAX_PATH] = "?";
+    if (image_base && address >= image_base && address < image_base + image_bytes) {
+        snprintf(out, size, "guest+0x%llx", (unsigned long long)(address - image_base));
+    } else if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                      GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                  (LPCSTR)address, &module) && module) {
+        GetModuleFileNameA(module, name, sizeof(name));
+        const char *base = strrchr(name, '\\');
+        snprintf(out, size, "%s+0x%llx", base ? base + 1 : name,
+                 (unsigned long long)(address - (DWORD64)module));
+    } else {
+        snprintf(out, size, "0x%llx", (unsigned long long)address);
+    }
+}
+
+static void print_host_stacks(void) {
+    const DWORD self = GetCurrentThreadId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te = {.dwSize = sizeof(THREADENTRY32)};
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == self) continue;
+        HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, te.th32ThreadID);
+        if (!t) continue;
+        char frames[2048];
+        size_t used = 0;
+        frames[0] = 0;
+        if (SuspendThread(t) != (DWORD)-1) {
+            CONTEXT c;
+            memset(&c, 0, sizeof(c));
+            c.ContextFlags = CONTEXT_FULL;
+            if (GetThreadContext(t, &c)) {
+                int guest_seen = 0;
+                for (int depth = 0; depth < 16 && c.Rip && used < sizeof(frames) - 64; ++depth) {
+                    char where[MAX_PATH + 32];
+                    if (!guest_seen && image_base && c.Rip >= image_base && c.Rip < image_base + image_bytes) {
+                        /* Callee-saved registers of the first guest frame (both ABIs keep them). */
+                        guest_seen = 1;
+                        used += snprintf(frames + used, sizeof(frames) - used,
+                                         " [rbx=%llx rbp=%llx r12=%llx r13=%llx r14=%llx r15=%llx]",
+                                         (unsigned long long)c.Rbx, (unsigned long long)c.Rbp,
+                                         (unsigned long long)c.R12, (unsigned long long)c.R13,
+                                         (unsigned long long)c.R14, (unsigned long long)c.R15);
+                        /* The game's label wait at guest+0x1f2700: *(*(r13) + 8 * (s32)[r12+292]) < rbx. */
+                        const uint64_t off = c.Rip - image_base;
+                        if (off >= 0x1f2600 && off < 0x1f2800) {
+                            uint64_t array = 0, value = 0;
+                            int32_t index = 0;
+                            SIZE_T got = 0;
+                            if (ReadProcessMemory(GetCurrentProcess(), (void *)c.R13, &array, 8, &got) &&
+                                ReadProcessMemory(GetCurrentProcess(), (void *)(c.R12 + 292), &index, 4, &got) &&
+                                ReadProcessMemory(GetCurrentProcess(), (void *)(array + 8 * (int64_t)index), &value, 8, &got))
+                                used += snprintf(frames + used, sizeof(frames) - used,
+                                                 " [LABEL_WAIT addr=%llx index=%d value=%llx want=%llx]",
+                                                 (unsigned long long)(array + 8 * (int64_t)index), index,
+                                                 (unsigned long long)value, (unsigned long long)c.Rbx);
+                        }
+                    }
+                    describe_host_address(where, sizeof(where), c.Rip);
+                    used += snprintf(frames + used, sizeof(frames) - used, " %s", where);
+                    DWORD64 base = 0;
+                    PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &base, NULL);
+                    if (fn) {
+                        void *handler_data = NULL;
+                        DWORD64 frame = 0;
+                        RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, fn, &c, &handler_data,
+                                         &frame, NULL);
+                    } else {
+                        DWORD64 ret = 0;
+                        SIZE_T got = 0;
+                        if (!ReadProcessMemory(GetCurrentProcess(), (void *)c.Rsp, &ret, sizeof(ret), &got) ||
+                            got != sizeof(ret))
+                            break;
+                        c.Rip = ret;
+                        c.Rsp += 8;
+                    }
+                }
+            }
+            ResumeThread(t);
+        }
+        CloseHandle(t);
+        printf("HITCH_STACK tid=%lu:%s\n", (unsigned long)te.th32ThreadID, frames);
+    }
+    CloseHandle(snap);
+    fflush(stdout);
+}
+#endif
+
+/* TLG_HITCH_REPORT_MS=<n> (diagnostics, off by default): the same report for short freezes. When
+ * frames were coming quickly and none was shown for n ms, every thread is captured once while the
+ * hitch is still going on (at most 20 reports), then the hitch's length is logged when frames
+ * resume. Shows what the game waits for in the ~300 ms hitches seen in play.
+ * Slow stretches too: after a second of at least 40 frames, three seconds in a row under 20
+ * frames each are reported the same way (SLOW:, again every 10 s while it lasts, at most 12),
+ * and the stretch's length when 40 frames a second come back. A 4 fps crawl shows a frame every
+ * 250 ms, which the hitch report never sees (2026-11-02, after 17 min of play). */
+static void *hitch_monitor(void *argument) {
+    const unsigned threshold = (unsigned)(uintptr_t)argument;
+#ifndef _WIN32
+    pthread_setname_np(pthread_self(), "tlg:hitch");
+#endif
+    uint64_t last_shown = 0, last_change_ms = runtime_wait_now_ms(), smooth_frames = 0;
+    unsigned reports = 0;
+    int in_hitch = 0;
+    uint64_t second_start_ms = last_change_ms, second_start_shown = 0, slow_since_ms = 0;
+    uint64_t slow_frames = 0, last_slow_report_ms = 0;
+    unsigned slow_seconds = 0, slow_reports = 0, slow_last_fps = 0;
+    int slow_armed = 0, in_slow = 0;
+    for (;;) {
+        sleep_ms(10);
+        TlgGpuFrameCounters now;
+        tlggpu_frame_counters(&now);
+        const uint64_t ms = runtime_wait_now_ms();
+        if (ms - second_start_ms >= 1000) {
+            const uint64_t frames = now.shown - second_start_shown;
+            const unsigned fps = (unsigned)(frames * 1000 / (ms - second_start_ms));
+            second_start_ms = ms;
+            second_start_shown = now.shown;
+            if (fps >= 40) {
+                if (in_slow) {
+                    printf("SLOW: back to %u fps after %llu s slow (%llu frames)\n", fps,
+                           (unsigned long long)((ms - slow_since_ms) / 1000),
+                           (unsigned long long)slow_frames);
+                    fflush(stdout);
+                }
+                slow_armed = 1;
+                in_slow = 0;
+                slow_seconds = 0;
+            } else if (slow_armed && fps < 20) {
+                if (!slow_seconds) { slow_since_ms = ms - 1000; slow_frames = 0; }
+                ++slow_seconds;
+                slow_frames += frames;
+                slow_last_fps = fps;
+            } else if (!in_slow) {
+                slow_seconds = 0;
+            }
+            if (slow_seconds >= 3 && slow_reports < 12 &&
+                (!in_slow || ms - last_slow_report_ms >= 10000)) {
+                in_slow = 1;
+                last_slow_report_ms = ms;
+                ++slow_reports;
+                char head[128];
+                snprintf(head, sizeof(head), "SLOW: %u fps now, %llu s under 20 fps (report %u); threads:\n",
+                         slow_last_fps, (unsigned long long)((ms - slow_since_ms) / 1000), slow_reports);
+                runtime_freeze_report(stdout, head);
+#ifdef _WIN32
+                print_host_stacks();
+#endif
+            }
+        }
+        if (now.shown != last_shown) {
+            if (in_hitch) {
+                printf("HITCH: frames resumed after %llu ms\n", (unsigned long long)(ms - last_change_ms));
+                fflush(stdout);
+                in_hitch = 0;
+                smooth_frames = 0;
+            } else if (ms - last_change_ms < 50) {
+                smooth_frames += now.shown - last_shown;
+            } else {
+                smooth_frames = 0;
+            }
+            last_shown = now.shown;
+            last_change_ms = ms;
+            continue;
+        }
+        /* Only after a few seconds of normal frames: not loading screens or menus. */
+        if (!in_hitch && smooth_frames >= 120 && ms - last_change_ms >= threshold) {
+            in_hitch = 1;
+            if (reports < 20) {
+                ++reports;
+                char head[96];
+                snprintf(head, sizeof(head), "HITCH: no frame for %llu ms (report %u); threads:\n",
+                         (unsigned long long)(ms - last_change_ms), reports);
+                runtime_freeze_report(stdout, head);
+#ifdef _WIN32
+                print_host_stacks();
+#endif
+            }
+        }
+    }
+    return NULL;
+}
+
 static void gpu_wait_begin(const char *kind, const void *object, const char *name, uintptr_t frame) {
     runtime_wait_begin(kind, object, name, NULL, frame);
 }
@@ -418,6 +606,17 @@ void runtime_freeze_start(uintptr_t image, uint64_t image_size, unsigned seconds
     sigemptyset(&action.sa_mask);
     sigaction(SIGURG, &action, NULL);
 #endif
+    {
+        const char *hitch = getenv("TLG_HITCH_REPORT_MS");
+        const unsigned hitch_ms = hitch ? (unsigned)strtoul(hitch, NULL, 10) : 0;
+        if (hitch_ms) {
+            pthread_t hitch_thread;
+            if (!pthread_create(&hitch_thread, NULL, hitch_monitor, (void *)(uintptr_t)hitch_ms)) {
+                pthread_detach(hitch_thread);
+                printf("Hitch report: after %u ms without a new frame (TLG_HITCH_REPORT_MS)\n", hitch_ms);
+            }
+        }
+    }
     if (!seconds) return;
     static FreezeMonitor state;
     state = (FreezeMonitor){.seconds = seconds};

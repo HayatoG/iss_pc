@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -83,6 +84,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.key_map = value;
         return;
     }
+    if (key == "key_binds") {
+        SetKeyBinds(value);
+        return;
+    }
     if (key == "dlss_dll_dir") {
         v.dlss_dll_dir = value;
         return;
@@ -143,6 +148,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.display_mode = TlgGraphics::ParseDisplayMode(value);
     } else if (key == "vsync") {
         v.vsync = i != 0;
+    } else if (key == "vsync_relaxed") {
+        v.vsync_relaxed = i != 0;
     } else if (key == "fps_limit") {
         v.fps_limit = TlgGraphics::ParseFpsLimit(i);
     } else if (key == "async_shaders") {
@@ -156,7 +163,7 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "frames_queued") {
         v.frames_queued = TlgGraphics::ParseFramesQueued(value.empty() ? -1 : i);
     } else if (key == "iss_native_output") {
-        v.iss_native_output = std::clamp(i,0,5);
+        v.iss_native_output = std::clamp(i,0,7);
     } else if (key == "iss_native_percent") {
         v.iss_native_percent = std::clamp(i,25,200);
     } else if (key == "iss_native_hud_edges") {
@@ -171,6 +178,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.iss_power_glow=std::clamp(f,0.5f,3.0f);
     } else if (key == "iss_power_instant") {
         v.iss_power_instant=i!=0;
+    } else if (key == "iss_pad_speaker") {
+        v.iss_pad_speaker=i!=0;
     } else if (key == "iss_power_switch_enabled") {
         v.iss_power_switch_enabled=i!=0;
     } else if (key == "iss_power_key_smoke" || key == "iss_power_key_neon" || key == "iss_power_key_video" || key == "iss_power_key_concrete") {
@@ -242,6 +251,19 @@ void Set(Values& v, const std::string& key, const std::string& value) {
 Values& Get() {
     static Values values;
     return values;
+}
+
+static std::mutex& KeyBindsLock() {
+    static std::mutex lock;
+    return lock;
+}
+std::string KeyBinds() {
+    std::scoped_lock guard{KeyBindsLock()};
+    return Get().key_binds;
+}
+void SetKeyBinds(const std::string& value) {
+    std::scoped_lock guard{KeyBindsLock()};
+    Get().key_binds = value;
 }
 
 void Load() {
@@ -369,7 +391,7 @@ void Save() {
         return;
     }
     std::fprintf(file,
-                 "# tlg settings (in-game menu: Insert / R3+L2)\n"
+                 "# tlg settings (in-game menu: F1 / R3+L2)\n"
                  "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"
                  "reactive=%d\nobject_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\nreactive_max=%.2f\n"
                  "debug_view=%d\nshow_fps=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n",
@@ -388,6 +410,7 @@ void Save() {
     std::fprintf(file,"iss_power_switch_enabled=%d\niss_power_key_smoke=%d\niss_power_key_neon=%d\niss_power_key_video=%d\niss_power_key_concrete=%d\n",
         int(v.iss_power_switch_enabled.load()),v.iss_power_keys[0].load(),v.iss_power_keys[1].load(),v.iss_power_keys[2].load(),v.iss_power_keys[3].load());
     std::fprintf(file,"iss_power_instant=%d\n",int(v.iss_power_instant.load()));
+    std::fprintf(file,"iss_pad_speaker=%d\n",int(v.iss_pad_speaker.load()));
     std::fprintf(file,"iss_power_glow=%.2f\n",v.iss_power_glow.load());
     std::fprintf(file, "red_orb_multiplier=%.3f\n", v.red_orb_multiplier.load());
     std::fprintf(file, "damage_dealt=%.3f\n", v.damage_dealt.load());
@@ -422,6 +445,7 @@ void Save() {
                  int(v.restart_unconfirmed.load()));
     std::fprintf(file, "sensor_aim=%d\ngraffiti_guide_seen=%d\n", v.sensor_aim.load(),
                  int(v.graffiti_guide_seen.load()));
+    std::fprintf(file, "vsync_relaxed=%d\n", int(v.vsync_relaxed.load()));
     std::fprintf(file,
                  "lod_scale=%.3f\nregion_lod=%.3f\nregion_fade=%.3f\nnear_clip=%.3f\nfar_clip=%.0f\n"
                  "mip_lod_bias=%.3f\nlod_bands=%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\ndyn_cull=%d\ndraw_budget=%d\nquality_floor=%d\nquality_target_fps=%d\n",
@@ -443,6 +467,7 @@ void Save() {
                  "rumble=%d\nkey_map=%s\n",
                  int(v.mouse_enabled.load()), v.mouse_sensitivity.load(), int(v.mouse_invert_y.load()),
                  int(v.rumble.load()), v.key_map.c_str());
+    std::fprintf(file, "key_binds=%s\n", KeyBinds().c_str());
     // Read by run.sh at start.
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");
@@ -466,6 +491,8 @@ const char* UpscalerName(int upscaler) {
 }
 
 } // namespace TlgSettings
+/* Controller-speaker sounds on/off, read by the audio runtime every block (switchable mid-game). */
+extern "C" int tlggpu_pad_speaker_enabled(void){return TlgSettings::Get().iss_pad_speaker.load(std::memory_order_relaxed)?1:0;}
 extern "C" void tlggpu_power_wheel_settings(int *enabled,int keys[4],int *instant){
     auto &s=TlgSettings::Get();*enabled=int(s.iss_power_switch_enabled.load());
     *instant=int(s.iss_power_instant.load());

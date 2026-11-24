@@ -102,6 +102,7 @@ typedef struct {
     int32_t rumble;             /* controller vibration on (tlg.ini rumble, TLG_RUMBLE) */
     float sensitivity;
     char key_map[512];
+    char key_binds[1024];       /* tlg.ini key_binds: the in-game bindings window (applied after key_map) */
 } TlgGpuInputSettings;
 void tlggpu_input_settings(TlgGpuInputSettings *settings);
 /* Touchpad mode of the mouse (runtime_pad.c): while active, a small touchpad with the virtual

@@ -16,6 +16,9 @@
 #include "feedback_join.h"
 #include "infamous_renderer/secondary_batch_probe.h"
 #include <unordered_set>
+#include "video_core/renderdoc.h"
+#include <chrono>
+#include <mutex>
 #include <cstdio>
 #include <filesystem>
 #include <intrin.h>
@@ -48,6 +51,10 @@ namespace iss::diagnostics {void RecordFeedbackBinding(u64 address,u64 size,u64 
 #include <fstream>
 #include <stdexcept>
 #include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#include <tlhelp32.h>
+#endif
 #include "common/debug.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
@@ -137,6 +144,16 @@ thread_local Rasterizer::SplitThreadState Rasterizer::split_thread_state{};
 #include "draw_pipe_rasterizer.inl"
 
 namespace {
+
+// ISS_LATE_LABEL_MS (diagnostics): when each graphics session reached the driver, by tick.
+std::array<std::atomic<u64>, 4096> g_session_submit_ns{};
+u64 LateLabelNs() {
+    static const u64 ns = [] {
+        const char* p = std::getenv("ISS_LATE_LABEL_MS");
+        return p ? std::strtoull(p, nullptr, 10) * 1'000'000ull : 0ull;
+    }();
+    return ns;
+}
 
 bool EarlyFeedbackEnabled() {
     static const bool enabled=[] {const char *p=std::getenv("ISS_FEEDBACK_EARLY_SUBMIT");return p&&p[0]=='1';}();
@@ -301,6 +318,52 @@ void Rasterizer::DumpAfter(const Pipeline* pipeline) {
     if (g_dump.frames_left == 0 || !pipeline) {
         return;
     }
+    // ISS_DUMP_AFTER=<hash>:<address hex|srt|vb>[/WxH][:n];... fills Tuning::dump_after (nothing
+    // else sets it in renderer v2), read once at the first dumped frame.
+    static const bool dump_after_loaded = [] {
+        const char* text = std::getenv("ISS_DUMP_AFTER");
+        auto& entries = Common::Perf::GetTuning().dump_after;
+        size_t index = 0;
+        for (const char* p = text; p && *p && index < entries.size();) {
+            const char* end = std::strchr(p, ';');
+            const std::string item(p, end ? size_t(end - p) : std::strlen(p));
+            p = end ? end + 1 : p + item.size();
+            unsigned long long shader = 0, address = 0;
+            unsigned width = 0, height = 0, count = 1;
+            char what[32]{};
+            if (std::sscanf(item.c_str(), "%llx:%31[^/:]", &shader, what) != 2) continue;
+            if (what[0] == 'm') {
+                // "hash:m<address>+<size>": the guest's bytes there (constants the CPU wrote),
+                // printed as floats; marked by height ~0u, size in width.
+                unsigned long long size = 0;
+                if (std::sscanf(what + 1, "%llx+%llx", &address, &size) != 2) continue;
+                auto& entry = entries[index++];
+                entry.address.store(address);
+                entry.width.store(u32(size));
+                entry.height.store(~0u);
+                entry.count.store(1);
+                entry.shader.store(shader);
+                std::fprintf(stderr, "ISS_DUMP_AFTER %llx: guest memory %llx+%llx\n", shader, address, size);
+                continue;
+            }
+            if (!std::strcmp(what, "srt")) address = 2;
+            else if (!std::strcmp(what, "vb")) address = 1;
+            else address = std::strtoull(what, nullptr, 16);
+            if (const auto slash = item.find('/'); slash != std::string::npos)
+                std::sscanf(item.c_str() + slash + 1, "%ux%u", &width, &height);
+            if (const auto colon = item.rfind(':'); colon != std::string::npos && colon > item.find(':'))
+                count = unsigned(std::strtoul(item.c_str() + colon + 1, nullptr, 10));
+            auto& entry = entries[index++];
+            entry.address.store(address);
+            entry.width.store(width);
+            entry.height.store(height);
+            entry.count.store(count ? count : 1);
+            entry.shader.store(shader);
+            std::fprintf(stderr, "ISS_DUMP_AFTER %llx:%llx/%ux%u:%u\n", shader, address, width, height, count);
+        }
+        return true;
+    }();
+    (void)dump_after_loaded;
     const auto& tuning = Common::Perf::GetTuning();
     for (size_t i = 0; i < tuning.dump_after.size(); ++i) {
         const auto& entry = tuning.dump_after[i];
@@ -323,6 +386,18 @@ void Rasterizer::DumpAfter(const Pipeline* pipeline) {
             continue;
         }
         const u64 address = entry.address.load(std::memory_order_relaxed);
+        if (entry.height.load(std::memory_order_relaxed) == ~0u) {
+            const u32 size = std::min<u32>(entry.width.load(std::memory_order_relaxed), 64u << 10);
+            std::vector<u32> words((size + 3) / 4);
+            memory->CopySparseMemory(address, reinterpret_cast<u8*>(words.data()), size);
+            for (u32 i = 0; i < words.size(); i += 8) {
+                std::string line = fmt::format("DUMPM f{} {:x} [{:4}]", g_dump.frame, address, i);
+                for (u32 k = i; k < std::min<u32>(i + 8, u32(words.size())); ++k)
+                    line += fmt::format(" {:>12.6g}", std::bit_cast<float>(words[k]));
+                std::fprintf(stderr, "%s\n", line.c_str());
+            }
+            continue;
+        }
         if (address == 1) {
             // "hash:vb": the vertex buffers of the draw, as the GPU reads them and as guest
             // memory has them.
@@ -758,6 +833,9 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         buffer_cache.SubmitPendingArenaBinds(info);
     });
     scheduler.SetPostSubmitCallback([this](u64 tick) {
+        // ISS_LATE_LABEL_MS diagnostics (DeferUnifiedFence): when each session reached the driver.
+        g_session_submit_ns[tick % g_session_submit_ns.size()].store(Common::Perf::NowNs(),
+                                                                     std::memory_order_relaxed);
         if (liverpool->CpSplitActive()) {
             [[maybe_unused]] const bool published =
                 liverpool->PublishCpSubmitted(iss::g4::CpLane::Graphics, tick);
@@ -1325,6 +1403,9 @@ static void WaitPipelineReady(const Pipeline* pipeline, PipelineCache* cache = n
 }
 
 void Rasterizer::BindGraphicsPipeline(const GraphicsPipeline* pipeline) {
+    if (Common::Perf::GetTuning().gpu_profile.load(std::memory_order_relaxed) >= 4) {
+        scheduler.ProfilePassShader(pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash);
+    }
     BindPipelineLazy(scheduler, vk::PipelineBindPoint::eGraphics, pipeline);
 }
 
@@ -1482,6 +1563,11 @@ std::size_t Rasterizer::Draw(bool is_indexed, u32 index_offset,
 #include "native_cpu_draw_run.inl"
 #include "native_instanced_run_rasterizer.inl"
 
+void Rasterizer::NoteGuestSync() noexcept {
+    runtime.NoteGuestSync();
+    if (compute_runtime) compute_runtime->NoteGuestSync();
+}
+
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline,bool is_indexed,u32 index_offset) {
     if (NativeVisualCaptureEnabled()) native_visual_latch = {};
     std::optional<iss::diagnostics::Scope> worker_scope;
@@ -1542,7 +1628,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline,bool is_indexed,u32
     if (cycles) g_draw_cycles.Mark(6);
 
     if (needs_barrier) {
-        runtime.FlushBarriers();
+        runtime.FlushHazards();
     }
     if (cycles) g_draw_cycles.Mark(7);
 
@@ -1784,7 +1870,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     }
 
     if (needs_barrier) {
-        runtime.FlushBarriers();
+        runtime.FlushHazards();
     }
 
     if (iss_ui_scale_x != 1.0f) IssUiScalePushData();
@@ -3019,8 +3105,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         const u64 key=cs.pgm_hash^(u64(plan.width)<<32)^(u64(plan.height)<<16);
         static thread_local std::unordered_set<u64> seen;
         if(seen.size()<32&&seen.insert(key).second)
-            std::fprintf(stderr,"NATIVE_LIGHT_DISPATCH shader=%llx scene=%ux%u groups=%ux%ux%u\n",
-                (unsigned long long)cs.pgm_hash,plan.width,plan.height,cs_program.dim_x,cs_program.dim_y,cs_program.dim_z);
+            std::fprintf(stderr,"NATIVE_LIGHT_DISPATCH shader=%llx scene=%ux%u groups=%ux%ux%u queue=%u (0: graphics ring, >0: compute ring)\n",
+                (unsigned long long)cs.pgm_hash,plan.width,plan.height,cs_program.dim_x,cs_program.dim_y,cs_program.dim_z,
+                unsigned(DrawQueue()));
     }
     if(!feedback)SubmitFeedbackBatch(scheduler);
     if (ExecuteShaderHLE(cs, DrawRegs(), cs_program, *this)) {
@@ -3086,7 +3173,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             !iss::phase::g_foreign.load(std::memory_order_relaxed)) {
             iss::phase::g_skipped.fetch_add(1, std::memory_order_relaxed);
         } else {
-            Rt().FlushBarriers();
+            Rt().FlushHazards();
             hazard_flushed=true;
             if (phase) {
                 iss::phase::g_flushed.fetch_add(1, std::memory_order_relaxed);
@@ -3214,7 +3301,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     }
 
     if (needs_barrier) {
-        Rt().FlushBarriers();
+        Rt().FlushHazards();
     }
 
     if (!OnComputeRecordQueue()) {
@@ -4987,7 +5074,9 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         if (image->binding.is_bound) {
             ASSERT_MSG(!image->binding.force_general,
                        "Having image both as storage and render target is unsupported");
-            runtime.FlushBarriers();
+            if (!Runtime::MergeRenderTargetBarriers() || runtime.HasPendingImageBarrier(image)) {
+                runtime.FlushBarriers();
+            }
             needs_barrier |=
                 runtime.Transit(image,
                                 instance.IsAttachmentFeedbackLoopLayoutSupported()
@@ -5242,10 +5331,11 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
             return;
         }
     }
-    // ISS_ASC_NATIVE_QUEUE: a compute ring's fill runs on the compute queue.
+    // ISS_ASC_NATIVE_QUEUE: a compute ring's fill runs on the compute queue (not into GDS, whose
+    // counters the graphics queue's segments use too; not with ISS_ASC_COPIES=0).
     if (asc_copy_vqid != ~0u) {
         const u32 vqid = std::exchange(asc_copy_vqid, ~0u);
-        if (compute_scheduler && AscQueueEnabled()) {
+        if (compute_scheduler && AscQueueEnabled() && AscCopiesOnCompute() && !is_gds) {
             const u64 uploads_before = Common::Perf::Total(Common::Perf::BufferUploads);
             const auto [buffer, offset] = [&] -> std::pair<const VideoCore::Buffer*, u64> {
                 if (is_gds) return {buffer_cache.GetGdsBuffer(), address};
@@ -5370,8 +5460,10 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
     // the graphics queue sends it there).
     if (asc_copy_vqid != ~0u) {
         const u32 vqid = std::exchange(asc_copy_vqid, ~0u);
-        if (compute_scheduler && AscQueueEnabled() &&
-            (src_gds || !texture_cache.FindImageFromRange(src, num_bytes))) {
+        // Not from or into GDS (its counters are used by the graphics queue's segments too), not
+        // with ISS_ASC_COPIES=0.
+        if (compute_scheduler && AscQueueEnabled() && AscCopiesOnCompute() && !src_gds &&
+            !dst_gds && !texture_cache.FindImageFromRange(src, num_bytes)) {
             const u64 uploads_before = Common::Perf::Total(Common::Perf::BufferUploads);
             if (!dst_gds && !src_gds)
                 VideoCore::RecordReadbackDma(dst, src, num_bytes, scheduler.CurrentTick(), 0);
@@ -5767,6 +5859,26 @@ bool Rasterizer::DeferUnifiedFence(VAddr dst, u32 bytes, std::optional<u32> valu
             iss::timeline::Emit("fence_write", reinterpret_cast<u64>(this), tick, dst, 0, 0, 0,
                                 Common::Perf::NowNs() - defer_ns);
         });
+    } else if (const u64 late_ns = LateLabelNs()) {
+        // ISS_LATE_LABEL_MS=<n>: a label written n ms or more after the command processor read
+        // its fence is logged, split into the wait for its session's submission and the rest
+        // (GPU work plus the completion thread). Diagnostics of the ~300 ms hitches.
+        const u64 defer_ns = Common::Perf::NowNs();
+        unified_ops.emplace_back(tick, [w = std::move(write), dst, tick, defer_ns, late_ns]() mutable {
+            w();
+            const u64 done_ns = Common::Perf::NowNs();
+            if (done_ns - defer_ns < late_ns) return;
+            const u64 submit_ns =
+                g_session_submit_ns[tick % g_session_submit_ns.size()].load(std::memory_order_relaxed);
+            const bool known = submit_ns >= defer_ns && submit_ns <= done_ns;
+            std::fprintf(stderr,
+                         "LABEL_LATE addr=0x%llx tick=%llu total_ms=%.1f until_submit_ms=%.1f "
+                         "gpu_and_write_ms=%.1f\n",
+                         (unsigned long long)dst, (unsigned long long)tick,
+                         (done_ns - defer_ns) / 1e6, known ? (submit_ns - defer_ns) / 1e6 : -1.0,
+                         known ? (done_ns - submit_ns) / 1e6 : -1.0);
+            std::fflush(stderr);
+        });
     } else {
         unified_ops.emplace_back(tick, std::move(write));
     }
@@ -5826,6 +5938,15 @@ void Rasterizer::FlushUnifiedFences(bool idle) {
 }
 
 
+bool Rasterizer::AscCopiesOnCompute() const noexcept {
+    // ISS_ASC_COPIES=0: a compute ring's DMA copies and fills stay on the graphics queue.
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_ASC_COPIES");
+        return !p || p[0] != '0';
+    }();
+    return enabled;
+}
+
 bool Rasterizer::AscQueueEnabled() const noexcept {
     static const bool enabled = [] {
         const char* p = std::getenv("ISS_ASC_NATIVE_QUEUE");
@@ -5835,11 +5956,43 @@ bool Rasterizer::AscQueueEnabled() const noexcept {
            !cp_split_enabled && !draw_pipe_state;
 }
 
+#ifdef _WIN32
+namespace {
+extern std::atomic<u64> g_asc_heartbeat_ns;
+void StartAscWatchdog(Vulkan::Rasterizer* rasterizer);
+} // namespace
+#endif
+
 void Rasterizer::AscFlush() {
+    {
+        // ISS_ASC_NATIVE_QUEUE diagnostics: the state every 5 s (called before every graphics
+        // submission, so it reports even while the compute queue has nothing new).
+        static u64 report_ns = 0;
+        const u64 now = Common::Perf::NowNs();
+#ifdef _WIN32
+        g_asc_heartbeat_ns.store(now, std::memory_order_relaxed);
+        StartAscWatchdog(this);
+#endif
+        if (now - report_ns >= 5'000'000'000ULL) {
+            report_ns = now;
+            std::fprintf(stderr, "ASC_STATE %s\n", AscDebugState().c_str());
+        }
+    }
     if (!g_asc.unflushed) return;
     g_asc.unflushed = false;
     g_asc.last_flush_ns = Common::Perf::NowNs();
     const u64 tick = compute_scheduler->CurrentTick();
+    // A wait on a graphics tick is submitted only once that tick is (as FlushComputeQueue does):
+    // with threaded recording the graphics session may still be queued for the recording thread,
+    // and a compute submission waiting before its signal stalled the driver while the presenter
+    // held the shared submit lock (ASC_HANG + SUBMIT_HISTORY, 2026-11-02). AscBeforeComputeWork
+    // flushed that session already, so it is older than the one being recorded.
+    {
+        const u64 graphics_tick =
+            compute_scheduler->CrossWaitTick(scheduler.GetWorkSemaphore()->Handle());
+        if (graphics_tick != 0 && graphics_tick < scheduler.CurrentTick())
+            scheduler.WaitSubmitted(graphics_tick);
+    }
     compute_scheduler->Flush();
     // The graphics session being recorded (whose tick the unified heap writes of the compute work
     // were stamped with) and every later one run after this compute work.
@@ -5859,6 +6012,141 @@ void Rasterizer::AscFlush() {
                      (unsigned long long)g_asc.seg_why[0], (unsigned long long)g_asc.seg_why[1],
                      (unsigned long long)g_asc.seg_why[2],
                      (unsigned long long)g_asc.compute_waits, (unsigned long long)g_asc.label_waits);
+}
+
+void DumpSubmitHistory(); // vk_scheduler.cpp (this file is inside namespace Vulkan)
+#ifdef _WIN32
+// ISS_ASC_NATIVE_QUEUE diagnostics: when no graphics submission happened for 6 s (AscFlush runs
+// before each one), the stacks of all threads of the process are printed once (module+offset per
+// frame, x64 unwind tables), to find where the command processor is blocked.
+namespace {
+std::atomic<u64> g_asc_heartbeat_ns{0};
+void DescribeFrame(char* out, size_t size, DWORD64 address) {
+    HMODULE module = nullptr;
+    char name[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(address), &module) &&
+        module) {
+        GetModuleFileNameA(module, name, sizeof(name));
+        const char* base = std::strrchr(name, '\\');
+        std::snprintf(out, size, "%s+0x%llx", base ? base + 1 : name,
+                      (unsigned long long)(address - reinterpret_cast<DWORD64>(module)));
+    } else {
+        std::snprintf(out, size, "0x%llx", (unsigned long long)address);
+    }
+}
+void DumpAllThreadStacks() {
+    const DWORD self = GetCurrentThreadId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te{.dwSize = sizeof(THREADENTRY32)};
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != GetCurrentProcessId() || te.th32ThreadID == self) continue;
+        HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                              FALSE, te.th32ThreadID);
+        if (!t) continue;
+        std::string line;
+        wchar_t* wname = nullptr;
+        if (SUCCEEDED(GetThreadDescription(t, &wname)) && wname) {
+            for (const wchar_t* c = wname; *c && line.size() < 48; ++c) line += char(*c);
+            LocalFree(wname);
+        }
+        if (SuspendThread(t) != DWORD(-1)) {
+            CONTEXT c{};
+            c.ContextFlags = CONTEXT_FULL;
+            if (GetThreadContext(t, &c)) {
+                std::string frames;
+                for (int depth = 0; depth < 20 && c.Rip; ++depth) {
+                    char where[MAX_PATH + 32];
+                    DescribeFrame(where, sizeof(where), c.Rip);
+                    frames += std::string(" ") + where;
+                    DWORD64 base = 0;
+                    PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &base, nullptr);
+                    if (fn) {
+                        void* handler_data = nullptr;
+                        DWORD64 frame = 0;
+                        RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, fn, &c, &handler_data,
+                                         &frame, nullptr);
+                    } else {
+                        DWORD64 ret = 0;
+                        SIZE_T got = 0;
+                        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(c.Rsp),
+                                               &ret, sizeof(ret), &got) ||
+                            got != sizeof(ret))
+                            break;
+                        c.Rip = ret;
+                        c.Rsp += 8;
+                    }
+                }
+                std::fprintf(stderr, "ASC_HANG_STACK tid=%lu name=\"%s\":%s\n",
+                             te.th32ThreadID, line.c_str(), frames.c_str());
+            }
+            ResumeThread(t);
+        }
+        CloseHandle(t);
+    }
+    CloseHandle(snap);
+    std::fflush(stderr);
+}
+void StartAscWatchdog(Vulkan::Rasterizer* rasterizer) {
+    static std::once_flag once;
+    std::call_once(once, [rasterizer] {
+        std::thread([rasterizer] {
+            bool dumped = false;
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                const u64 beat = g_asc_heartbeat_ns.load(std::memory_order_relaxed);
+                if (!dumped && beat && Common::Perf::NowNs() - beat > 6'000'000'000ULL) {
+                    dumped = true;
+                    // Read without the command processor's locks: diagnostics of a stalled state.
+                    std::fprintf(stderr, "ASC_HANG no graphics submission for 6 s: %s\n",
+                                 rasterizer->AscDebugState(true).c_str());
+                    DumpSubmitHistory();
+                    DumpAllThreadStacks();
+                }
+            }
+        }).detach();
+    });
+}
+} // namespace
+#endif
+
+std::string Rasterizer::AscDebugState(bool query_gpu) {
+    if (query_gpu) {
+        // The values the GPU has reached now, not the last ones the command processor saw.
+        scheduler.GetWorkSemaphore()->Refresh();
+        if (compute_scheduler) compute_scheduler->GetWorkSemaphore()->Refresh();
+    }
+    std::string s = fmt::format(
+        "gfx[tick={} gpu={}] asc_enabled={} segments={} flushes={} releases={} unflushed={} "
+        "compute_waits={} label_waits={} labels={}",
+        scheduler.CurrentTick(), scheduler.GetWorkSemaphore()->KnownGpuTick(),
+        int(AscQueueEnabled()), g_asc.segments, g_asc.flushes, g_asc.releases,
+        int(g_asc.unflushed), g_asc.compute_waits, g_asc.label_waits, unified_labels.size());
+    s += fmt::format(" unified_unsubmitted_tick={}", unified_unsubmitted_tick);
+    if (query_gpu) {
+        // Each label still listed: the value it will write, whether its queue has passed its
+        // tick, and what guest memory holds now (a free tick with a different value: lost write).
+        for (const auto& label : unified_labels) {
+            const bool free = label.compute ? compute_scheduler && compute_scheduler->IsFree(label.tick)
+                                            : scheduler.IsFree(label.tick);
+            s += fmt::format(" label[0x{:x} value=0x{:x} {} tick={} free={} memory=0x{:x}]",
+                             label.address, label.value, label.compute ? "compute" : "gfx",
+                             label.tick, int(free),
+                             *reinterpret_cast<const u32*>(label.address));
+        }
+    }
+    if (compute_scheduler) {
+        s += fmt::format(" compute[tick={} gpu={}]", compute_scheduler->CurrentTick(),
+                         compute_scheduler->GetWorkSemaphore()->KnownGpuTick());
+    }
+    for (size_t q = 0; q < g_asc.last.size(); ++q) {
+        if (g_asc.last[q] || g_asc.graphics_tick[q])
+            s += fmt::format(" ring{}[last={} gtick={}]", q, unsigned(g_asc.last[q]),
+                             g_asc.graphics_tick[q]);
+    }
+    return s;
 }
 
 void Rasterizer::AscBeforeGraphicsWork(u32 vqid, u32 why) {
@@ -5896,6 +6184,15 @@ void Rasterizer::AscBeforeComputeWork(u32 vqid) {
 
 bool Rasterizer::AscRelease(u32 vqid, VAddr dst, u32 bytes, std::optional<u32> value, bool irq,
                             Common::UniqueFunction<void>&& write) {
+    // ISS_ASC_RELEASE_COMPUTE=1: labels written by the compute queue's completion thread when the
+    // ring's last work is there. Off by default: a ring's labels then all go through the graphics
+    // queue's deferred fences (whose session waits for the compute work, AscFlush), so they land in
+    // order; written by two threads they overtook each other (LABEL_BACKWARDS, 2026-11-02).
+    static const bool release_on_compute = [] {
+        const char* p = std::getenv("ISS_ASC_RELEASE_COMPUTE");
+        return p && p[0] == '1';
+    }();
+    if (!release_on_compute) return false;
     if (!compute_scheduler || !AscQueueEnabled() || vqid >= g_asc.last.size() ||
         g_asc.last[vqid] != 1)
         return false;
@@ -5919,11 +6216,11 @@ bool Rasterizer::AscRelease(u32 vqid, VAddr dst, u32 bytes, std::optional<u32> v
         if (unified_labels.size() < 256) unified_labels.push_back({dst, *value, tick, true});
     }
     g_asc.unflushed = true;
-    static const u64 flush_interval_ns = [] {
-        const char* p = std::getenv("ISS_UNIFIED_FLUSH_US");
-        return (p ? std::strtoull(p, nullptr, 10) : 1000ull) * 1000ull;
-    }();
-    if (irq || Common::Perf::NowNs() - g_asc.last_flush_ns >= flush_interval_ns) AscFlush();
+    // Submitted at once: the guest may wait for this label before it gives the GPU more work, so
+    // the compute work must not stay unsubmitted until the next graphics submission (a label held
+    // back that way landed after the ring's later labels, LABEL_BACKWARDS, 2026-11-02).
+    (void)irq;
+    AscFlush();
     ++g_asc.releases;
     return true;
 }
@@ -6043,7 +6340,114 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     }
 }
 
+// Video cutscenes on a wide screen (2026-11-06): the game draws its 16:9 films across the whole wide
+// frame, stretched sideways (the pause-menu 16:9 view used to squeeze them back, with black bars).
+// The draw's height is enlarged by (screen shape / 16:9) around the centre: correct proportions, the
+// full screen filled, the top and bottom of the film cut. Set per draw, read by
+// UpdateViewportScissorState. On by default; ISS_VIDEO_FILL=0 turns it off.
+// Shaders: b03b3012 = story films (1920x1088 luma + 960x544 chroma, seen on the EU game 2026-11-06);
+// 0061465b/d8eab7b5 = the 3-plane player (only its >=1280-wide uses count).
+static thread_local float iss_video_zoom = 1.0f;
+
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
+    {
+        static const bool video_fill = [] {
+            const char* value = std::getenv("ISS_VIDEO_FILL");
+            return !(value && value[0] == '0');
+        }();
+        iss_video_zoom = 1.0f;
+        if (video_fill && runtime_native_status() == 1) {
+            const auto stages = pipeline->GetStages();
+            const auto* fs = stages[u32(Shader::SwStage::Fragment)];
+            if (fs && (u32(fs->pgm_hash) == 0xb03b3012u || u32(fs->pgm_hash) == 0x0061465bu ||
+                       u32(fs->pgm_hash) == 0xd8eab7b5u)) {
+                u32 widest = 0;
+                for (const auto& desc : fs->images) widest = std::max<u32>(widest, desc.GetSharp(*fs).width + 1);
+                const auto* plan = runtime_native_plan();
+                const float screen = plan->output_height ? float(plan->output_width) / float(plan->output_height) : 0.0f;
+                if (widest >= 1280 && screen > 16.0f / 9.0f + 0.001f) {
+                    iss_video_zoom = screen / (16.0f / 9.0f);
+                    static std::atomic<int> notes{0};
+                    if (notes.fetch_add(1) < 3)
+                        std::fprintf(stderr, "Video cutscene: height %.3gx for correct proportions, screen filled (video %u wide, shader %08x)\n",
+                                     double(iss_video_zoom), widest, u32(fs->pgm_hash));
+                }
+            }
+        }
+    }
+    // Diagnostic (ISS_MOVIE_TRACE=1): the first draw of each vertex/pixel shader pair, with its
+    // viewport, so the video cutscene draw can be told apart from the rest. Off by default.
+    static const bool movie_trace = [] {
+        const char* value = std::getenv("ISS_MOVIE_TRACE");
+        return value && value[0] == '1';
+    }();
+    if (movie_trace) {
+        static std::mutex trace_lock;
+        static std::unordered_set<u64> seen;
+        static const auto start = std::chrono::steady_clock::now();
+        const auto stages = pipeline->GetStages();
+        const auto* vs = stages[u32(Shader::SwStage::Vertex)];
+        const auto* ps = stages[u32(Shader::SwStage::Fragment)];
+        const u64 key = (u64(vs ? u32(vs->pgm_hash) : 0) << 32) | (ps ? u32(ps->pgm_hash) : 0);
+        std::lock_guard guard{trace_lock};
+        // Draws that read a video-sized picture (16:9 movie frames and their colour planes): log each
+        // shader pair/size once, and save a screenshot for the first few after start-up.
+        if (ps) {
+            static std::unordered_set<u64> video_seen;
+            static int video_shots = 0;
+            for (const auto& desc : ps->images) {
+                const auto t = desc.GetSharp(*ps);
+                const u32 w = t.width + 1, h = t.height + 1;
+                const bool video_size = (w == 1920 && (h == 1080 || h == 1088)) || (w == 960 && (h == 540 || h == 544)) ||
+                                        (w == 1280 && (h == 720 || h == 736)) || (w == 640 && (h == 360 || h == 368));
+                if (!video_size) continue;
+                const u64 vkey = key ^ (u64(w) << 52) ^ (u64(h) << 40) ^ (u64(t.GetDataFmt()) << 34);
+                if (video_seen.size() < 2000 && video_seen.insert(vkey).second) {
+                    const double t_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                    const auto& v = DrawRegs().viewports[0];
+                    std::fprintf(stderr, "MOVIE_TRACE video t=%.1f vs=%08x ps=%08x image=%ux%u f%u n%u at %llx images=%zu viewport=%.0fx%.0f\n",
+                                 t_s, unsigned(key >> 32), unsigned(key), w, h, u32(t.GetDataFmt()), u32(t.GetNumberFmt()),
+                                 (unsigned long long)t.Address(), ps->images.size(), std::abs(v.xscale * 2.0f), std::abs(v.yscale * 2.0f));
+                    if (t_s > 20.0 && video_shots < 8) {
+                        ++video_shots;
+                        VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly);
+                        std::fprintf(stderr, "MOVIE_TRACE video screenshot %d requested\n", video_shots);
+                    }
+                }
+            }
+        }
+        // Also every new viewport rectangle (up to 4 shader pairs each), and every new scissor.
+        {
+            const auto& r = DrawRegs();
+            const auto& v = r.viewports[0];
+            const int w = int(std::lround(std::abs(v.xscale * 2.0f))), h = int(std::lround(std::abs(v.yscale * 2.0f)));
+            const int x = int(std::lround(v.xoffset - std::abs(v.xscale))), y = int(std::lround(v.yoffset - std::abs(v.yscale)));
+            static std::unordered_map<u64, int> rects;
+            const u64 rect = (u64(u16(x)) << 48) | (u64(u16(y)) << 32) | (u64(u16(w)) << 16) | u64(u16(h));
+            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            if (w >= 640 && rects.size() < 4000 && rects[rect]++ < 4) {
+                std::fprintf(stderr, "MOVIE_TRACE rect t=%.1f %dx%d at %d,%d vs=%08x ps=%08x scissor=%d,%d-%d,%d\n", t, w, h, x, y,
+                             unsigned(key >> 32), unsigned(key), int(r.screen_scissor.top_left_x), int(r.screen_scissor.top_left_y),
+                             int(r.screen_scissor.bottom_right_x), int(r.screen_scissor.bottom_right_y));
+            }
+            static std::unordered_set<u64> scissors;
+            const u64 sc = (u64(u16(r.generic_scissor.top_left_x)) << 48) | (u64(u16(r.generic_scissor.top_left_y)) << 32) |
+                           (u64(u16(r.generic_scissor.bottom_right_x)) << 16) | u64(u16(r.generic_scissor.bottom_right_y));
+            if (scissors.size() < 2000 && scissors.insert(sc).second && r.generic_scissor.bottom_right_x - r.generic_scissor.top_left_x >= 640) {
+                std::fprintf(stderr, "MOVIE_TRACE scissor t=%.1f %d,%d-%d,%d vs=%08x ps=%08x\n", t, int(r.generic_scissor.top_left_x),
+                             int(r.generic_scissor.top_left_y), int(r.generic_scissor.bottom_right_x),
+                             int(r.generic_scissor.bottom_right_y), unsigned(key >> 32), unsigned(key));
+            }
+        }
+        if (seen.size() < 20000 && seen.insert(key).second) {
+            const auto& vp = DrawRegs().viewports[0];
+            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            std::fprintf(stderr, "MOVIE_TRACE t=%.1f vs=%08x ps=%08x images=%zu viewport=%.0fx%.0f at %.0f,%.0f\n", t,
+                         unsigned(key >> 32), unsigned(key), ps ? ps->images.size() : size_t(0),
+                         std::abs(vp.xscale * 2.0f), std::abs(vp.yscale * 2.0f), vp.xoffset - std::abs(vp.xscale),
+                         vp.yoffset - std::abs(vp.yscale));
+        }
+    }
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::Dynamic};
     iss::diagnostics::Scope phase_scope(iss::diagnostics::DynamicState);
     auto& dynamic_state = scheduler.GetDynamicState();
@@ -6200,6 +6604,12 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = yoffset - yscale;
             viewport.width = xscale * 2.0f;
             viewport.height = yscale * 2.0f;
+            if (iss_video_zoom != 1.0f) {
+                /* Height only: the film is already stretched across the full width. */
+                const float cy = viewport.y + viewport.height * 0.5f;
+                viewport.height *= iss_video_zoom;
+                viewport.y = cy - viewport.height * 0.5f;
+            }
         }
 
         if (iss_ui_scale_x != 1.0f && !regs.IsClipDisabled()) {

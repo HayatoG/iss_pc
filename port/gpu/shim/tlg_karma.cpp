@@ -3,6 +3,7 @@
 #include "tlg_karma_backup.h"
 #include "tlg_karma_profile_names.h"
 #include "tlg_karma_recovery.h"
+#include "tlg_karma_save_title.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -16,6 +17,10 @@
 #include <vector>
 
 extern "C" const char *runtime_file_user_dir(void);
+// probe.c, once at game start: the save folder of an EU 1.07 game (US keeps CUSA00223).
+extern "C" void tlg_karma_set_save_title(const char *title){
+    if(title&&*title&&std::strlen(title)<16&&!std::strchr(title,'/')&&!std::strchr(title,'\\')&&!std::strstr(title,".."))KarmaSaveTitle::Ref()=title;
+}
 namespace {
 std::atomic<bool> backing_up{false};
 std::mutex message_lock;
@@ -24,7 +29,7 @@ std::vector<KarmaRecovery::Candidate> recovery_candidates;
 void Message(std::string text){std::lock_guard guard(message_lock);message=std::move(text);}
 void BackupProfile(const std::filesystem::path& root,const std::filesystem::path& destination){
     namespace fs=std::filesystem;
-    TlgKarmaBackup(root/"savedata"/"1"/"CUSA00223",destination/"savedata");
+    TlgKarmaBackup(root/"savedata"/"1"/KarmaSaveTitle::Get(),destination/"savedata");
     for(const auto* name:{"karma-original","karma-saves-v2","karma-profile-names","karma-profile-archive"}){
         if(!fs::exists(root/name))continue;
         bool has_file=false;for(const auto& entry:fs::recursive_directory_iterator(root/name))if(entry.is_regular_file()){has_file=true;break;}
@@ -45,7 +50,7 @@ void PrepareCapture(std::string name,bool replace){
         if(!KarmaProfileNames::Valid(name))throw std::runtime_error("Enter a name of 1-80 bytes without surrounding spaces or control characters");
         BackupProfile(root,NewBackup(root,replace?"replace-reset-point":"capture-reset-point"));
         if(!iss_karma_profile_request_capture(token.c_str(),name.c_str(),replace))throw std::runtime_error("Save changed or capture is unavailable; save and reload first");
-        Message("Backup verified. Close Insert to capture this reset point in gameplay.");
+        Message("Backup verified. Close the menu (F1) to capture this reset point in gameplay.");
     }catch(const std::exception& e){Message(std::string("Capture cancelled: ")+e.what());}backing_up=false;}).detach();
 }
 void ScanRecovery(){

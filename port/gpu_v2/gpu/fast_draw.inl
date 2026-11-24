@@ -1628,7 +1628,7 @@ bool Rasterizer::FastSwitchDraw(bool is_indexed, u32 index_offset) {
     }
     if (sc.enabled) sc.Mark(2);
     if (needs_barrier) {
-        runtime.FlushBarriers();
+        runtime.FlushHazards();
     }
     pipeline->BindResources(set_writes, push_data);
     UpdateDynamicState(pipeline, is_indexed);
@@ -2266,7 +2266,7 @@ bool Rasterizer::TryFastDraw(bool is_indexed, u32 index_offset) {
                 BindIndexBuffer(index_offset);
             }
             if (needs_barrier) {
-                runtime.FlushBarriers();
+                runtime.FlushHazards();
             }
             const auto cmdbuf = scheduler.Recorder();
             cmdbuf.pushConstants(pipeline->GetLayout(), AllGraphicsStageBits, 0u,
@@ -2387,7 +2387,7 @@ bool Rasterizer::TryFastDraw(bool is_indexed, u32 index_offset) {
         BindIndexBuffer(index_offset);
     }
     if (needs_barrier) {
-        runtime.FlushBarriers();
+        runtime.FlushHazards();
     }
     if (rebind) {
         pipeline->BindResources(set_writes, push_data);

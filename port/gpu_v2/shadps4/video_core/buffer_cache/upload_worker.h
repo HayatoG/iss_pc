@@ -5,12 +5,15 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
+#include <span>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "common/types.h"
+#include "video_core/renderer_vulkan/vk_common.h"
 
 namespace VideoCore {
 
@@ -39,7 +42,20 @@ public:
         Buffer* flush_buffer{}; ///< Staging buffer flushed once written (non coherent memory).
         u64 flush_offset{};
         u64 flush_size{};
+        /// ISS_UPLOAD_QUEUE: once the staging memory is written, the copy engine copies it into
+        /// device memory (engine_src -> engine_dst) and signals engine_tick (0: no engine copy).
+        vk::Buffer engine_src{};
+        vk::Buffer engine_dst{};
+        vk::BufferCopy engine_copy{};
+        u64 engine_tick{};
     };
+
+    /// Called with each batch once its staging memory is written, before its jobs count as
+    /// done (on the thread doing them, under exec_mutex, so in job order).
+    void SetAfterBatch(std::function<void(std::span<const Job>)>&& callback) {
+        std::scoped_lock lk{exec_mutex};
+        after_batch = std::move(callback);
+    }
 
     explicit UploadWorker(PageManager& page_manager);
     ~UploadWorker();
@@ -72,6 +88,7 @@ private:
     bool worker_sleeping{};
     std::mutex exec_mutex; ///< Held while jobs are done: they are done in order.
     std::vector<Job> batch;
+    std::function<void(std::span<const Job>)> after_batch;
     std::vector<std::pair<u64, u64>> ranges;
     std::atomic<u64> enqueued{};
     std::atomic<u64> completed{};

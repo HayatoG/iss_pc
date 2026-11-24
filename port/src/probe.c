@@ -93,6 +93,7 @@ static void protect(void *p, size_t size, unsigned flags) {
     if (mprotect(p, size, mode)) fail("mprotect failed");
 #endif
 }
+#include "controller_event_trace.h"
 static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argument) {
     if (id >= import_count) fail("bad import trap index");
     printf("STOP: first unsupported PS4 import: %s (index %u)\n", names[id], id);
@@ -190,6 +191,27 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
+    /* x64 unwind from the faulting context through code without frame pointers (the GPU driver,
+     * the C/C++ runtime), using the modules' unwind tables: shows which host call reached the
+     * fault. Code without unwind information (guest code) is treated as a leaf. */
+    {
+        CONTEXT u=*c;
+        for (int depth=0; depth<32 && u.Rip; ++depth) {
+            describe_address(where,sizeof(where),(uintptr_t)u.Rip);
+            fprintf(stderr,"  unwind #%d %s\n",depth,where);
+            DWORD64 base=0;
+            PRUNTIME_FUNCTION fn=RtlLookupFunctionEntry(u.Rip,&base,NULL);
+            if (fn) {
+                void *handler_data=NULL; DWORD64 frame=0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,u.Rip,fn,&u,&handler_data,&frame,NULL);
+            } else {
+                DWORD64 ret=0; SIZE_T got=0;
+                if (!ReadProcessMemory(GetCurrentProcess(),(void *)u.Rsp,&ret,sizeof(ret),&got) || got!=sizeof(ret)) break;
+                u.Rip=ret; u.Rsp+=8;
+            }
+        }
+        fflush(stderr);
+    }
     if (gpu_enabled) tlggpu_dump_guest_writes(info);
     /* rbp chain (guest and host code keep frame pointers). */
     uintptr_t rbp=(uintptr_t)c->Rbp;
@@ -537,6 +559,24 @@ static int sfo_value(const char *path, const char *key, char *text, size_t text_
     }
     return 0;
 }
+/* EU 1.07 (CUSA00004) runs the very same executable as US 1.07 (CUSA00223) (the launcher's camera
+ * check and the GoldHEN cheats rely on that too). iss_us_code is set before relocations, mods and
+ * CPU rewrites: 1 when the executable segments hash to the US 1.07 value. Feature setups then read
+ * an EU 1.07 title as CUSA00223 (iss_feature_title); each still checks its own code signatures.
+ * The save folder, crash report and window title keep the real title ID. */
+#define ISS_US107_CODE_FNV 0xff63c6e059cc595cull   /* US 1.07 executable segments, measured 2026-11-06 */
+static uint64_t iss_code_fnv;
+static int iss_us_code;
+static void iss_feature_title(const char *path, char *serial, size_t size) {
+    sfo_value(path, "TITLE_ID", serial, size, NULL);
+    if (!strcmp(serial, "CUSA00004") && iss_us_code) snprintf(serial, size, "%s", "CUSA00223");
+}
+/* The version label likewise: EU dumps often carry the base game's param.sfo (APP_VER 01.00)
+ * beside the 1.07 eboot. The fingerprint, not the label, says the code is 1.07. */
+static void iss_feature_version(const char *path, char *version, size_t size) {
+    sfo_value(path, "APP_VER", version, size, NULL);
+    if (iss_us_code) snprintf(version, size, "%s", "01.07");
+}
 static int mapped(Segment *segments, uint64_t count, uint64_t address, uint64_t bytes) {
     for (uint64_t i = 0; i < count; ++i)
         if (address >= segments[i].address && bytes <= segments[i].size &&
@@ -552,6 +592,7 @@ extern void tlg_cheat_status(unsigned id);
 extern uintptr_t tlg_damage_multiplier(int taken);
 extern uintptr_t tlg_orb_pickup_multiplier(unsigned kind);
 extern void tlg_stat_multipliers_status(int damage, int orb_pickup);
+extern void tlg_karma_set_save_title(const char *title);   /* gpu/shim/tlg_karma.cpp */
 
 static void install_cheats(const char *app0, Segment *segments, uint64_t count, uint64_t size) {
     char path[4096], serial[32] = "", version[32] = "";
@@ -608,8 +649,8 @@ static void install_cheats(const char *app0, Segment *segments, uint64_t count, 
 static void install_actor_watch(const char *app0, Segment *segments, uint64_t count, uint64_t size) {
     char path[4096], serial[32] = "", version[32] = "";
     snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
-    sfo_value(path, "TITLE_ID", serial, sizeof(serial), NULL);
-    sfo_value(path, "APP_VER", version, sizeof(version), NULL);
+    iss_feature_title(path,serial,sizeof(serial));
+    iss_feature_version(path,version,sizeof(version));
     const uint64_t at = TLG_ACTOR_HOOK_OFFSET;
     if (strcmp(serial, "CUSA01623") || strcmp(version, "01.02") || at > size ||
         !mapped(segments, count, at, TLG_ACTOR_HOOK_LENGTH) ||
@@ -637,8 +678,8 @@ static void install_orb_multiplier(const char *app0, Segment *segments, uint64_t
                                    uint64_t size) {
     char path[4096], serial[32] = "", version[32] = "";
     snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
-    sfo_value(path, "TITLE_ID", serial, sizeof(serial), NULL);
-    sfo_value(path, "APP_VER", version, sizeof(version), NULL);
+    iss_feature_title(path,serial,sizeof(serial));
+    iss_feature_version(path,version,sizeof(version));
     if (strcmp(serial, "CUSA01623") || strcmp(version, "01.02") ||
         !tlg_orb_signatures_match(image, size)) {
         printf("Red orbs: multiplier unavailable (game version or gain signatures mismatch)\n");
@@ -686,8 +727,8 @@ static int install_jump(uint64_t at, unsigned length, unsigned char *stub) {
 static void install_stat_multipliers(const char *app0, Segment *segments, uint64_t count, uint64_t size) {
     char path[4096], serial[32] = "", version[32] = "";
     snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
-    sfo_value(path, "TITLE_ID", serial, sizeof(serial), NULL);
-    sfo_value(path, "APP_VER", version, sizeof(version), NULL);
+    iss_feature_title(path,serial,sizeof(serial));
+    iss_feature_version(path,version,sizeof(version));
     const int game = !strcmp(serial, "CUSA01623") && !strcmp(version, "01.02");
     const uint64_t damage_at = TLG_DAMAGE_HOOK_OFFSET, pickup_at = TLG_ORB_PICKUP_OFFSET;
     int damage = game && damage_at < size && mapped(segments, count, damage_at, TLG_DAMAGE_HOOK_LENGTH) &&
@@ -783,8 +824,8 @@ static void install_iss_temporal(const char *app0, Segment *segments, uint64_t c
     if (!iss_temporal_requested()) return;
     char path[4096], serial[32] = "", version[32] = "";
     snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
-    sfo_value(path, "TITLE_ID", serial, sizeof(serial), NULL);
-    sfo_value(path, "APP_VER", version, sizeof(version), NULL);
+    iss_feature_title(path,serial,sizeof(serial));
+    iss_feature_version(path,version,sizeof(version));
     if (strcmp(serial, "CUSA00223") || strcmp(version, "01.07")) {
         printf("Temporal upscaling: unavailable (title '%s', version '%s'; needs CUSA00223 01.07)\n", serial, version);
         return;
@@ -822,13 +863,14 @@ int iss_temporal_get_frame(uint32_t seq, IssTemporalFrame *out) { return iss_tem
 #include "iss_native_live.h"
 #include "iss_native_aspect.h"
 #include "iss_hud_trace.h"
+#include "iss_energy_watch.h"
 #include "iss_hud_corners.h"
 static void install_iss_hud_corners(const char *app0,Segment *segments,uint64_t count,uint64_t size){
     const char *enable=getenv("ISS_EXPERIMENTAL_HUD_CORNERS");
     if(!enable || strcmp(enable,"1"))return;
     char path[4096],serial[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
-    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    iss_feature_title(path,serial,sizeof(serial));iss_feature_version(path,version,sizeof(version));
     int executable=0;
     for(uint64_t i=0;i<count;i++)if((segments[i].flags&1) && ISS_HUD_TRACE_SITE>=segments[i].address &&
         ISS_HUD_CORNER_SITE+sizeof(iss_hud_corner_tail)<=segments[i].address+segments[i].size)executable=1;
@@ -857,7 +899,7 @@ static void install_iss_hud_trace(const char *app0,Segment *segments,uint64_t co
     if(!trigger || !*trigger)return;
     char path[4096],serial[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
-    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    iss_feature_title(path,serial,sizeof(serial));iss_feature_version(path,version,sizeof(version));
     int executable=0;
     for(uint64_t i=0;i<count;i++)if((segments[i].flags&1) && ISS_HUD_TRACE_SITE>=segments[i].address &&
         ISS_HUD_TRACE_SITE+0x4b4u<=segments[i].address+segments[i].size)executable=1;
@@ -880,7 +922,7 @@ static void install_iss_native_live_trace(const char *app0,Segment *segments,uin
     if(!trace_requested&&!iss_native_live_option(live_resize))return;
     char path[4096],title[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0?app0:".");
-    sfo_value(path,"TITLE_ID",title,sizeof(title),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    iss_feature_title(path,title,sizeof(title));iss_feature_version(path,version,sizeof(version));
     const uint32_t sites[]={ISS_NATIVE_FRAME_SITE,ISS_NATIVE_TARGET_SITE,ISS_NATIVE_SAFE_SITE,ISS_NATIVE_DIM_SITE};
     const unsigned lengths[]={ISS_NATIVE_FRAME_STOLEN,ISS_NATIVE_TARGET_STOLEN,ISS_NATIVE_SAFE_STOLEN,ISS_NATIVE_DIM_STOLEN};
     int valid=iss_native_live_signature(image,size,title,version);
@@ -900,7 +942,10 @@ static void install_iss_native_live_trace(const char *app0,Segment *segments,uin
     runtime_native_live_attach((uintptr_t)image);
     if(native_live_cells&&runtime_native_status()==1){
         IssNativePlan startup=*runtime_native_plan();
-        if(startup.ui_16_9==1&&iss_native_live_projection_redirect(image,size,&startup,(uintptr_t)native_live_cells)){
+        /* Wide UI canvas (ui_16_9=0, 2026-11-07): the two camera LEAs still hold their original
+         * displacement (the UI canvas size, same shape as the output); redirecting them to the live
+         * cells (render size, same shape at startup) changes nothing now and lets later changes apply live. */
+        if((startup.ui_16_9==1||startup.ui_16_9==0)&&iss_native_live_projection_redirect(image,size,&startup,(uintptr_t)native_live_cells)){
             runtime_native_live_enable((uint32_t*)native_live_cells,&startup);
             printf("Native live resize: guarded mutable projection cells; allocation ceiling %ux%u / %u lighting entries\n",startup.width,startup.height,startup.light_entries);
         }else puts("Native live resize: projection/UI check failed; startup dimensions retained");
@@ -949,7 +994,7 @@ static void install_iss_native_resolution(const char *app0,Segment *segments,uin
     }
     char path[4096],serial[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
-    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    iss_feature_title(path,serial,sizeof(serial));iss_feature_version(path,version,sizeof(version));
     const int grow_exposure=iss_native_exposure_entries(plan.width,plan.height)>ISS_EXPOSURE_ORIGINAL_ENTRIES;
     for(unsigned s=0;s<ISS_NATIVE_SITE_COUNT+2+(grow_exposure?ISS_EXPOSURE_SITE_COUNT:0);s++) {
         uint32_t at=s<ISS_NATIVE_SITE_COUNT ? iss_native_sites[s].offset : s==ISS_NATIVE_SITE_COUNT ? 0x58030c : 0x5802e6;
@@ -983,7 +1028,18 @@ static void install_iss_native_resolution(const char *app0,Segment *segments,uin
 static void install_iss_karma(const char *app0,Segment *segments,uint64_t count,uint64_t size,int before_rewrites){
     char path[4096],serial[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
-    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);iss_feature_version(path,version,sizeof(version));
+    if(!strcmp(serial,"CUSA00004") && iss_us_code){
+        /* EU 1.07 runs the US code: the switcher's game functions are the same. Its backups,
+         * recovery and state folders follow this game's own save folder (the same rule as the
+         * runtime's savedata: INSTALL_DIR_SAVEDATA, else TITLE_ID). */
+        char saves[32]="";
+        if(!sfo_value(path,"INSTALL_DIR_SAVEDATA",saves,sizeof(saves),NULL) || !saves[0])snprintf(saves,sizeof(saves),"%s",serial);
+        tlg_karma_set_save_title(saves);
+        printf("Karma switcher: EU 1.07 (US code); saves, backups and recovery use savedata/1/%s\n",saves);
+        snprintf(serial,sizeof(serial),"%s","CUSA00223");
+        snprintf(version,sizeof(version),"%s","01.07");
+    }
     if(strcmp(serial,"CUSA00223")){
         runtime_karma_compatibility_failure(1);printf("Karma switcher: unavailable: TITLE_ID='%s', expected CUSA00223\n",serial);return;
     }
@@ -1035,8 +1091,8 @@ static void install_iss_camera_speed(const char *app0, Segment *segments, uint64
     if (pan == 1.0f && tilt == 1.0f) return;
     char path[4096], serial[32] = "", version[32] = "";
     snprintf(path, sizeof(path), "%s/sce_sys/param.sfo", app0 ? app0 : ".");
-    sfo_value(path, "TITLE_ID", serial, sizeof(serial), NULL);
-    sfo_value(path, "APP_VER", version, sizeof(version), NULL);
+    iss_feature_title(path,serial,sizeof(serial));
+    iss_feature_version(path,version,sizeof(version));
     int executable = 0;
     for (uint64_t i=0; i<count; ++i)
         if ((segments[i].flags & 1) && segments[i].address <= ISS_CAMERA_SITE &&
@@ -1058,7 +1114,7 @@ static void install_iss_trophies(const char *app0,Segment *segments,uint64_t cou
     const char *opt=getenv("ISS_TROPHIES_PER_SAVE");if(!opt||strcmp(opt,"1"))return;
     char path[4096],title[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0?app0:".");
-    sfo_value(path,"TITLE_ID",title,sizeof(title),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    iss_feature_title(path,title,sizeof(title));iss_feature_version(path,version,sizeof(version));
     int executable=0;
     for(uint64_t i=0;i<count;i++)if((segments[i].flags&1)&&segments[i].address<=ISS_TROPHY_QUERY_SITE&&
         ISS_TROPHY_QUERY_SITE+sizeof(iss_trophy_query_signature)<=segments[i].address+segments[i].size)executable=1;
@@ -1084,7 +1140,7 @@ static void install_iss_mouse_aim(const char *app0,Segment *segments,uint64_t co
      * inherited ISS_DIRECT_MOUSE_AIM=0 must not select stick emulation. */
     char path[4096],serial[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
-    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    iss_feature_title(path,serial,sizeof(serial));iss_feature_version(path,version,sizeof(version));
     int executable=0,writable=0;
     for(uint64_t i=0;i<count;i++){
         if((segments[i].flags&1) && segments[i].address<=0x14936eu &&
@@ -1119,8 +1175,8 @@ static void install_iss_pitch_safeguard(const char *app0, Segment *segments, uin
     if (!enabled || strcmp(enabled,"1")) return;
     char path[4096],serial[32]="",version[32]="";
     snprintf(path,sizeof(path),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
-    sfo_value(path,"TITLE_ID",serial,sizeof(serial),NULL);
-    sfo_value(path,"APP_VER",version,sizeof(version),NULL);
+    iss_feature_title(path,serial,sizeof(serial));
+    iss_feature_version(path,version,sizeof(version));
     int executable=0;
     for (uint64_t i=0;i<count;++i)
         if ((segments[i].flags&1) && segments[i].address<=ISS_PITCH_SITE &&
@@ -1644,6 +1700,16 @@ int main(int argc, char **argv) {
         trace_counts = calloc(import_count + 1, sizeof(*trace_counts));
         if (!trace_made || !trace_counts) fail("allocation failed");
     }
+    {   /* Game code fingerprint (FNV-1a of the executable segments, untouched: before relocations,
+         * mods and CPU rewrites). Lets EU 1.07 use the US 1.07 features (iss_feature_title). */
+        uint64_t h = 1469598103934665603ull;
+        for (uint64_t s = 0; s < ns; ++s)
+            if (segments[s].flags & 1)
+                for (uint64_t k = 0; k < segments[s].size; ++k) { h ^= image[segments[s].address + k]; h *= 1099511628211ull; }
+        iss_code_fnv = h;
+        iss_us_code = ISS_US107_CODE_FNV && h == ISS_US107_CODE_FNV;
+        printf("Game code fingerprint: %016llx%s\n", (unsigned long long)h, iss_us_code ? " (US 1.07 executable)" : "");
+    }
     for (uint64_t i = 0; i < nr; ++i) {
         uintptr_t value = relocs[i].kind == 2 ? (uintptr_t)(data_traps + page_size * relocs[i].value + relocs[i].addend)
                         : relocs[i].kind == 1 ? (uintptr_t)(traps + 32 * relocs[i].value)
@@ -1724,6 +1790,7 @@ int main(int argc, char **argv) {
     if (gpu_enabled) install_iss_mouse_aim(app0, segments, ns, size);
     if (gpu_enabled) install_iss_trophies(app0, segments, ns, size);
     if (gpu_enabled) install_iss_karma(app0, segments, ns, size, karma_before_runtime_rewrites);
+    install_controller_event_trace(size);
     protect(traps, round_page((import_count + 1) * 32), 5);
     if (trace_stubs) protect(trace_stubs, round_page((import_count + 1) * TRACE_STUB_SIZE), 5);
     protect(image, round_page(size), 0);
@@ -1765,6 +1832,7 @@ int main(int argc, char **argv) {
         runtime_freeze_start((uintptr_t)image, round_page(size) + stub_area + red_zone_area, gpu_enabled ? seconds : 0);
     }
     tlggpu_set_guest_image((uintptr_t)image, round_page(size));
+    iss_energy_watch_start(image);
     boot_step("entering the game");
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
 #ifdef _WIN32
