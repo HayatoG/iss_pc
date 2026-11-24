@@ -478,7 +478,11 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
     std::fprintf(stderr,"PORT_TUNING async_uploads=%d async_pipelines=0\n",upload_worker);
     // 3: also GPU time per render pass (Scheduler::ProfilePassBegin), by target size.
     // 4: also GPU time per (render pass, fragment shader) and the GPU time outside timed work.
-    if(const char *p=std::getenv("ISS_GPU_PROFILE");p&&(p[0]=='1'||p[0]=='2'||p[0]=='3'||p[0]=='4'))Common::Perf::GetTuning().gpu_profile=p[0]-'0';
+    // 2026-11-24: 1 by default (two GPU timestamps per submission, no log of its own): the GPU busy
+    // time behind GPU_FRAME_MS, which the launcher's "Your last session" reads. ISS_GPU_PROFILE=0 off.
+    {const char *p=std::getenv("ISS_GPU_PROFILE");
+     Common::Perf::GetTuning().gpu_profile=p&&p[0]>='0'&&p[0]<='4'?u32(p[0]-'0'):1u;
+     std::fprintf(stderr,"PORT_TUNING gpu_profile=%u\n",Common::Perf::GetTuning().gpu_profile.load());}
     {const char *p=std::getenv("ISS_COMPUTE_PHASES");iss::phase::g_enabled=p&&p[0]=='1';
      std::fprintf(stderr,"PORT_TUNING compute_phases=%d\n",iss::phase::Enabled()?1:0);}
     // ISS_TIMER_1MS=1 (off by default, the user's choice): 1 ms timer resolution for this

@@ -2402,5 +2402,93 @@
   "occlusion_hint": {
     "en": "How the game decides how much of a light is visible, which sets how strong the glare around headlights, street lamps and neon is. 4 (recommended) counts it on the GPU like the PS4, so the glow stays hidden behind characters and walls; 0 to 3 are older test modes. Applies on the next start.",
     "pt": "Como o jogo decide quanto de uma luz está visível, o que define a força do brilho em volta de faróis, postes e neon. 4 (recomendado) conta na GPU como no PS4, e o brilho fica escondido atrás de personagens e paredes; 0 a 3 são modos de teste antigos. Vale na próxima abertura."
+  },
+  "gfx_perf_title": {
+    "en": "Your last session",
+    "pt": "Sua última sessão"
+  },
+  "gfx_perf_short": {
+    "en": "Play for a few minutes and this shows what held your frame rate back: your graphics card, your processor or a limit.",
+    "pt": "Jogue por alguns minutos e aqui aparece o que segurou o seu FPS: a placa de vídeo, o processador ou um limite."
+  },
+  "gfx_perf_limit": {
+    "en": "About {fps} FPS, held by your frame rate limit ({limit}). Your PC had room to spare: you can raise detail or the limit on the Play tab.",
+    "pt": "Cerca de {fps} FPS, segurado pelo seu limite de FPS ({limit}). Seu PC teve folga: dá para subir os detalhes ou o limite na aba Jogar."
+  },
+  "gfx_perf_ceiling": {
+    "en": "About {fps} FPS, the game's own maximum ({limit}). Your PC had room to spare: you can raise detail.",
+    "pt": "Cerca de {fps} FPS, o máximo do próprio jogo ({limit}). Seu PC teve folga: dá para subir os detalhes."
+  },
+  "gfx_perf_gpu": {
+    "en": "About {fps} FPS, probably held back by your graphics card. A lower Internal resolution or LOD distance, or a higher Minimum dynamic quality level, gives more frames.",
+    "pt": "Cerca de {fps} FPS, provavelmente segurado pela sua placa de vídeo. Resolução interna ou Distância do LOD menores, ou um Nível mínimo da qualidade dinâmica maior, dão mais quadros."
+  },
+  "gfx_perf_cpu": {
+    "en": "About {fps} FPS, probably held back by your processor (the game's own work), not your graphics card. Lowering resolution won't help much; a lower LOD distance or a higher Minimum dynamic quality level means fewer objects to prepare, and a frame rate limit just under it keeps motion steadier.",
+    "pt": "Cerca de {fps} FPS, provavelmente segurado pelo seu processador (o trabalho do próprio jogo), não pela placa de vídeo. Baixar a resolução quase não ajuda; uma Distância do LOD menor ou um Nível mínimo da qualidade dinâmica maior deixam menos objetos para preparar, e um limite de FPS um pouco abaixo disso deixa o movimento mais estável."
+  },
+  "gfx_perf_source": {
+    "en": "From the game's log of your last session; nothing is sent anywhere.",
+    "pt": "Do log do jogo da sua última sessão; nada é enviado para lugar nenhum."
+  },
+  "gfx_perf_gpu_sure": {
+    "en": "About {fps} FPS, held back by your graphics card: it was busy {busy}% of the time. A lower Internal resolution or LOD distance, or a higher Minimum dynamic quality level, gives more frames.",
+    "pt": "Cerca de {fps} FPS, segurado pela sua placa de vídeo: ela ficou ocupada {busy}% do tempo. Resolução interna ou Distância do LOD menores, ou um Nível mínimo da qualidade dinâmica maior, dão mais quadros."
+  },
+  "gfx_perf_cpu_sure": {
+    "en": "About {fps} FPS, held back by your processor (the game's own work): your graphics card was busy only {busy}% of the time. Lowering resolution won't help much; a lower LOD distance or a higher Minimum dynamic quality level means fewer objects to prepare, and a frame rate limit just under it keeps motion steadier.",
+    "pt": "Cerca de {fps} FPS, segurado pelo seu processador (o trabalho do próprio jogo): a placa de vídeo ficou ocupada só {busy}% do tempo. Baixar a resolução quase não ajuda; uma Distância do LOD menor ou um Nível mínimo da qualidade dinâmica maior deixam menos objetos para preparar, e um limite de FPS um pouco abaixo disso deixa o movimento mais estável."
+  },
+  "gfx_perf_apply": {
+    "en": "Apply to my personal preset",
+    "pt": "Aplicar no meu preset pessoal"
+  },
+  "gfx_perf_apply_what": {
+    "en": "Starts from what is set now, makes the changes above and saves it all as Renderer V2 - Custom Personal Graphics. Your other presets stay as they are.",
+    "pt": "Parte do que está configurado agora, faz as mudanças acima e salva tudo em Renderer V2 - Gráficos Pessoais. Os outros presets continuam como estão."
+  },
+  "gfx_perf_applied": {
+    "en": "Saved to Renderer V2 - Custom Personal Graphics, starting from {base}: {changes}. Play a few minutes and this card shows how it went.",
+    "pt": "Salvo em Renderer V2 - Gráficos Pessoais, a partir de {base}: {changes}. Jogue alguns minutos e este cartão mostra como ficou."
+  },
+  "gfx_perf_change": {
+    "en": "{name} {old} → {new}",
+    "pt": "{name} {old} → {new}"
+  },
+  "gfx_perf_unlimited": {
+    "en": "unlimited",
+    "pt": "sem limite"
+  },
+  "gfx_perf_your_setup": {
+    "en": "your current setup",
+    "pt": "a sua configuração atual"
+  },
+  "gfx_perf_plan": {
+    "en": "Suggested: {changes}.",
+    "pt": "Sugestão: {changes}."
+  },
+  "gfx_perf_note_vram": {
+    "en": "Video memory was nearly full ({used} of {budget} GB): a lower LOD distance keeps textures from being swapped out.",
+    "pt": "A memória de vídeo ficou quase cheia ({used} de {budget} GB): uma Distância do LOD menor evita que as texturas sejam trocadas."
+  },
+  "gfx_perf_note_hitches": {
+    "en": "Short freezes: about {n} frames over 50 ms per minute (slowest 1%: {p99} ms). These usually come from shaders being prepared or the city streaming in, more than from your settings.",
+    "pt": "Travadinhas: cerca de {n} quadros acima de 50 ms por minuto (1% mais lentos: {p99} ms). Elas costumam vir da preparação de shaders ou do carregamento da cidade, mais do que das suas configurações."
+  },
+  "gfx_perf_note_hitches_vram": {
+    "en": "Short freezes: about {n} frames over 50 ms per minute (slowest 1%: {p99} ms), likely from the nearly full video memory.",
+    "pt": "Travadinhas: cerca de {n} quadros acima de 50 ms por minuto (1% mais lentos: {p99} ms), provavelmente pela memória de vídeo quase cheia."
+  },
+  "gfx_perf_note_mixed": {
+    "en": "You changed settings during this session, so these numbers mix both setups.",
+    "pt": "Você mudou configurações durante esta sessão, então estes números misturam as duas."
+  },
+  "gfx_perf_compare": {
+    "en": "Since your last Apply (from {base}): {before} → {after} FPS.",
+    "pt": "Desde o seu último Aplicar (a partir de {base}): {before} → {after} FPS."
+  },
+  "gfx_perf_compare_p99": {
+    "en": "Slowest 1% of frames: {before} → {after} ms.",
+    "pt": "1% mais lentos: {before} → {after} ms."
   }
 }

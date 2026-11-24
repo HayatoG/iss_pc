@@ -23,9 +23,12 @@
 #include <windows.h>
 #include <vulkan/vulkan_win32.h>
 #endif
+#include <array>
+#include <atomic>
 
 namespace Vulkan {
 extern bool g_iss_full_screen_exclusive;
+extern std::atomic<u64> g_iss_gpu_busy_ns; // vk_scheduler.cpp: GPU busy time since the last report
 
 // Adapted from axylpup/shadPS4 second-son-v1.1, 5e96c249 + f6f32614:
 // mark the drain point under queue-submit serialization, wait OUTSIDE that
@@ -311,6 +314,14 @@ bool Swapchain::AcquireNextImage() {
         s.over1 += waited > 1'000'000;
         s.over5 += waited > 5'000'000;
         s.over10 += waited > 10'000'000;
+        // Time between shown frames in 1 ms steps (the last step: 200 ms or more), for the slowest
+        // frames of the window (2026-11-24, launcher "Your last session"): one counter per frame.
+        static std::array<u32, 201> pace{};
+        static u64 last_shown = 0;
+        if (last_shown && start > last_shown) {
+            ++pace[std::min<u64>((start - last_shown) / 1'000'000, pace.size() - 1)];
+        }
+        last_shown = start;
         if (fenced - s.window_start >= 15'000'000'000ull) {
             std::fprintf(stdout,
                          "PRESENT_ACQUIRE fence=%d count=%llu call_ms=%.3f fence_avg_ms=%.3f "
@@ -320,6 +331,41 @@ bool Swapchain::AcquireNextImage() {
                          double(s.fence_ns) / 1e6 / double(s.count), double(s.fence_max) / 1e6,
                          (unsigned long long)s.over1, (unsigned long long)s.over5,
                          (unsigned long long)s.over10);
+            // The graphics card's own time per shown frame in the same window (GPU timestamps,
+            // gpu_profile >= 1): the launcher compares it with the frame time to tell whether the
+            // card or the processor held the frame rate back (2026-11-24).
+            if (const u64 busy = g_iss_gpu_busy_ns.exchange(0, std::memory_order_relaxed)) {
+                const double window_ns = double(fenced - s.window_start);
+                std::fprintf(stdout, "GPU_FRAME_MS avg=%.2f busy_pct=%.1f frames=%llu\n",
+                             double(busy) / 1e6 / double(s.count),
+                             window_ns > 0 ? 100.0 * double(busy) / window_ns : 0.0,
+                             (unsigned long long)s.count);
+            }
+            {   // The slowest 1% of frame times, and the frames over 33 / 50 ms (hitches).
+                u64 total = 0, over33 = 0, over50 = 0;
+                for (size_t ms = 0; ms < pace.size(); ++ms) {
+                    total += pace[ms];
+                    over33 += ms >= 33 ? pace[ms] : 0;
+                    over50 += ms >= 50 ? pace[ms] : 0;
+                }
+                u64 p99 = 0;
+                for (size_t ms = pace.size(), seen = 0; total && ms-- > 0;) {
+                    seen += pace[ms];
+                    if (seen * 100 >= total) { p99 = ms + 1; break; }
+                }
+                std::fprintf(stdout, "FRAME_PACE p99_ms=%llu over33=%llu over50=%llu frames=%llu\n",
+                             (unsigned long long)p99, (unsigned long long)over33,
+                             (unsigned long long)over50, (unsigned long long)total);
+                pace.fill(0);
+                // The options in force in this window (they change live from the F1 menu).
+                const auto& t = TlgSettings::Get();
+                std::fprintf(stdout, "SESSION_SETTINGS lod_scale=%.2f quality_floor=%d fps_limit=%d "
+                             "render_resolution=%d\n",
+                             double(t.lod_scale.load(std::memory_order_relaxed)),
+                             t.quality_floor.load(std::memory_order_relaxed),
+                             t.fps_limit.load(std::memory_order_relaxed),
+                             t.render_resolution.load(std::memory_order_relaxed));
+            }
             std::fflush(stdout);
             s = AcquireStats{};
             s.window_start = fenced;

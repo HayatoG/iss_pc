@@ -257,6 +257,11 @@ void ReportDeviceLost(const Instance& instance, const char* where) {
 
 #include "gpu_blackbox.inl"
 
+/// GPU busy time of the command processor's submissions (gpu_profile >= 1, overlaps counted once),
+/// read and reset by the 15 s PRESENT_ACQUIRE report (vk_swapchain.cpp: GPU_FRAME_MS), which the
+/// launcher's "Your last session" reads (2026-11-24).
+std::atomic<u64> g_iss_gpu_busy_ns{0};
+
 /// gpu_profile (perf_tuning.ini): GPU timestamps around the submissions of the command processor
 /// and its compute dispatches, read once the GPU has finished them. Command processor thread.
 struct Scheduler::GpuProfile {
@@ -1552,6 +1557,7 @@ void Scheduler::CollectProfile() {
                 const u64 busy_start = std::max(start, prof.last_end);
                 if (end > busy_start) {
                     Common::Perf::Add(Common::Perf::GpuProfileBusyNs, to_ns(end - busy_start));
+                    g_iss_gpu_busy_ns.fetch_add(to_ns(end - busy_start), std::memory_order_relaxed);
                 }
                 prof.last_end = std::max(prof.last_end, end);
                 const u64 ns = to_ns(end - start);
