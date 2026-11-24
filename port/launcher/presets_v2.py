@@ -62,4 +62,6 @@ V2_12GB = _by_vram(12, 8500)
 
 # The sized ones first: a preset without a VRAM budget (V2_NATIVE) matches any budget, so the sized
 # one with the player's budget is the one shown as current.
-V2_PRESETS = (V2_8GB, V2_12GB, V2_ON, V2_NATIVE)
+# 2026-11-23: the 8 GB one is replaced by the personal preset (qt/gfxlogic.py, PERSONAL_ID); the other three
+# only show under "Experimental presets" (GraphicsPage.qml experimentalPresets).
+V2_PRESETS = (V2_12GB, V2_ON, V2_NATIVE)

@@ -12,6 +12,10 @@ Item {
         width: 24; height: 24
         scale: root.size / 24
         transformOrigin: Item.TopLeft
+        // smooth edges (2026-11-22): the curve renderer antialiases lines and curves; the default one
+        // drew them with stair-stepped edges
+        preferredRendererType: Shape.CurveRenderer
+        antialiasing: true
         ShapePath {
             strokeColor: root.color
             strokeWidth: 2

@@ -10,6 +10,8 @@ import urllib.error
 import urllib.request
 
 API_URL = 'https://api.github.com/repos/HayatoG/iss_pc/releases/latest'
+# The newest releases (pre-releases included), newest first: the latest beta is the first pre-release.
+LIST_URL = 'https://api.github.com/repos/HayatoG/iss_pc/releases?per_page=15'
 RELEASES_URL = 'https://github.com/HayatoG/iss_pc/releases/latest'
 RELEASE_PREFIX = 'https://github.com/HayatoG/iss_pc/releases/'
 TIMEOUT = 10
@@ -98,7 +100,8 @@ def update_available(current, latest):
 
 
 # ----------------------------------------------------------------------------------------- notes
-_SECTION_TITLES = {'pt': ('novidades',), 'en': ("what's new", 'whats new', 'what’s new')}
+_SECTION_TITLES = {'pt': ('novidades', 'novidades desta versão', 'novidades desta versao'),
+                   'en': ("what's new", 'whats new', 'what’s new', 'new in this release')}
 
 
 def extract_notes(body, portuguese):
@@ -112,13 +115,16 @@ def extract_notes(body, portuguese):
     if blocks:
         return _clean('\n'.join(blocks))
     wanted = _SECTION_TITLES['pt' if portuguese else 'en']
-    lines, on, found = [], False, False
+    lines, on, found, level = [], False, False, 0
     for line in body.split('\n'):
-        heading = re.match(r'^#{1,3}\s*(.+?)\s*#*$', line)
+        heading = re.match(r'^(#{1,4})\s*(.+?)\s*#*$', line)
         if heading:
-            title = heading.group(1).strip().lower()
-            if title in wanted:
-                on, found = True, True
+            depth, title = len(heading.group(1)), heading.group(2).strip()
+            if not on and title.lower() in wanted:
+                on, found, level = True, True, depth
+                continue
+            if on and depth > level:   # a part of the section ("### Controllers"): kept as its title
+                lines.extend(['', title.upper()])
                 continue
             if on:
                 break
@@ -127,7 +133,7 @@ def extract_notes(body, portuguese):
             lines.append(line)
     if found:
         return _clean('\n'.join(lines))
-    if re.search(r'^#{1,3}\s*(novidades|what.s new)\s*$', body, re.M | re.I):
+    if re.search(r'^#{1,3}\s*(novidades|what.s new|new in this release|novidades desta vers.o)\s*$', body, re.M | re.I):
         return ''
     return _clean(re.sub(r'<!--.*?-->', '', body, flags=re.S))
 
@@ -187,6 +193,12 @@ def fetch_latest(version='', opener=urllib.request.urlopen, url=API_URL, timeout
         tag = str(data['tag_name'])
     except (ValueError, KeyError, TypeError, UnicodeDecodeError) as error:
         raise UpdateError('bad') from error
+    return _release(data, answer_etag)
+
+
+def _release(data, answer_etag=''):
+    """The launcher's dict of one release of the API."""
+    tag = str(data['tag_name'])
     page = str(data.get('html_url') or '')
     assets = []
     for asset in data.get('assets') or []:
@@ -198,4 +210,47 @@ def fetch_latest(version='', opener=urllib.request.urlopen, url=API_URL, timeout
                            'digest': str(asset.get('digest') or '')})
     return {'tag': tag, 'name': str(data.get('name') or tag), 'body': str(data.get('body') or ''),
             'url': page if page.startswith(RELEASE_PREFIX) else RELEASES_URL,    # only our own releases page opens
-            'published': str(data.get('published_at') or '')[:10], 'assets': assets, 'etag': answer_etag}
+            'published': str(data.get('published_at') or '')[:10], 'assets': assets, 'etag': answer_etag,
+            'prerelease': bool(data.get('prerelease'))}
+
+
+def fetch_prerelease(version='', opener=urllib.request.urlopen, url=LIST_URL, timeout=TIMEOUT, etag=''):
+    """The latest beta: the newest published pre-release among the newest releases (one GET of the
+    list; drafts are not in it for the public). Same dict as fetch_latest, None for a 304 (unchanged).
+    UpdateError('none') when there is no pre-release."""
+    headers = {'User-Agent': user_agent(version), 'Accept': 'application/vnd.github+json'}
+    if etag:
+        headers['If-None-Match'] = etag
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with opener(request, timeout=timeout) as response:
+            raw = response.read(4 * 1024 * 1024)
+            answer_etag = str((getattr(response, 'headers', None) or {}).get('ETag') or '')
+    except urllib.error.HTTPError as error:
+        if error.code == 304 and etag:
+            return None
+        if error.code == 404:
+            raise UpdateError('none') from error
+        if error.code in (403, 429):
+            reset = limit_reset(error.code, error.headers)
+            if reset is not None:
+                raise UpdateError('limit', str(error.code), reset=reset or None) from error
+        raise UpdateError('http', str(error.code)) from error
+    except (socket.timeout, TimeoutError) as error:
+        raise UpdateError('timeout') from error
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, (socket.timeout, TimeoutError)):
+            raise UpdateError('timeout') from error
+        raise UpdateError('offline', str(error.reason)) from error
+    except OSError as error:
+        raise UpdateError('offline', str(error)) from error
+    try:
+        rows = json.loads(raw.decode('utf-8'))
+        if not isinstance(rows, list):
+            raise TypeError('not a list')
+        for data in rows:
+            if isinstance(data, dict) and data.get('prerelease') and not data.get('draft') and data.get('tag_name'):
+                return _release(data, answer_etag)
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as error:
+        raise UpdateError('bad') from error
+    raise UpdateError('none')

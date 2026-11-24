@@ -1,0 +1,78 @@
+{
+ "_comment": "Controller guides UI (2026-11-23): the player's photos in qt/assets/controller_guides/photos and, per controller, where the buttons are on that photo (pixels of the cropped photo): controls {x, y, r}; callouts {text, x, y, to: [x, y]} for triggers that the front view hides. items: which controls each numbered line lights up. Texts: en/pt.",
+ "colors": ["#ff7130", "#ff40a5", "#1ad8fa", "#5295ff", "#ffd300", "#31d382", "#be78ff"],
+ "common": {
+  "kicker": {"en": "inFAMOUS SECOND SON · PC", "pt": "inFAMOUS SECOND SON · PC"},
+  "title": {"en": "Motion sensor & touchpad", "pt": "Modo sensor e touchpad"},
+  "subtitle": {"en": "Graffiti, absorbing powers, doors and the scanner", "pt": "Grafite, absorver poderes, portas e scanner"},
+  "footer": {"en": "Your controller has no gyro or touchpad: the port simulates both.", "pt": "Seu controle não tem giroscópio nem touchpad: o port simula os dois."},
+  "titles": [
+   {"en": "Turn sensor mode on/off", "pt": "Ligar/desligar o modo sensor"},
+   {"en": "Shake the spray can", "pt": "Sacudir a lata de spray"},
+   {"en": "Spray the graffiti", "pt": "Pintar o grafite"},
+   {"en": "Aim the can", "pt": "Mirar a lata"},
+   {"en": "Click the touchpad", "pt": "Clicar o touchpad"},
+   {"en": "Swipe on the touchpad", "pt": "Deslizar no touchpad"},
+   {"en": "Both ends of the touchpad", "pt": "Duas pontas do touchpad"}
+  ]
+ },
+ "kinds": {
+  "xbox": {
+   "photo": "photos/xbox.png", "size": [689, 487], "name": "Xbox / Xbox Series",
+   "controls": {
+    "ls": {"x": 175, "y": 145, "r": 44}, "rs": {"x": 435, "y": 248, "r": 44},
+    "share": {"x": 347, "y": 178, "r": 19}, "a": {"x": 521, "y": 189, "r": 24},
+    "view": {"x": 299, "y": 142, "r": 19}, "rb": {"x": 512, "y": 29, "r": 34}
+   },
+   "callouts": {"rt": {"text": "RT", "x": 600, "y": -40, "to": [528, 18]}},
+   "items": [["ls", "rs", "share"], ["a"], ["rt"], ["ls"], ["view"], ["view", "rs"], ["view", "rb"]],
+   "details": [
+    {"en": "Click L3 + R3 (both sticks) or the Share button (Xbox Series)", "pt": "Clique L3 + R3 (os dois analógicos) ou o botão Compartilhar (Xbox Series)"},
+    {"en": "A button (the bottom one)", "pt": "Botão A (o de baixo)"},
+    {"en": "Right trigger (RT)", "pt": "Gatilho direito (RT)"},
+    {"en": "Left stick", "pt": "Analógico esquerdo"},
+    {"en": "View button (the two squares). Hold = hold the touchpad (absorb a power)", "pt": "Botão View (os dois quadrados). Segurar = segurar o touchpad (absorver poder)"},
+    {"en": "Hold the View button and move the right stick in the asked direction ('Open Door')", "pt": "Segure o botão View e mova o analógico direito na direção pedida (porta 'Open Door')"},
+    {"en": "Hold the View button and press RB (lift the car off Reggie)", "pt": "Segure o botão View e aperte RB (levantar o carro de cima do Reggie)"}
+   ]
+  },
+  "switch": {
+   "photo": "photos/switch.png", "size": [1177, 825], "name": "Nintendo Switch Pro",
+   "controls": {
+    "ls": {"x": 249, "y": 252, "r": 100}, "rs": {"x": 737, "y": 411, "r": 100},
+    "capture": {"x": 505, "y": 252, "r": 38}, "b": {"x": 895, "y": 335, "r": 50},
+    "minus": {"x": 447, "y": 169, "r": 40}, "r": {"x": 929, "y": 45, "r": 70}
+   },
+   "callouts": {"zr": {"text": "ZR", "x": 1080, "y": -70, "to": [940, 30]}},
+   "items": [["ls", "rs", "capture"], ["b"], ["zr"], ["ls"], ["minus"], ["minus", "rs"], ["minus", "r"]],
+   "details": [
+    {"en": "Click L3 + R3 (both sticks) or the Capture button", "pt": "Clique L3 + R3 (os dois analógicos) ou o botão Captura"},
+    {"en": "Bottom button (B on the Switch)", "pt": "Botão de baixo (B no Switch)"},
+    {"en": "Right trigger (ZR)", "pt": "Gatilho direito (ZR)"},
+    {"en": "Left stick", "pt": "Analógico esquerdo"},
+    {"en": "− (minus) button. Hold = hold the touchpad (absorb a power)", "pt": "Botão − (menos). Segurar = segurar o touchpad (absorver poder)"},
+    {"en": "Hold the − button and move the right stick in the asked direction ('Open Door')", "pt": "Segure o botão − e mova o analógico direito na direção pedida (porta 'Open Door')"},
+    {"en": "Hold the − button and press R (lift the car off Reggie)", "pt": "Segure o botão − e aperte R (levantar o carro de cima do Reggie)"}
+   ]
+  },
+  "8bitdo": {
+   "photo": "photos/8bitdo.png", "size": [491, 342], "name": "8BitDo",
+   "controls": {
+    "ls": {"x": 106, "y": 80, "r": 43}, "rs": {"x": 312, "y": 157, "r": 43},
+    "a": {"x": 385, "y": 117, "r": 20}, "select": {"x": 182, "y": 42, "r": 15},
+    "r1": {"x": 410, "y": 16, "r": 26}
+   },
+   "callouts": {"r2": {"text": "R2", "x": 470, "y": -45, "to": [418, 6]}},
+   "items": [["ls", "rs"], ["a"], ["r2"], ["ls"], ["select"], ["select", "rs"], ["select", "r1"]],
+   "details": [
+    {"en": "Click L3 + R3 (both sticks)", "pt": "Clique L3 + R3 (os dois analógicos)"},
+    {"en": "A button (the bottom one)", "pt": "Botão A (o de baixo)"},
+    {"en": "Right trigger (R2)", "pt": "Gatilho direito (R2)"},
+    {"en": "Left stick", "pt": "Analógico esquerdo"},
+    {"en": "Select button (left of the center). Hold = hold the touchpad", "pt": "Botão Select (à esquerda do centro). Segurar = segurar o touchpad"},
+    {"en": "Hold the Select button and move the right stick in the asked direction ('Open Door')", "pt": "Segure o botão Select e mova o analógico direito na direção pedida (porta 'Open Door')"},
+    {"en": "Hold the Select button and press R1 (lift the car off Reggie)", "pt": "Segure o botão Select e aperte R1 (levantar o carro de cima do Reggie)"}
+   ]
+  }
+ }
+}

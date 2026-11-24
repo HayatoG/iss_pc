@@ -113,7 +113,7 @@ _GROUP_OF = {
 
 def fix_items():
     """BPnn and A/B rows (the in-game menu options are not part of this screen)."""
-    return [i for i in backports_table.ITEMS if i.group in ('bp', 'ab')]
+    return [i for i in backports_table.ITEMS if i.group in ('bp', 'ab') and not i.hidden]
 
 
 def group_of(item):
@@ -275,23 +275,8 @@ def compute_chips(settings, t, gpu='checking', pad=None, problems=None, states=N
             chips.append((t('chip_game_ok', version=game_version_text(settings.get('game_dir') or '')), 'ok'))
     if not built:
         chips.append((t('chip_port_missing'), 'bad'))
-    states = tlg_run.experimental_states(settings) if states is None else states
-    n = backports_table.changes(states)
-    chips.append((t('chip_profile_rec') if n == 0 else t('chip_profile_custom', n=n), 'ok' if n == 0 else 'warn'))
-    if cache_bytes is None and not measure_cache:
-        chips.append((t('chip_cache_checking'), 'ok'))
-    elif cache_bytes is None:
-        try:
-            cache_bytes = tlg_run.shader_cache_size(settings)
-        except Exception:
-            cache_bytes = 0
-    if cache_bytes is None:
-        pass
-    elif cache_bytes:
-        chips.append((t('chip_cache', size=shader_cache.human_size(cache_bytes)), 'warn' if cache_bytes > 2 ** 30 else 'ok'))
-    else:
-        chips.append((t('chip_cache_empty'), 'ok'))
-    chips.append((t('chip_pad', name=pad) if pad else t('chip_pad_none'), 'ok' if pad else 'off'))
+    # 2026-11-22: the profile and shader cache chips are gone (they told the player nothing to act on);
+    # the detected controller shows on the Controller guides page instead.
     ready = state == 'ok' and built
     return [{'text': text, 'level': level} for text, level in chips], ready
 

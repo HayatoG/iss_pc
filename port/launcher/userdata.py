@@ -20,6 +20,17 @@ import time
 
 SERIAL = 'CUSA00223'
 SLOT_PREFIX = 'infamousss'
+# The game whose saves are listed, copied and found (2026-11-22): infamous_run.select_game sets it.
+# First Light keeps CUSA00575 saves in <data folder>/first-light; Second Son CUSA00223 in the folder itself.
+_GAME = {'serial': SERIAL, 'sub': ''}
+
+
+def set_game(serial, sub=''):
+    _GAME['serial'], _GAME['sub'] = serial or SERIAL, sub or ''
+
+
+def serial():
+    return _GAME['serial']
 ENV_NAMES = ('ISS_USER_DIR', 'TLG_USER_DIR')
 # What a data folder holds that is worth carrying over. The shader cache (cache/) is left out: it is
 # large and the game rebuilds it.
@@ -122,7 +133,7 @@ def same_path(a, b):
 
 # ------------------------------------------------------------------------- saves on disk
 def slot_dirs(savedata):
-    """[(user id, slot name, slot folder)] under <savedata>/<user>/CUSA00223/, sorted."""
+    """[(user id, slot name, slot folder)] under <savedata>/<user>/<serial()>/, sorted."""
     out = []
     root = Path(savedata)
     try:
@@ -130,7 +141,7 @@ def slot_dirs(savedata):
     except OSError:
         return out
     for user in users:
-        game = user / SERIAL
+        game = user / serial()
         try:
             slots = sorted(p for p in game.iterdir() if p.is_dir() and not p.name.endswith('.sce_sys'))
         except OSError:
@@ -346,7 +357,8 @@ def find_installs(roots, exclude=(), max_dirs=30000, deadline=8.0, depth=3):
         if 'savedata' in names:
             consider(folder)
         if 'user' in names:
-            consider(folder / 'user')
+            sub = _GAME['sub']
+            consider(folder / 'user' / sub if sub else folder / 'user')
         for e in entries:
             low = e.name.lower()
             if low in SKIP_NAMES or (low.startswith('.') and 'infamous' not in low):

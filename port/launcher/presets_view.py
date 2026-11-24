@@ -20,7 +20,7 @@ VIEW_BARE = {'menu:lod_scale': '0.25', 'menu:region_lod': '0', 'menu:region_fade
 REC1 = {
     'id': 'rec1',
     'exported': '2026-10-16',
-    'names': {'en': 'RECOMMENDED 1', 'pt': 'RECOMENDADO 1'},
+    'names': {'en': 'OLDER COMPATIBILITY 1', 'pt': 'COMPATIBILIDADE ANTIGA 1'},
     'what': {
         'en': 'The recommended setup with the shorter draw distance of 15/10: lighter in the city.',
         'pt': 'A configuração recomendada com o alcance de visão menor de 15/10: mais leve na cidade.',

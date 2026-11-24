@@ -211,15 +211,16 @@ class Controls(QObject):
     def keyRows(self):
         keys = padsettings.effective_keys(str(self.settings.get('key_map', '') or ''))
         default = padsettings.effective_keys('')
-        rows = [{'name': self.t('pad_left_stick'), 'keys': 'W A S D', 'fixed': True, 'changed': False},
-                {'name': self.t('pad_right_stick'), 'keys': '← ↑ → ↓', 'fixed': True, 'changed': False}]
+        # 'glyph' (2026-11-23): which PS4 button PadGlyph.qml draws next to the name
+        rows = [{'name': self.t('pad_left_stick'), 'keys': 'W A S D', 'fixed': True, 'changed': False, 'glyph': 'ls'},
+                {'name': self.t('pad_right_stick'), 'keys': '← ↑ → ↓', 'fixed': True, 'changed': False, 'glyph': 'rs'}]
         for button, _, _ in padsettings.KEYBOARD_BUTTONS:
             names = keys[button]
             rows.append({'name': self.t('pad_btn_' + button), 'keys': ' | '.join(names) if names else self.t('ctl_key_none'),
-                         'fixed': False, 'changed': names != default[button]})
-        rows += [{'name': self.t('pad_sensor_right'), 'keys': 'T', 'fixed': True, 'changed': False},
-                 {'name': self.t('pad_sensor_left'), 'keys': 'G', 'fixed': True, 'changed': False},
-                 {'name': self.t('pad_sensor_shake'), 'keys': 'Y', 'fixed': True, 'changed': False}]
+                         'fixed': False, 'changed': names != default[button], 'glyph': button})
+        rows += [{'name': self.t('pad_sensor_right'), 'keys': 'T', 'fixed': True, 'changed': False, 'glyph': 'tilt_right'},
+                 {'name': self.t('pad_sensor_left'), 'keys': 'G', 'fixed': True, 'changed': False, 'glyph': 'tilt_left'},
+                 {'name': self.t('pad_sensor_shake'), 'keys': 'Y', 'fixed': True, 'changed': False, 'glyph': 'shake'}]
         return rows
 
     @Property(str, notify=changed)

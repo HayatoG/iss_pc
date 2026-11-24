@@ -6,6 +6,25 @@ import Launcher
 // moment after the last move, so the game's files are not rewritten at every pixel of a drag.
 Slider {
     id: root
+    wheelEnabled: false
+    activeFocusOnTab: true
+    property string controllerKind: "slider"
+    property bool controllerEditing: false
+    property real controllerDraft: 0
+    property var controllerFocusTarget: null
+    readonly property real controllerPosition: controllerEditing ? (controllerDraft - from) / Math.max(0.00001, to - from) : visualPosition
+    function controllerInput(action) {
+        if (!controllerEditing) {
+            if (action === "confirm") { settle.stop(); controllerDraft = value; controllerEditing = true }
+            return
+        }
+        if (action === "back") { controllerEditing = false; return }
+        if (action === "confirm") { value = controllerDraft; controllerEditing = false; committed(value); return }
+        var step = stepSize > 0 ? stepSize : (to - from) / 100
+        if (action === "left" || action === "down") controllerDraft = Math.max(from, controllerDraft - step)
+        if (action === "right" || action === "up") controllerDraft = Math.min(to, controllerDraft + step)
+    }
+    FocusHalo { active: root.activeFocus || root.controllerEditing }
     property color accent: Theme.smoke
     signal committed(real v)
     implicitWidth: 170
@@ -16,10 +35,10 @@ Slider {
     background: Rectangle {
         x: root.leftPadding; y: root.topPadding + root.availableHeight / 2 - height / 2
         width: root.availableWidth; height: 6; radius: 3; color: "#262b33"
-        Rectangle { width: root.visualPosition * parent.width; height: parent.height; radius: 3; color: root.accent }
+        Rectangle { width: root.controllerPosition * parent.width; height: parent.height; radius: 3; color: root.accent }
     }
     handle: Rectangle {
-        x: root.leftPadding + root.visualPosition * (root.availableWidth - width)
+        x: root.leftPadding + root.controllerPosition * (root.availableWidth - width)
         y: root.topPadding + root.availableHeight / 2 - height / 2
         width: 18; height: 18; radius: 9
         color: root.pressed ? Qt.lighter(root.accent, 1.25) : "#f1efe9"

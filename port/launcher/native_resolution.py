@@ -112,6 +112,51 @@ def save(path, output, percent):
                                      'iss_native_percent': str(int(percent))})
 
 
+# ------------------------------------------------------------------- automatic output (2026-11-23)
+def monitor_size():
+    """(width, height) in real pixels of the main monitor's current mode (Windows), else None.
+    EnumDisplaySettingsW reads the display mode itself, so Windows' text scaling (125%, 150%)
+    does not shrink it the way GetSystemMetrics would."""
+    try:
+        import ctypes
+        import struct
+        devmode = ctypes.create_string_buffer(220)            # DEVMODEW
+        struct.pack_into('<H', devmode, 68, 220)               # dmSize
+        if not ctypes.windll.user32.EnumDisplaySettingsW(None, -1, devmode):   # ENUM_CURRENT_SETTINGS
+            return None
+        width, height = struct.unpack_from('<II', devmode, 172)    # dmPelsWidth, dmPelsHeight
+        return (width, height) if width and height else None
+    except (AttributeError, OSError, ImportError):
+        return None
+
+
+def output_for_size(width, height):
+    """The output preset for a monitor: its exact size, else the biggest preset that fits inside it
+    (1920×1200 -> 1080p, 2560×1600 -> 1440p); 0 (off) for a monitor smaller than 1080p."""
+    exact = [n for n in range(1, len(OUTPUTS)) if OUTPUTS[n] == (width, height)]
+    if exact:
+        return exact[0]
+    fits = [n for n in range(1, len(OUTPUTS)) if OUTPUTS[n][0] <= width and OUTPUTS[n][1] <= height]
+    return max(fits, key=lambda n: OUTPUTS[n][0] * OUTPUTS[n][1]) if fits else 0
+
+
+def auto_output(path, ini, size=None, force=False):
+    """Sets the output to the monitor's size (internal resolution 100%). Without force only when the
+    player never chose one (no iss_native_output key in tlg.ini yet). Returns the preset written,
+    0 when the monitor is smaller than every preset (nothing written), or None when nothing was done
+    (a choice already there, or the monitor could not be read)."""
+    if not force and 'iss_native_output' in ini:
+        return None
+    size = size or monitor_size()
+    if not size:
+        return None
+    output = output_for_size(*size)
+    if not output:
+        return 0
+    save(path, output, 100)
+    return output
+
+
 # ------------------------------------------------------------------------------------------ UI model
 def output_options(t):
     """[(value text, label)] of the Output choice."""
@@ -175,9 +220,9 @@ TEXT = {
     'nat_output': ('Output', 'Saída'),
     'nat_output_what': (
         'The size of the image shown on screen. "Off" keeps the original game (1080p inside the game, scaled by the window). '
-        'Needs renderer v2 and the US update 1.07.',
+        'Needs renderer v2 and the US update 1.07. The launcher sets it to your monitor\'s size the first time.',
         'O tamanho da imagem mostrada na tela. "Desligado" mantém o jogo original (1080p dentro do jogo, ampliado pela janela). '
-        'Precisa do renderer v2 e da atualização 1.07 americana.'),
+        'Precisa do renderer v2 e da atualização 1.07 americana. Na primeira vez o launcher escolhe o tamanho do seu monitor.'),
     'nat_internal': ('Internal resolution', 'Resolução interna'),
     'nat_internal_what': (
         'The size the 3D scene is drawn at before it is shown at the output size. Lower is faster: for example 720p '

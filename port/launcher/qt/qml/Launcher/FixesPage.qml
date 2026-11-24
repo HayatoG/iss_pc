@@ -31,11 +31,11 @@ Item {
                     color: Theme.chip; border.width: 1
                     border.color: Backend.profileIsRecommended ? Theme.ok : Theme.warn
                     Text { id: prof; anchors.centerIn: parent; text: Backend.profileText; color: Theme.textChip
-                           font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.Bold }
+                           font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.Bold }
                 }
             }
             Text { width: parent.width; text: Theme.tr("fixes_intro"); wrapMode: Text.WordWrap; color: Theme.textDim
-                   font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
+                   font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
             Row {
                 spacing: 10
                 GhostButton { compact: true; text: Theme.tr("fixes_previous"); onClicked: Backend.resetFixes("previous") }
@@ -43,9 +43,9 @@ Item {
             }
             Item {
                 width: parent.width; height: warn.implicitHeight
-                Rectangle { width: 3; height: parent.height; color: Theme.warn }
-                Text { id: warn; x: 15; width: parent.width - 15; text: Theme.tr("fixes_recompile"); wrapMode: Text.WordWrap
-                       color: Theme.textDim; font.family: Theme.fontText; font.pixelSize: 12; lineHeight: 1.35
+                Rectangle { width: 3; height: parent.height; radius: 1.5; color: Theme.warn }
+                Text { id: warn; x: 18; width: parent.width - 18; text: Theme.tr("fixes_recompile"); wrapMode: Text.WordWrap
+                       color: Theme.textDim; font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.35
                        lineHeightMode: Text.ProportionalHeight }
             }
         }

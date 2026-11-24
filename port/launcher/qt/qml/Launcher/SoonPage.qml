@@ -22,7 +22,7 @@ Item {
                font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 700 }); font.pixelSize: 20; font.weight: Font.Bold
                font.capitalization: Font.AllUppercase; font.letterSpacing: 4 }
         Text { width: parent.width; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap; text: Theme.tr("soon_body")
-               color: Theme.textDim; font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.4
+               color: Theme.textDim; font.family: Theme.fontText; font.pixelSize: 15; lineHeight: 1.4
                lineHeightMode: Text.ProportionalHeight }
     }
 }

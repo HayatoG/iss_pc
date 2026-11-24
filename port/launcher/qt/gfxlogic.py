@@ -17,6 +17,54 @@ from presets_rx580 import RX580
 from presets_view import REC1, SECO
 from presets_apolar import APOLAR_PRESETS
 from presets_v2 import V2_PRESETS
+from presets_tuned import TUNED_PRESETS, TUNED_IDS, for_hardware
+
+# This PC's memory in MB (2026-11-23): the tuned presets are fitted to it (presets_tuned.for_hardware).
+# Filled by the Graphics screen (VRAM when detected, remembered in settings.json; RAM read at start).
+HARDWARE = {'vram_mb': None, 'ram_mb': None}
+
+# ------------------------------------------------------------------ personal preset (2026-11-23)
+# "Renderer V2 - Custom Personal Graphics": renderer v2 with native passes, everything else the player's.
+# While it is the selected preset (settings['graphics_mode'] == PERSONAL_ID) every graphics option the
+# player changes is remembered in settings['personal_graphics']; clicking it again restores them.
+PERSONAL_ID = 'personal'
+PERSONAL_BASE = {'TLG_RENDERER': '2', 'TLG_NATIVE_PASSES': '1'}
+PERSONAL_SETTING_KEYS = ('vsync', 'display_mode', 'allow_hdr', 'show_fps', 'vram_auto', 'vram_budget_mb',
+                         'gpu_readbacks', 'v2_lighting_read_window', 'v2_amd_native_passes')
+
+
+def personal_item_ids():
+    """The graphics options the personal preset remembers: every Image, View and Performance option of
+    the in-game menu plus the renderer switches (not controls, overlay or fixes)."""
+    ids = [i.id for i in backports_table.ITEMS if i.group == 'menu' and i.tab in ('Image', 'View', 'Performance')]
+    ids += [i.id for i in backports_table.ITEMS if i.id.startswith('menu:iss_temporal')]
+    ids += ['TLG_RENDERER', 'TLG_NATIVE_PASSES', 'TLG_BARRIER_MERGE']
+    return tuple(dict.fromkeys(i for i in ids if any(x.id == i for x in backports_table.ITEMS)))
+
+
+def personal_capture(settings, states):
+    """The player's current graphics options, as the personal preset keeps them."""
+    return {'settings': {k: settings[k] for k in PERSONAL_SETTING_KEYS if k in settings},
+            'items': {i: states.get(i) for i in personal_item_ids()}}
+
+
+def personal_targets(settings, states):
+    """(settings, items) the personal preset applies: the remembered options, or on the first click the
+    current ones with renderer v2 and native passes on."""
+    saved = settings.get('personal_graphics')
+    if isinstance(saved, dict) and isinstance(saved.get('items'), dict):
+        items = {i: saved['items'].get(i) for i in personal_item_ids()}
+        return dict(saved.get('settings') or {}), items
+    items = {i: states.get(i) for i in personal_item_ids()}
+    for item_id, value in PERSONAL_BASE.items():
+        items[item_id] = backports_table.normalize(item_by_id(item_id), value)
+    return {}, items
+
+
+def remember_personal(settings, states):
+    """While the personal preset is selected, keeps the player's latest choices (the caller saves)."""
+    if settings.get('graphics_mode') == PERSONAL_ID:
+        settings['personal_graphics'] = personal_capture(settings, states)
 
 # ------------------------------------------------------------------------------------- presets
 # Keys a preset sets (anything a preset does not list goes back to the default of the table).
@@ -26,13 +74,14 @@ PRESET_ITEMS = ('menu:fps_limit', 'menu:frames_queued', 'menu:fsr1', 'menu:rcas'
                 'TLG_ASYNC_SHADERS', 'TLG_STALE_READBACK', 'TLG_DEFERRED_READBACK', 'TLG_BACKGROUND_WARMUP')
 # Full presets (presets_current.py) also set keys the plain ones never touch (GPU accuracy, read-ahead,
 # write merge, draw distance...): those keys are applied, and compared, only for the preset that lists them.
-FULL_PRESETS = {p['id']: p for p in (REC1, CURRENT, AMD, RX580, SECO, *APOLAR_PRESETS, *V2_PRESETS)}
+FULL_PRESETS = {p['id']: p for p in (REC1, CURRENT, AMD, RX580, SECO, *APOLAR_PRESETS, *V2_PRESETS, *TUNED_PRESETS)}
 # Defaults of the launcher settings a full preset may set (infamous_run.DEFAULT_SETTINGS; a test keeps them equal).
 SETTING_DEFAULTS = {'vsync': True, 'gpu_readbacks': '2', 'eager_readback': False, 'write_merge': True,
                     'show_fps': False, 'precompile_shaders': True, 'vram_budget_mb': 3500,
                     'vram_auto': True}
 # id, settings overrides, item overrides (values as strings; unlisted = default)
 PRESETS = (
+    (PERSONAL_ID, {}, {}),      # applied by personal_targets (the player's own options), never compared
     (REC1['id'], REC1['settings'], REC1['items']),
     (CURRENT['id'], CURRENT['settings'], CURRENT['items']),
     (AMD['id'], AMD['settings'], AMD['items']),
@@ -40,12 +89,17 @@ PRESETS = (
     (SECO['id'], SECO['settings'], SECO['items']),
     *((p['id'], p['settings'], p['items']) for p in APOLAR_PRESETS),
     *((p['id'], p['settings'], p['items']) for p in V2_PRESETS),
-    ('performance', {'vsync': False}, {'menu:frames_queued': '2', 'menu:fsr1': '1', 'TLG_STALE_READBACK': '1'}),
-    ('balanced', {}, {}),
-    ('quality', {}, {'menu:fsr1': '1'}),
-    ('ps4', {}, {'menu:fps_limit': '30', 'menu:fsr1': '0', 'menu:rcas': '0'}),
+    # Performance, Balanced, Quality, True to PS4 (2026-11-23): renderer v2 + native passes, tuned (presets_tuned.py)
+    *((p['id'], p['settings'], p['items']) for p in TUNED_PRESETS),
 )
 DEFAULT_PRESET = 'balanced'
+
+
+def fit_notes(preset_id):
+    """The change keys of a tuned preset on this PC ([] = full preset or not a tuned one)."""
+    if preset_id not in TUNED_IDS:
+        return []
+    return for_hardware(preset_id, HARDWARE['vram_mb'], HARDWARE['ram_mb'])[1]
 
 
 def item_by_id(item_id):
@@ -66,6 +120,9 @@ def _full_targets(overrides, items):
 def preset_targets(preset_id):
     """({settings key: value}, {item id: stored value or None}) for a preset: every key a preset
     can set, so applying one also undoes what another set."""
+    if preset_id in TUNED_IDS:         # fitted to this PC's VRAM and RAM
+        fitted, _ = for_hardware(preset_id, HARDWARE['vram_mb'], HARDWARE['ram_mb'])
+        return _full_targets(fitted['settings'], fitted['items'])
     _, overrides, items = next(p for p in PRESETS if p[0] == preset_id)
     if preset_id in FULL_PRESETS:      # only a full preset owns the extra keys
         return _full_targets(overrides, items)
@@ -98,8 +155,13 @@ def _same_setting(key, current, wanted):
 
 
 def matching_preset(settings, states):
-    """The id of the preset the current switches equal, or None (custom). `states` = fix states."""
-    for preset_id, _, _ in PRESETS:
+    """The id of the preset the current switches equal, or None (custom). `states` = fix states.
+    The tuned main presets are checked first (2026-11-23): they set more keys than RENDERER V2 + NATIVE
+    PASSES, which would otherwise also match Balanced and take its name."""
+    if settings.get('graphics_mode') == PERSONAL_ID:      # the player's own setup, whatever it holds
+        return PERSONAL_ID
+    tuned = [p['id'] for p in TUNED_PRESETS]
+    for preset_id in tuned + [p[0] for p in PRESETS if p[0] not in tuned and p[0] != PERSONAL_ID]:
         want_settings, want_items = preset_targets(preset_id)
         if all(_same_setting(k, settings.get(k), v) for k, v in want_settings.items()) and \
            all(states.get(i) == v for i, v in want_items.items()):

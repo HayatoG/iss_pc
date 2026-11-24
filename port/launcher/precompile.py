@@ -123,8 +123,8 @@ def remove_all(*files):
 
 def decide(settings, version=None, print_fingerprint=None):
     """('off'|'nogame'|'current'|'generate', reason). The cheap part of the decision: no generator run."""
-    if not settings.get('precompile_shaders', True):
-        return 'off', 'option off'
+    # 2026-11-23: always on. The "Compile shaders on the first start" switch is gone (without the list
+    # the game ran slower and choppy in testing); an old saved "off" is ignored.
     game = settings.get('game_dir') or ''
     root = xpps_root(game) if game else None
     if root is None:

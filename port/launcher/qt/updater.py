@@ -51,10 +51,18 @@ def pick_assets(release, nt=None):
     """(package asset, SHA256SUMS asset or None) of `release` (releases.fetch_latest's dict) for
     this platform. Raises UpdateError('noasset') when the release has no package for it."""
     assets = {a.get('name'): a for a in (release or {}).get('assets') or [] if isinstance(a, dict)}
-    package = assets.get(ASSET_NAMES[platform_key(nt)])
+    wanted = ASSET_NAMES[platform_key(nt)]
+    package = assets.get(wanted)
+    if not package:
+        # A beta's package carries its name (infamous-windows-x86_64-sunny-beta.zip): the platform's
+        # package name with something before the extension.
+        stem = package_folder(wanted)
+        package = next((a for name, a in sorted(assets.items(), key=lambda kv: str(kv[0]))
+                        if isinstance(name, str) and name.startswith(stem + '-')
+                        and re.search(r'(\.zip|\.tar\.gz|\.tgz)$', name)), None)
     if not package or not _trusted(package.get('url')) or not package.get('size'):
-        raise UpdateError('noasset', ASSET_NAMES[platform_key(nt)])
-    sums = assets.get(SUMS_NAME)
+        raise UpdateError('noasset', wanted)
+    sums = assets.get(SUMS_NAME) or assets.get(SUMS_NAME + '.txt')
     return package, (sums if sums and _trusted(sums.get('url')) else None)
 
 
@@ -193,7 +201,15 @@ def verify(name, digest, sums, asset_digest=''):
 def target_folder(port_dir, asset_name, tag):
     """A new sibling of the running install: <parent>/<package>-<tag>, -2, -3 ... when taken."""
     port_dir = Path(port_dir)
-    base = f"{package_folder(asset_name)}-{re.sub(r'[^0-9A-Za-z._-]', '_', tag or 'new')}"
+    stem, tag = package_folder(asset_name), re.sub(r'[^0-9A-Za-z._-]', '_', tag or 'new')
+    # A beta's package and tag both carry its name (…-sunny-beta + sunny-beta-2026.11.07): said once.
+    parts = stem.split('-')
+    for n in range(len(parts) - 1, 0, -1):
+        overlap = '-'.join(parts[-n:])
+        if tag.startswith(overlap + '-'):
+            tag = tag[len(overlap) + 1:]
+            break
+    base = f'{stem}-{tag}'
     target, n = port_dir.parent / base, 2
     while target.exists() or same_path(target, port_dir):
         target, n = port_dir.parent / f'{base}-{n}', n + 1
@@ -287,6 +303,10 @@ def extract(archive_path, target, top):
                 else:
                     archive.extractall(tmp)  # noqa: S202 (every member checked by _check_tar)
         source = tmp / top if (tmp / top).is_dir() else tmp
+        if source == tmp:   # a beta zip keeps the plain top folder (infamous-windows-x86_64): the only folder in it
+            entries = [e for e in tmp.iterdir()]
+            if len(entries) == 1 and entries[0].is_dir():
+                source = entries[0]
         os.replace(source, target)
     except UpdateError:
         raise
