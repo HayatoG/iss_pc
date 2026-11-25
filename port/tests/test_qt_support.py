@@ -214,6 +214,25 @@ class IssueUrlTests(unittest.TestCase):
                 self.assertEqual(sorted(z.namelist()), ['report.md', 'run-1.redacted.log'])
                 self.assertEqual(z.read('run-1.redacted.log').decode(), 'LOG TEXT')
 
+    def test_crash_files_belong_to_the_run_of_the_log(self):
+        import datetime
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            log = folder / 'run-20261125-204806.log'
+            log.write_text('x')
+            start = datetime.datetime(2026, 11, 25, 20, 48, 6).timestamp()
+            os.utime(log, (start + 220, start + 220))             # last line 220 s in
+            crash = folder / 'gpu-crash.txt'
+            crash.write_text('DEVICE LOST')
+            os.utime(crash, (start + 215, start + 215))
+            self.assertEqual(report.crash_files(folder, log), [crash])
+            os.utime(crash, (start - 600, start - 600))           # an older crash
+            self.assertEqual(report.crash_files(folder, log), [])
+            os.utime(crash, (start + 220 + 600, start + 220 + 600))   # a later run's crash
+            self.assertEqual(report.crash_files(folder, log), [])
+            self.assertEqual(report.crash_files(folder / 'missing', log), [])
+            self.assertEqual(report.crash_files(folder, folder / 'nope.log'), [])
+
 
 class KnownIssuesTests(unittest.TestCase):
     def setUp(self):
@@ -539,6 +558,29 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(report.leftover_home_paths(blob, {'maria'}), [])
         self.assertIn('C:\\Users\\<user>\\x', blob)
         self.assertEqual(self.opened, [])                          # nothing opened without a click
+
+    def test_zip_carries_this_runs_gpu_black_box_redacted(self):
+        user = Path(os.environ['ISS_USER_DIR'])
+        user.mkdir(parents=True, exist_ok=True)
+        crash = user / 'gpu-crash.txt'
+        crash.write_text('DEVICE LOST em readback submit\nC:\\Users\\Maria Silva\\game\n', encoding='utf-8')
+        (user / 'gpu-crash.json').write_text('{"reason": "device lost"}', encoding='utf-8')
+        self.load_support()
+        self.support.saveZip(str(self.root / 'with-crash'))
+        with zipfile.ZipFile(str(self.root / 'with-crash.zip')) as z:
+            self.assertEqual(sorted(z.namelist()),
+                             ['gpu-crash.json', 'gpu-crash.txt', 'report.md', 'run-1.redacted.log'])
+            text = z.read('gpu-crash.txt').decode()
+        self.assertIn('DEVICE LOST', text)
+        self.assertIn('C:\\Users\\<user>\\game', text)
+        self.assertNotIn('Maria', text)
+        # A crash from an earlier run (written before this log started) stays out.
+        old = (self.logs / 'run-1.log').stat().st_ctime - 3600
+        for name in ('gpu-crash.txt', 'gpu-crash.json'):
+            os.utime(user / name, (old, old))
+        self.support.saveZip(str(self.root / 'without-crash'))
+        with zipfile.ZipFile(str(self.root / 'without-crash.zip')) as z:
+            self.assertEqual(sorted(z.namelist()), ['report.md', 'run-1.redacted.log'])
 
     def test_zip_is_refused_when_redaction_missed_something(self):
         self.load_support()

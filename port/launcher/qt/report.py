@@ -109,6 +109,40 @@ def read_log(path, limit=LOG_READ_LIMIT):
     return data.decode('utf-8', 'replace'), cut
 
 
+# The GPU black box (renderer v2): at a device lost the game writes these into the folder it runs
+# in, the user folder. They say what the GPU was doing when it hung; a report about a crash needs them.
+CRASH_FILES = ('gpu-crash.txt', 'gpu-crash.json')
+_RUN_NAME_RE = re.compile(r'run-(\d{8}-\d{6})')
+
+
+def crash_files(folder, log_path, slack=120):
+    """The black box files in `folder` written during the run of `log_path`: changed after the run
+    started (the time in run-YYYYMMDD-HHMMSS.log, else the log's creation time) and at most `slack`
+    seconds after the log's last write. An older crash's files are left out."""
+    import datetime
+    try:
+        log = Path(log_path).stat()
+    except OSError:
+        return []
+    start = log.st_ctime
+    match = _RUN_NAME_RE.search(Path(log_path).name)
+    if match:
+        try:
+            start = datetime.datetime.strptime(match.group(1), '%Y%m%d-%H%M%S').timestamp()
+        except ValueError:
+            pass
+    found = []
+    for name in CRASH_FILES:
+        path = Path(folder) / name
+        try:
+            changed = path.stat().st_mtime
+        except OSError:
+            continue
+        if start - 5 <= changed <= log.st_mtime + slack:
+            found.append(path)
+    return found
+
+
 _FPS_RE = re.compile(r'Frame stats:\s*([0-9.]+)\s*FPS(?:,\s*worst frame\s*([0-9.]+)\s*ms)?')
 _EVENT_RE = re.compile(r'^\s*(Fault|STOP|FREEZE):\s*(.*)$')
 _HEADER_KEYS = ('Build:', 'Settings:', 'Window:', 'GPU:', 'GPU 0:', 'VideoOut:', 'CPU:')
@@ -509,11 +543,14 @@ def issue_url(title, body, short_body, base=ISSUES_URL):
     return url, True
 
 
-def write_zip(path, report_text, log_text, log_name):
+def write_zip(path, report_text, log_text, log_name, extras=()):
     """Saves report.md + the redacted log in a .zip. The log is stored under its own name with
-    a '.redacted.log' ending so nobody mistakes it for the original."""
+    a '.redacted.log' ending so nobody mistakes it for the original. `extras`: (name, redacted
+    text) pairs stored as they are, e.g. the GPU black box files."""
     stem = Path(log_name).stem if log_name else 'log'
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
         z.writestr('report.md', report_text)
         if log_text is not None:
             z.writestr(f'{stem}.redacted.log', log_text)
+        for name, text in extras:
+            z.writestr(name, text)
