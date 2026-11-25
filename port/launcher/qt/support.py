@@ -60,6 +60,21 @@ class Support(QObject):
     def logs_dir(self):
         return Path(self.probes['logs_dir']()) if 'logs_dir' in self.probes else tlg_run.LOG_DIR
 
+    def crash_extras(self, log_path):
+        """[(name, redacted text)] of the GPU black box files from this log's run (the game writes
+        them into the user folder at a device lost); [] when there are none or they can't be read."""
+        if not log_path:
+            return []
+        folder = self.probes['user_dir']() if 'user_dir' in self.probes else tlg_run.user_dir()
+        extras = []
+        for path in report.crash_files(folder, log_path):
+            try:
+                text, _cut = report.read_log(path)
+            except OSError:
+                continue
+            extras.append((path.name, report.redact(text, self.names())[0]))
+        return extras
+
     def say(self, text, tone='info'):
         self._message, self._tone = text, tone
         self.changed.emit()
@@ -294,12 +309,13 @@ class Support(QObject):
             path += '.zip'
         text = self.build_report()
         log_text = self._log['text'] if self._log else None
-        left = report.leftover_home_paths((log_text or '') + text, self.names())
+        extras = self.crash_extras(self._log.get('path') if self._log else None)
+        left = report.leftover_home_paths((log_text or '') + text + ''.join(e[1] for e in extras), self.names())
         if left:    # redaction missed something: do not write a file that leaks it
             self.say(self.t('sup_leak', n=len(left)), 'bad')
             return
         try:
-            report.write_zip(path, text, log_text, self._log['name'] if self._log else '')
+            report.write_zip(path, text, log_text, self._log['name'] if self._log else '', extras)
         except OSError as error:
             self.say(self.t('sup_zip_error', detail=str(error)), 'bad')
             return
@@ -377,7 +393,8 @@ class Support(QObject):
             return
         log_text, _count = report.redact(text, self.names())
         body = self.build_report()
-        if report.leftover_home_paths(log_text + body, self.names()):
+        extras = self.crash_extras(path)
+        if report.leftover_home_paths(log_text + body + ''.join(e[1] for e in extras), self.names()):
             self.say(self.t('sup_leak', n=1), 'bad')
             return
         from PySide6.QtCore import QStandardPaths
@@ -385,7 +402,7 @@ class Support(QObject):
         target = folder / self.defaultZipName
         try:
             folder.mkdir(parents=True, exist_ok=True)
-            report.write_zip(str(target), body, log_text, path.name)
+            report.write_zip(str(target), body, log_text, path.name, extras)
         except OSError as error:
             self.say(self.t('sup_zip_error', detail=str(error)), 'bad')
             return
