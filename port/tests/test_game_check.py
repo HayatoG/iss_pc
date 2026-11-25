@@ -51,11 +51,16 @@ class CheckGameTests(unittest.TestCase):
         (game / 'sce_module').mkdir()
         for name in ('eboot.bin', 'sce_module/libc.prx', 'sce_module/libSceFios2.prx'):
             (game / name).write_bytes(b'x')
+        for name in run.ART_REQUIRED:
+            path = game / 'art' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'x')
         return game
 
     def check(self, game, layout=run.EBOOT_107, external=0):
         run._inspected.clear()
         with mock.patch.object(run, 'eboot_layout', side_effect=lambda path: layout), \
+                mock.patch.object(run, 'ART_MIN_FILES', len(run.ART_REQUIRED)), \
                 mock.patch.object(run, 'external_tls_relocations',
                                   side_effect=lambda path: external if path.name == 'libc.prx' else 0), \
                 mock.patch.object(run, 'PROBE', game / 'eboot.bin'):
@@ -82,6 +87,7 @@ class CheckGameTests(unittest.TestCase):
             game = self.folder(tmp)
             run._inspected.clear()
             with mock.patch.object(run, 'eboot_layout', side_effect=lambda path: run.EBOOT_107), \
+                    mock.patch.object(run, 'ART_MIN_FILES', len(run.ART_REQUIRED)), \
                     mock.patch.object(run, 'PROBE', game / 'eboot.bin'):
                 problems = run.check_game(game)  # 1-byte modules: the real parser rejects them
         self.assertEqual([kind for kind, _ in problems], ['unreadable', 'unreadable'])

@@ -13,12 +13,14 @@ from .logic import backports_table, shader_cache, tlg_run
 from .rowsmodel import RowsModel
 import dlss_setup  # noqa: E402  (launcher/dlss_setup.py: the NVIDIA DLL, the bridge, the download)
 import native_resolution  # noqa: E402  (launcher/native_resolution.py: output + internal resolution)
+import perf_report  # noqa: E402  (launcher/perf_report.py: what held the last session's frame rate back)
 import preset_share  # noqa: E402  (launcher/preset_share.py; logic put the folder on sys.path)
 
 # (id, kind, live) of the options kept in settings.json. live: also in the Insert menu.
 SETTING_ROWS = {
     's:display_mode': ('display_mode', 'combo', True),
     's:vsync': ('vsync', 'switch', True),
+    's:allow_hdr': ('allow_hdr', 'switch', False),
     's:show_fps': ('show_fps', 'switch', True),
     's:gpu_readbacks': ('gpu_readbacks', 'combo', False),
     's:eager_readback': ('eager_readback', 'switch', False),
@@ -28,23 +30,32 @@ SETTING_ROWS = {
     's:reopen_launcher': ('reopen_launcher', 'switch', False),
     's:vram_auto': ('vram_auto', 'switch', False),
     's:vram_budget_mb': ('vram_budget_mb', 'slider', False),
+    's:v2_lighting_read_window': ('v2_lighting_read_window', 'combo', False),
+    's:v2_amd_native_passes': ('v2_amd_native_passes', 'switch', False),
 }
 DISPLAY_MODES = ('Windowed', 'Borderless', 'Fullscreen')
 OVERLAY_IDS = tuple(i.id for i in backports_table.MENU if i.tab == 'Overlay')
 # Two-value choices shown here as a switch: id -> (value when off, value when on, label key).
 SWITCH_CHOICES = {'TLG_RENDERER': ('1', '2', 'gfx_renderer_v2')}
 SECTIONS = (
+    # 2026-11-23: video memory and frame rate right under the resolution; "Upscale with FSR 1" and the
+    # FSR 3.1 temporal switch are no longer listed here (the Play tab's Upscaler sets them).
     ('nat_section', ('n:output', 'n:internal')),
-    ('gfx_sec_renderer', ('TLG_RENDERER', 'TLG_NATIVE_PASSES')),
-    ('gfx_sec_image', ('s:display_mode', 's:vsync', 'menu:fsr1', 'menu:rcas', 'menu:rcas_strength', 'menu:iss_temporal', 'menu:iss_temporal_mode',
-                        'TLG_BARRIER_MERGE')),
-    ('gfx_sec_rate', ('menu:fps_limit', 'menu:frames_queued')),
-    ('gfx_sec_view', tuple(i.id for i in backports_table.MENU if i.tab == 'View' and not i.hidden)),
-    ('gfx_sec_gpu', ('TLG_ASYNC_SHADERS', 'TLG_BACKGROUND_WARMUP', 's:gpu_readbacks', 's:eager_readback',
-                     's:write_merge', 'TLG_DEFERRED_READBACK', 'TLG_STALE_READBACK', 'TLG_DRAIN_SLEEP', 's:precompile_shaders',
-                     's:close_on_play', 's:reopen_launcher')),
     ('gfx_sec_vram', ('s:vram_auto', 's:vram_budget_mb')),
-    ('gfx_sec_overlay', ('s:show_fps',) + OVERLAY_IDS),
+    # The frame rate limit is set on the Play tab (FPS cap) and in the F1 overlay; not repeated here.
+    ('gfx_sec_rate', ('menu:frames_queued',)),
+    ('gfx_sec_renderer', ('TLG_RENDERER', 'TLG_NATIVE_PASSES', 's:v2_amd_native_passes',
+                          's:v2_lighting_read_window')),
+    ('gfx_sec_image', ('s:display_mode', 's:vsync', 's:allow_hdr','menu:rcas', 'menu:rcas_strength', 'menu:iss_temporal_mode',
+                        'TLG_BARRIER_MERGE')),
+    ('gfx_sec_view', tuple(i.id for i in backports_table.MENU if i.tab == 'View' and not i.hidden)),
+    # 2026-11-23: read ahead, write without waiting, deferred/stale readbacks, command thread sleep and
+    # the shader list are fixed now (infamous_run.LOCKED_GPU_ENV, precompile.decide) and not listed.
+    # Asynchronous shader compile and loading pipelines while playing are fixed too (2026-11-23).
+    ('gfx_sec_gpu', ('s:gpu_readbacks',
+                     's:close_on_play', 's:reopen_launcher')),
+    # The performance overlay's options are not shown here (2026-11-11): the in-game overlay (F1) has
+    # them all, and F10 shows or hides it. tlg.ini keeps them; nothing about them changes.
 )
 STEPS = {'menu:overlay_scale': 10, 's:vram_budget_mb': 200}
 
@@ -55,6 +66,7 @@ class Graphics(QObject):
     dlssProgressed = Signal(int, int)
     dlssChecked = Signal(object)
     dlssFinished = Signal(object)    # a Component, or a DlssError
+    dlssAutoDone = Signal(object)    # [problem texts] of the automatic download (empty: ready)
     scrollRequested = Signal(int)   # used by the screenshot tool
     dialogChanged = Signal()
 
@@ -67,6 +79,16 @@ class Graphics(QObject):
         self.model = RowsModel(self)
         self._vram_mb = None
         self._vram_done = False
+        # The tuned presets are fitted to this PC (2026-11-23): RAM now, VRAM as last detected (it is
+        # detected again in the background and remembered in settings.json, so the first clicks already fit).
+        try:
+            from . import report
+            ram = self.probes['ram']() if 'ram' in self.probes else report.ram_bytes()
+            gfxlogic.HARDWARE['ram_mb'] = int(ram / (1024 * 1024)) if ram else None
+        except Exception:
+            gfxlogic.HARDWARE['ram_mb'] = None
+        remembered = backend.settings.get('detected_vram_mb')
+        gfxlogic.HARDWARE['vram_mb'] = int(remembered) if isinstance(remembered, (int, float)) and remembered > 0 else None
         self._confirm = False
         self._cache = 0
         self._msg, self._tone = '', 'info'
@@ -81,6 +103,7 @@ class Graphics(QObject):
         self.dlssChecked.connect(self._on_dlss_checked)
         self.dlssProgressed.connect(self._on_dlss_progress)
         self.dlssFinished.connect(self._on_dlss_finished)
+        self.dlssAutoDone.connect(self._on_dlss_auto_done)
         backend.profileChanged.connect(self.rebuild)
         backend.langChanged.connect(self.rebuild)
         backend.saves.changed.connect(self.changed)
@@ -109,6 +132,11 @@ class Graphics(QObject):
 
     def _on_vram(self, mb):
         self._vram_mb, self._vram_done = mb, True
+        if mb:
+            gfxlogic.HARDWARE['vram_mb'] = int(mb)
+            if self.settings.get('detected_vram_mb') != int(mb):
+                self.settings['detected_vram_mb'] = int(mb)
+                tlg_run.save_settings(self.settings)
         self.rebuild()
 
     def set_vram(self, mb):
@@ -129,6 +157,14 @@ class Graphics(QObject):
                'valueText': '', 'disabled': False, 'decimals': 0, 'note': '', 'info': '', 'action': None}
         value = self.settings.get(key, tlg_run.DEFAULT_SETTINGS.get(key))
         default = tlg_run.DEFAULT_SETTINGS.get(key)
+        if key == 'v2_lighting_read_window':
+            # 'auto' (2026-11-22): the game picks by the card's video memory (whole table at 7 GB and
+            # up, 64 MB below); '0' and '1024' force a value (infamous_run.renderer_v2_env).
+            value = value if value in ('auto', '0', '1024') else 'auto'
+            row.update(disabled=not self._renderer_v2(), changed=value != 'auto')
+            default = 'auto'
+        if key == 'v2_amd_native_passes':
+            row.update(disabled=not self._renderer_v2(), changed=value is True)
         if key == 'vram_auto':
             # Only renderer v2 computes it; this port's renderer always uses the budget below.
             row['disabled'] = backports_table.effective(gfxlogic.item_by_id('TLG_RENDERER'),
@@ -146,8 +182,12 @@ class Graphics(QObject):
             row.update(lo=gfxlogic.BUDGET_MIN, hi=gfxlogic.BUDGET_MAX, step=STEPS[rid], unit='MB',
                        value=int(value), valueText=f'{int(value)} MB')
         else:
-            names = DISPLAY_MODES if key == 'display_mode' else ('0', '1', '2')
-            options = [(n, self.t(n if key == 'display_mode' else 'readbacks_' + n)) for n in names]
+            if key == 'v2_lighting_read_window':
+                options = [(n, self.t('gfx_lighting_window_' + n)) for n in ('auto', '0', '1024')]
+            elif key == 'display_mode':
+                options = [(n, self.t(n)) for n in DISPLAY_MODES]
+            else:
+                options = [(n, self.t('readbacks_' + n)) for n in ('0', '1', '2')]
             options = [(n, label + (f' ({self.t("exp_default")})' if n == str(default) else ''))
                        for n, label in options]
             row['options'] = [{'value': n, 'label': label} for n, label in options]
@@ -259,12 +299,15 @@ class Graphics(QObject):
             self._set_native(rid, value)
         elif rid in SETTING_ROWS:
             key, control, _ = SETTING_ROWS[rid]
+            if key == 'v2_lighting_read_window' and value not in ('auto', '0', '1024'):
+                return
             if control == 'switch':
                 self.settings[key] = value == '1'
             elif control == 'slider':
                 self.settings[key] = min(max(int(float(value)), gfxlogic.BUDGET_MIN), gfxlogic.BUDGET_MAX)
             else:
                 self.settings[key] = value
+            gfxlogic.remember_personal(self.settings, self.backend.fix_states)   # personal preset: keep it
             tlg_run.save_settings(self.settings)
             self.rebuild()
         else:
@@ -275,6 +318,17 @@ class Graphics(QObject):
 
     @Slot(str)
     def applyPreset(self, preset_id):
+        # 2026-11-23: the clicked preset is remembered; while it is the personal one, every graphics change
+        # is kept for it (gfxlogic.remember_personal) and clicking it again brings the player's setup back.
+        if preset_id == gfxlogic.PERSONAL_ID:
+            settings, items = gfxlogic.personal_targets(self.settings, self.backend.fix_states)
+            self.settings['graphics_mode'] = gfxlogic.PERSONAL_ID
+            self.settings.update(settings)
+            self.backend.fix_states.update(items)
+            gfxlogic.remember_personal(self.settings, self.backend.fix_states)
+            self._apply_targets(({}, {}))
+            return
+        self.settings['graphics_mode'] = preset_id
         self._apply_targets(gfxlogic.preset_targets(preset_id))
 
     def _apply_targets(self, targets):
@@ -301,10 +355,25 @@ class Graphics(QObject):
         for pid, _, _ in gfxlogic.PRESETS:
             preset = gfxlogic.FULL_PRESETS.get(pid, {})
             result.append({'id': pid, 'label': self.t('gfx_preset_' + pid),
-                           'what': self.t('gfx_preset_%s_what' % pid),
+                           'what': self.t('gfx_preset_%s_what' % pid), 'fit': self._fit_text(pid),
                            'credit': preset.get('credit', ''), 'creditUrl': preset.get('credit_url', ''),
                            'active': pid == current, 'standard': pid == gfxlogic.DEFAULT_PRESET})
         return result
+
+    def _fit_text(self, pid):
+        """One line under a tuned preset: the PC it is fitted to and what was lightened, '' otherwise."""
+        if pid not in gfxlogic.TUNED_IDS:
+            return ''
+        hw = gfxlogic.HARDWARE
+        parts = []
+        if hw['vram_mb']:
+            parts.append(self.t('gfx_fit_vram', gb=f"{hw['vram_mb'] / 1024:.0f}"))
+        if hw['ram_mb']:
+            parts.append(self.t('gfx_fit_ram', gb=f"{hw['ram_mb'] / 1024:.0f}"))
+        head = self.t('gfx_fit_pc', what=', '.join(parts)) if parts else self.t('gfx_fit_pc_unknown')
+        changes = gfxlogic.fit_notes(pid)
+        tail = ', '.join(self.t('gfx_fit_' + key) for key in changes) if changes else self.t('gfx_fit_full')
+        return f'{head}: {tail}.'
 
     def _imported_name(self):
         """The profile name of the imported file while the options still equal it."""
@@ -322,6 +391,173 @@ class Graphics(QObject):
             return self.t('gfx_preset_now', name=self.t('gfx_preset_' + current))
         name = self._imported_name()
         return self.t('ps_profile_imported', name=name) if name else self.t('gfx_preset_custom')
+
+    # -- your last session: what held the frame rate back (2026-11-24) ---------------------------------
+    def _perf_report(self):
+        """perf_report.read of the newest game log; read again only when the log changed."""
+        if 'perf' in self.probes:
+            return self.probes['perf']()
+        log = perf_report.latest_log(tlg_run.LOG_DIR)
+        try:
+            stamp = (str(log), log.stat().st_mtime_ns) if log else None
+        except OSError:
+            stamp = None
+        if stamp != getattr(self, '_perf_stamp', 0):
+            self._perf_stamp = stamp
+            self._perf_cache = perf_report.read(log) if log else None
+        return self._perf_cache
+
+    def _perf_log(self):
+        """The newest log's path (the session being described), '' without one."""
+        if 'perf_log' in self.probes:
+            return self.probes['perf_log']()
+        stamp = getattr(self, '_perf_stamp', None)
+        return stamp[0] if stamp else ''
+
+    def _perf(self):
+        """(key, values) of perf_report.verdict for the newest game log."""
+        return perf_report.verdict(self._perf_report())
+
+    @Property(str, notify=changed)
+    def perfNotes(self):
+        """Hitches, video memory nearly full, settings changed mid-session: one short sentence each."""
+        return ' '.join(self.t('gfx_perf_note_' + key, **values)
+                        for key, values in perf_report.notes(self._perf_report()))
+
+    @Property(str, notify=changed)
+    def perfCompare(self):
+        """After an Apply, the next session against the one before it; '' until there is one."""
+        record = self.settings.get('perf_last_apply')
+        report = self._perf_report()
+        after = perf_report.summary(report)
+        if not isinstance(record, dict) or not after or self._perf_log() in ('', record.get('log')):
+            return ''
+        if perf_report.verdict(report)[0] in ('none', 'classic', 'short'):
+            return ''
+        before = record.get('before') or {}
+        base_id = record.get('base') or ''
+        base = self.t('gfx_preset_' + base_id) if base_id else self.t('gfx_perf_your_setup')
+        text = self.t('gfx_perf_compare', base=base, before=before.get('fps', '?'), after=after['fps'])
+        if before.get('p99_ms') and after.get('p99_ms'):
+            text += ' ' + self.t('gfx_perf_compare_p99', before=before['p99_ms'], after=after['p99_ms'])
+        return text
+
+    @Property(str, notify=changed)
+    def perfText(self):
+        """One plain sentence about the last play session, '' when there is nothing to say."""
+        key, values = self._perf()
+        if key in ('none', 'classic'):
+            return ''
+        values = dict(values)
+        # With the card's own time per frame (GPU_FRAME_MS, 2026-11-24 builds) the verdict is measured.
+        sure = values.pop('sure', False) and key in ('gpu', 'cpu')
+        return self.t('gfx_perf_' + key + ('_sure' if sure else ''), **values)
+
+    @Property(str, notify=changed)
+    def perfTone(self):
+        """good: room to spare; warn: a part of the PC held it back; '' : nothing measured yet."""
+        key, _ = self._perf()
+        return {'limit': 'good', 'ceiling': 'good', 'gpu': 'warn', 'cpu': 'warn'}.get(key, '')
+
+    @Slot()
+    def refreshPerf(self):
+        """The Graphics tab calls this when it is shown: a session may have ended since."""
+        self.changed.emit()
+
+    # LOD distance steps the suggestions move along (the menu's own range is 0.25-4).
+    LOD_STEPS = (1.0, 1.25, 1.5, 2.0, 3.0, 4.0)
+    FPS_CAPS = (30, 60, 120, 240)
+
+    def _value(self, rid):
+        item = gfxlogic.item_by_id(rid)
+        state = self.backend.fix_states.get(rid)
+        return item.default if state is None else state
+
+    def _suggestions(self):
+        """[(row id, new value)] that answer the last session's verdict, from the current setup:
+        less work when the graphics card or the processor held it back, more detail when the PC had
+        room to spare. The frame rate cap moves only for the processor (steadier motion)."""
+        key, values = self._perf()
+        if key not in ('gpu', 'cpu', 'limit', 'ceiling'):
+            return []
+        changes = []
+        lod = float(self._value('menu:lod_scale'))
+        floor = int(float(self._value('menu:quality_floor')))
+        vram_full = bool((self._perf_report() or {}).get('vram_full'))
+        if vram_full or key in ('gpu', 'cpu'):
+            # Video memory nearly full: fewer detailed models even when the frame rate had room.
+            lower = [s for s in self.LOD_STEPS if s < lod - 1e-6]
+            if lower:
+                changes.append(('menu:lod_scale', f'{lower[-1]:g}'))
+            if floor < 12 and key in ('gpu', 'cpu'):
+                changes.append(('menu:quality_floor', str(min(12, floor + 2))))
+            if key == 'cpu':
+                cap = int(self._value('menu:fps_limit') or 0)
+                fits = [c for c in self.FPS_CAPS if c <= values.get('fps', 0) * 0.95 and (cap == 0 or c < cap)]
+                if fits:
+                    changes.append(('menu:fps_limit', str(fits[-1])))
+        else:
+            higher = [s for s in self.LOD_STEPS if s > lod + 1e-6 and s <= 2.0]
+            if higher:
+                changes.append(('menu:lod_scale', f'{higher[0]:g}'))
+            if floor > 0:
+                changes.append(('menu:quality_floor', '0'))
+        return changes
+
+    def _shown(self, rid, value):
+        if rid == 'menu:fps_limit' and str(value) == '0':
+            return self.t('gfx_perf_unlimited')
+        return f'{float(value):g}x' if rid == 'menu:lod_scale' else str(value)
+
+    @Property(bool, notify=changed)
+    def perfCanApply(self):
+        """A suggestion exists for the newest session and was not applied yet."""
+        return bool(self._suggestions()) and getattr(self, '_perf_applied', None) != getattr(self, '_perf_stamp', 0)
+
+    @Property(str, notify=changed)
+    def perfMessage(self):
+        return getattr(self, '_perf_msg', '')
+
+    def _change_lines(self, changes):
+        return [self.t('gfx_perf_change', name=self.t_pair(gfxlogic.item_by_id(rid).name),
+                       old=self._shown(rid, self._value(rid)), new=self._shown(rid, value))
+                for rid, value in changes]
+
+    @Property(str, notify=changed)
+    def perfPlan(self):
+        """What "Apply" would change, shown before the click; '' when nothing would."""
+        if not self.perfCanApply:
+            return ''
+        return self.t('gfx_perf_plan', changes='; '.join(self._change_lines(self._suggestions())))
+
+    @Slot()
+    def applyPerfSuggestions(self):
+        """Saves the current setup plus the suggestions as Renderer V2 - Custom Personal Graphics, selects
+        it and says what changed. The preset that was selected is left as it was."""
+        changes = self._suggestions()
+        if not changes:
+            return
+        current = gfxlogic.matching_preset(self.settings, self.backend.fix_states)
+        base = self.t('gfx_preset_' + current) if current else self.t('gfx_perf_your_setup')
+        # The personal preset starts from exactly what is set now; each change below is remembered too.
+        self.settings['graphics_mode'] = gfxlogic.PERSONAL_ID
+        gfxlogic.remember_personal(self.settings, self.backend.fix_states)
+        tlg_run.save_settings(self.settings)
+        lines = self._change_lines(changes)
+        for rid, value in changes:
+            self.setValue(rid, value)
+        gfxlogic.remember_personal(self.settings, self.backend.fix_states)
+        # Kept to compare the next session with this one (perfCompare).
+        self.settings['perf_last_apply'] = {'log': self._perf_log(), 'base': current or '',
+                                            'before': perf_report.summary(self._perf_report())}
+        tlg_run.save_settings(self.settings)
+        self._perf_applied = getattr(self, '_perf_stamp', 0)
+        self._perf_msg = self.t('gfx_perf_applied', base=base, changes='; '.join(lines))
+        self.rebuild()
+        self.changed.emit()
+
+    def t_pair(self, pair):
+        return self.backend.t_.pair(pair)
 
     # -- share: export and import a configuration file -------------------------------------------------------
     @Property(str, notify=changed)
@@ -390,6 +626,7 @@ class Graphics(QObject):
     def _apply_imported(self, preset, count):
         targets = gfxlogic.custom_targets(preset)
         self._imported = (preset['profile'], targets)
+        self.settings['graphics_mode'] = 'imported'     # an imported file is not the personal preset
         self._apply_targets(targets)
         self._share_msg, self._share_tone = self.t('ps_imported', name=preset['profile'], n=count), 'good'
         self.changed.emit()
@@ -558,6 +795,49 @@ class Graphics(QObject):
             self.dlssFinished.emit(result)
         threading.Thread(target=work, daemon=True).start()
         self.changed.emit()
+
+    @Slot()
+    def autoDlss(self):
+        """The upscaler was set to NVIDIA DLSS: fetch at once whatever is missing (NVIDIA's DLL from NVIDIA's
+        GitHub, the port's bridge from the port's GitHub releases), no button to press."""
+        if self._dlss_busy:
+            return
+        self._dlss_confirm, self._dlss_busy = False, True
+        self._dlss_cancel.clear()
+        self._dlss_done = self._dlss_total = 0
+        self._dlss_msg, self._dlss_tone = self.t('dlss_auto_working'), 'info'
+        target, configured, user = self._dlss_target(), self._dlss_configured(), tlg_run.user_dir()
+        probes = self.probes
+
+        def work():
+            problems = []
+            try:
+                state = probes['dlss_status']() if 'dlss_status' in probes else dlss_setup.status(
+                    user, configured, tlg_run.V2_PROBE.parent)
+                steps = []
+                if not state['dll'].ok:
+                    steps.append(probes.get('dlss_download', dlss_setup.download))
+                if not state['bridge'].ok:
+                    steps.append(probes.get('dlss_bridge_download', dlss_setup.download_bridge))
+                for step in steps:
+                    try:
+                        step(target, progress=self.dlssProgressed.emit, cancel=self._dlss_cancel)
+                    except dlss_setup.DlssError as error:
+                        problems.append(self.t('dlss_err_' + error.key, detail=error.detail))
+            except Exception as error:      # never leave the screen stuck on "downloading"
+                problems.append(self.t('dlss_err_network', detail=error))
+            self.dlssAutoDone.emit(problems)
+        threading.Thread(target=work, daemon=True).start()
+        self.changed.emit()
+
+    def _on_dlss_auto_done(self, problems):
+        self._dlss_busy = False
+        if problems:
+            self._dlss_msg, self._dlss_tone = self.t('dlss_auto_partial', detail=' '.join(problems)), 'bad'
+        else:
+            self._dlss_msg, self._dlss_tone = self.t('dlss_auto_ready'), 'good'
+        self.changed.emit()
+        self._check_dlss()
 
     @Slot()
     def cancelDlssDownload(self):

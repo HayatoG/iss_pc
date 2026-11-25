@@ -419,8 +419,8 @@ class ScreenFlowTests(unittest.TestCase):
         self.updates.check()
         self.pump(lambda: not self.updates.checking)
         self.assertTrue(self.updates.canInstall)
-        self.updates.install()
-        self.assertTrue(self.updates.dialog['open'])
+        self.updates.install()     # rechecks the release first (2026-11-23), then Linux asks as before
+        self.pump(lambda: self.updates.dialog.get('open'))
         self.assertEqual(len(self.updates.probes['opener'].calls), 0)   # nothing downloaded before the yes
         self.updates.answer('yes')
         self.pump(lambda: self.updates.dialog.get('open'))
@@ -441,9 +441,10 @@ class ScreenFlowTests(unittest.TestCase):
             f'{"0" * 64}  infamous-linux-x86_64.tar.gz\n'.encode()
         self.updates.check()
         self.pump(lambda: not self.updates.checking)
-        self.updates.install()
+        self.updates.install()     # rechecks the release first (2026-11-23), then Linux asks as before
+        self.pump(lambda: self.updates.dialog.get('open'))
         self.updates.answer('yes')
-        self.pump(lambda: not self.updates.busy)
+        self.pump(lambda: not self.updates.busy and 'checksum' in self.updates.statusText)
         self.assertIn('checksum', self.updates.statusText)
         self.assertFalse(self.updates.dialog)
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), ['infamous-linux-x86_64'])

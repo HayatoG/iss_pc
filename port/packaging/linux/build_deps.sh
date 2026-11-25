@@ -10,7 +10,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cd "$work"
 
-fetch() { # url dir
+fetch() { # url dir [sha256]
     local archive="$work/$2-download.tar.gz"
     mkdir -p "$2"
     # Download completely before extracting; a reset must not leave a partial tree.
@@ -23,8 +23,19 @@ fetch() { # url dir
             return 1
         fi
     fi
+    if [[ -n ${3:-} ]]; then
+        printf '%s  %s\n' "$3" "$archive" | sha256sum -c -
+    fi
     tar -xzf "$archive" -C "$2" --strip-components=1
 }
+
+# The DualSense Bluetooth encoder needs the restricted CELT mode in Opus 1.6.
+fetch https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz opus \
+    6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+cmake -S opus -B opus/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DOPUS_BUILD_SHARED_LIBRARY=ON
+ninja -C opus/build install
+install -Dm644 opus/COPYING "$PREFIX/share/licenses/opus/COPYING"
 
 fetch https://github.com/libsdl-org/SDL/releases/download/release-3.2.24/SDL3-3.2.24.tar.gz sdl
 cmake -S sdl -B sdl/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" \

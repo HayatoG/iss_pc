@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <thread>
@@ -159,6 +160,11 @@ struct AotCompute {
     std::vector<Result> ready;
     std::atomic<u32> num_ready{0};
     std::atomic<u64> compiled{0}, failed{0}, known{0}, adopted{0}, dropped{0}, stateful{0};
+    /// Entries whose code no longer matches the game files (2026-11-15): skipped; the index made
+    /// by the port (ISS_AOT_COMPUTE=auto) is then removed so the next start builds it again.
+    std::atomic<u64> stale{0};
+    std::atomic<bool> stale_reported{false};
+    std::string auto_index_path; ///< empty unless the index is the port's own (auto)
     std::array<std::atomic<u64>, 5> why{}; // stateful: images, samplers, fmasks, formatted, unknown V#
     std::atomic<u64> translate_ns{0}, pipeline_ns{0};
     std::atomic<u32> running{0};
@@ -1387,8 +1393,25 @@ PipelineCache::~PipelineCache() {
 // not fit (an image of another type, a formatted buffer...) gets its own permutation, as before.
 // ---------------------------------------------------------------------------------------------
 } // namespace Vulkan
+#ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
+#endif
+namespace iss::shader_swap {
+std::string ExeDirectory() {
+#ifdef _WIN32
+    char path[MAX_PATH]{};
+    const DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+    std::string dir(path, n);
+    const size_t slash = dir.find_last_of("\\/");
+    return slash == std::string::npos ? std::string{"."} : dir.substr(0, slash);
+#else
+    std::error_code error;
+    const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
+    return error ? "." : executable.parent_path().string();
+#endif
+}
+} // namespace iss::shader_swap
 namespace Vulkan {
 /// ISS_AOT_TRACE=1: names the module and offset of an access violation before the probe's
 /// handler ends the process.
@@ -1646,6 +1669,7 @@ void PipelineCache::StartAotCompute(const char* index_value) {
     }
     auto state = std::make_unique<AotCompute>();
     state->device = instance.GetDevice();
+    if (index_value && std::string_view{index_value} == "auto") state->auto_index_path = index_string;
     u32 count;
     std::memcpy(&count, bytes.data() + 8, 4);
     size_t at = 12;
@@ -1745,6 +1769,40 @@ void PipelineCache::StartAotCompute(const char* index_value) {
                     s->failed.fetch_add(1, std::memory_order_relaxed);
                     s->state[i].store(4, std::memory_order_relaxed);
                     continue;
+                }
+                // The code must still be this shader (2026-11-15): an index made before the game
+                // files changed (an update copied over the folder) points at other bytes, which the
+                // recompiler crashed on (First Light 1.04 report: "First instruction is not
+                // s_mov_b32 vcc_hi", illegal encodings, then an access violation). A shader starts
+                // with s_mov_b32 vcc_hi (0xBEEB03FF) and its second word k-1 leads to its
+                // "OrbShdr" header k*8 bytes after the start, which holds the hash at +16.
+                {
+                    bool same = e.dwords >= 2 && code[0] == 0xBEEB03FFu && code[1] < (1u << 20);
+                    if (same) {
+                        char header[24]{};
+                        u64 hash{};
+                        same = _fseeki64(pack, s64(e.offset) + s64(code[1] + 1) * 8, SEEK_SET) == 0 &&
+                               std::fread(header, 1, sizeof(header), pack) == sizeof(header) &&
+                               std::memcmp(header, "OrbShdr", 7) == 0 &&
+                               (std::memcpy(&hash, header + 16, 8), hash == e.hash);
+                    }
+                    if (!same) {
+                        s->stale.fetch_add(1, std::memory_order_relaxed);
+                        s->failed.fetch_add(1, std::memory_order_relaxed);
+                        s->state[i].store(4, std::memory_order_relaxed);
+                        if (!s->stale_reported.exchange(true)) {
+                            std::error_code ec;
+                            const bool removed = !s->auto_index_path.empty() &&
+                                                 std::filesystem::remove(s->auto_index_path, ec);
+                            std::fprintf(stderr,
+                                         "AOT_COMPUTE index out of date: shader %llx does not match %s "
+                                         "(game files changed since it was made); such shaders are "
+                                         "skipped%s\n",
+                                         (unsigned long long)e.hash, e.path.c_str(),
+                                         removed ? ", the index is removed and made again next start" : "");
+                        }
+                        continue;
+                    }
                 }
                 AmdGpu::ComputeProgram cs{};
                 const u32 settings[2] = {e.rsrc1, e.rsrc2};
@@ -2292,11 +2350,12 @@ void PipelineCache::DrainAot() {
             s->reported = true;
             std::fprintf(stderr,
                          "AOT_COMPUTE done in %.1f s: compiled=%llu adopted=%llu dropped=%llu "
-                         "failed=%llu stateful=%llu cached_or_reached=%llu translate=%.1f ms "
-                         "pipeline=%.1f ms avg\n",
+                         "failed=%llu (out of date %llu) stateful=%llu cached_or_reached=%llu "
+                         "translate=%.1f ms pipeline=%.1f ms avg\n",
                          double(Common::Perf::NowNs() - s->start_ns) / 1e9,
                          (unsigned long long)s->compiled.load(), (unsigned long long)s->adopted.load(),
                          (unsigned long long)s->dropped.load(), (unsigned long long)s->failed.load(),
+                         (unsigned long long)s->stale.load(),
                          (unsigned long long)s->stateful.load(), (unsigned long long)s->known.load(),
                          s->translate_ns.load() / 1e6 / std::max<u64>(1, s->compiled.load()),
                          s->pipeline_ns.load() / 1e6 / std::max<u64>(1, s->compiled.load()));

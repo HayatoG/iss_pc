@@ -14,6 +14,6 @@ Rectangle {
     border.width: 1
     border.color: Qt.rgba(toneColor.r, toneColor.g, toneColor.b, 0.45)
     Text { id: t; anchors.centerIn: parent; text: root.text; color: root.toneColor
-           font.family: Theme.fontText; font.pixelSize: 11; font.weight: Font.Bold
+           font.family: Theme.fontText; font.pixelSize: 12; font.weight: Font.Bold
            font.capitalization: Font.AllUppercase; font.letterSpacing: 0.6 }
 }

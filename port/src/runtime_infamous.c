@@ -30,12 +30,23 @@ static ABI int32_t netctl_init(void) { once("sceNetCtlInit"); return 0; }
 static ABI int32_t playgo_eta(int32_t handle, const uint16_t *chunks, uint32_t count, uint64_t *eta) {
     (void)handle; (void)chunks; (void)count;
     if (eta) *eta = 0;
+    const char *t = getenv("TLG_PLAYGO_TRACE");
+    static int logged;
+    if (t && t[0] == '1' && logged++ < 50) {
+        printf("PLAYGO GetEta handle %d count %u ids", handle, count);
+        for (uint32_t i = 0; chunks && i < count && i < 16; ++i) printf(" %u", chunks[i]);
+        printf(" -> 0 (eta 0)\n");
+        fflush(stdout);
+    }
     return 0;
 }
 /* scePlayGoGetToDoList(handle, list, count, out_entries): no pending chunk. */
 static ABI int32_t playgo_todo(int32_t handle, void *list, uint32_t count, uint32_t *entries) {
     (void)handle; (void)list; (void)count;
     if (entries) *entries = 0;
+    const char *t = getenv("TLG_PLAYGO_TRACE");
+    static int logged;
+    if (t && t[0] == '1' && logged++ < 50) { printf("PLAYGO GetToDoList handle %d count %u -> 0 entries\n", handle, count); fflush(stdout); }
     return 0;
 }
 static ABI int32_t playgo_language_mask(int32_t handle, uint64_t mask) {

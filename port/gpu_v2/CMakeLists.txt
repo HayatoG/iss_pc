@@ -326,5 +326,30 @@ if (WIN32)
     target_include_directories(tlg-probe-v2 PRIVATE ${RT} ${RT}/src)
     pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
     target_link_libraries(tlg-probe-v2 PRIVATE issgpu atrac9_v2 PkgConfig::FREETYPE onecore bcrypt ws2_32 -pthread)
+    # Bluetooth DualSense speaker prototype (src/dualsense_bt_sink.h, off unless
+    # ISS_PAD_SPEAKER_BLUETOOTH=1): static libopus, so no extra DLL ships. Without it the
+    # feature is compiled out and the game reports that once.
+    find_library(ISS_OPUS_STATIC NAMES libopus.a)
+    find_path(ISS_OPUS_INCLUDE opus/opus.h)
+    if (ISS_OPUS_STATIC AND ISS_OPUS_INCLUDE)
+        target_compile_definitions(tlg-probe-v2 PRIVATE ISS_HAVE_OPUS)
+        target_include_directories(tlg-probe-v2 PRIVATE ${ISS_OPUS_INCLUDE})
+        target_link_libraries(tlg-probe-v2 PRIVATE ${ISS_OPUS_STATIC})
+    endif()
+    # DualShock 4 speaker over Bluetooth (src/controller_ds4_bluetooth.h, 2026-11-06): BlueZ libsbc
+    # (LGPL-2.1+, tested 2.2 from MSYS2's mingw-w64-x86_64-sbc), linked statically. ISS_SBC_ROOT holds
+    # include/sbc/sbc.h and lib/libsbc.a (default: <work>/deps/sbc). Without it the DS4 Bluetooth
+    # speaker is compiled out; USB DS4 and the DualSense routes still work.
+    set(ISS_SBC_ROOT "${CMAKE_SOURCE_DIR}/../../../deps/sbc" CACHE PATH "libsbc include/ and lib/ folder")
+    find_path(ISS_SBC_INCLUDE sbc/sbc.h HINTS ${ISS_SBC_ROOT}/include)
+    find_library(ISS_SBC_STATIC NAMES libsbc.a HINTS ${ISS_SBC_ROOT}/lib)
+    if (ISS_SBC_STATIC AND ISS_SBC_INCLUDE)
+        target_compile_definitions(tlg-probe-v2 PRIVATE ISS_DS4_BLUETOOTH)
+        target_include_directories(tlg-probe-v2 PRIVATE ${ISS_SBC_INCLUDE})
+        target_link_libraries(tlg-probe-v2 PRIVATE ${ISS_SBC_STATIC})
+        message(STATUS "DualShock 4 Bluetooth speaker: libsbc ${ISS_SBC_STATIC}")
+    else()
+        message(STATUS "DualShock 4 Bluetooth speaker: libsbc not found, compiled out")
+    endif()
     target_link_options(tlg-probe-v2 PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
 endif()

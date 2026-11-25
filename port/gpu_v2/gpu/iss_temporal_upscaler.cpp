@@ -1335,16 +1335,18 @@ vk::ImageView Upscaler::Impl::RecordDisplayCopy(vk::CommandBuffer cmd, const Dis
     };
     cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_dst});
     RecordMemoryBarrier(cmd);
-    const vk::ImageBlit region{
+    // A plain copy (2026-11-22): same format and size, so it equals the nearest-filter blit used
+    // before, without needing the format's blit support. The blit crashed inside AMD's driver on an
+    // AMD Radeon integrated GPU (amdvlk64.dll null read, player log run-20261121-231355, temporal
+    // upscaling 50%); NVIDIA accepted it.
+    const vk::ImageCopy region{
         .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .srcOffsets = std::array<vk::Offset3D, 2>{
-            vk::Offset3D{0, 0, 0}, vk::Offset3D{static_cast<s32>(display.width), static_cast<s32>(display.height), 1}},
+        .srcOffset = {0, 0, 0},
         .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .dstOffsets = std::array<vk::Offset3D, 2>{
-            vk::Offset3D{0, 0, 0}, vk::Offset3D{static_cast<s32>(display.width), static_cast<s32>(display.height), 1}},
+        .dstOffset = {0, 0, 0},
+        .extent = {display.width, display.height, 1},
     };
-    cmd.blitImage(src, vk::ImageLayout::eGeneral, dst, vk::ImageLayout::eTransferDstOptimal, region,
-                  vk::Filter::eNearest);
+    cmd.copyImage(src, vk::ImageLayout::eGeneral, dst, vk::ImageLayout::eTransferDstOptimal, region);
     const vk::ImageMemoryBarrier2 to_read{
         .srcStageMask = vk::PipelineStageFlagBits2::eAllTransfer,
         .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,

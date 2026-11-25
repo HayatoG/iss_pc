@@ -2,7 +2,7 @@ import QtQuick
 import Launcher
 
 // One save slot: thumbnail (icon0.png of the player's own save, read at run time), title, date, size, actions.
-Rectangle {
+PolishCard {
     id: card
     property var d: ({})
     signal exportRequested(string slotId)
@@ -24,13 +24,13 @@ Rectangle {
         Row {
             spacing: 10
             Tag { text: d.kindText || ""; tone: d.kind === "auto" ? "info" : "good" }
-            Text { text: d.slot || ""; color: Theme.textFaint; font.family: Theme.fontText; font.pixelSize: 12
+            Text { text: d.slot || ""; color: Theme.textFaint; font.family: Theme.fontText; font.pixelSize: 13
                    anchors.verticalCenter: parent.verticalCenter }
         }
         Text { width: parent.width; text: d.title || ""; color: "#fff"; elide: Text.ElideRight
                font.family: Theme.fontText; font.pixelSize: 17; font.weight: Font.DemiBold }
         Text { width: parent.width; text: (d.when || "") + "  ·  " + (d.size || ""); color: Theme.textDim
-               font.family: Theme.fontText; font.pixelSize: 13; elide: Text.ElideRight }
+               font.family: Theme.fontText; font.pixelSize: 14; elide: Text.ElideRight }
         Row {
             spacing: 8; topPadding: 4
             GhostButton { compact: true; text: Theme.tr("saves_export"); onClicked: card.exportRequested(d.id) }

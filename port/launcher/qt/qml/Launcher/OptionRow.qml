@@ -19,7 +19,7 @@ Item {
         text: d.title || ""; accent: row.accent
     }
 
-    Rectangle {
+    PolishCard {
         id: card
         visible: !row.isHeader
         y: 4; width: parent.width; radius: 12
@@ -27,20 +27,21 @@ Item {
         color: Theme.card
         border.width: 1; border.color: d.changed ? Qt.rgba(row.accent.r, row.accent.g, row.accent.b, 0.7) : Theme.cardLine
         opacity: d.disabled ? 0.45 : 1
+        FocusHalo { }
         Column {
             id: info
             x: 18; y: 14; width: parent.width - 36 - 264; spacing: 5
-            Text { text: d.label || ""; color: Theme.text; font.family: Theme.fontText; font.pixelSize: 15; font.weight: Font.DemiBold }
+            Text { text: d.label || ""; color: Theme.text; font.family: Theme.fontText; font.pixelSize: 16; font.weight: Font.DemiBold }
             Flow {
                 width: parent.width; spacing: 6
                 Repeater { model: d.tags || []; Tag { text: modelData.text; tone: modelData.tone } }
             }
             Text { width: parent.width; text: d.what || ""; wrapMode: Text.WordWrap; color: Theme.textDim
-                   font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
+                   font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
             Text { visible: !!d.info; width: parent.width; text: d.info || ""; wrapMode: Text.WordWrap; color: Theme.textSoft
-                   font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.DemiBold }
+                   font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.DemiBold }
             Text { visible: !!d.note; width: parent.width; text: d.note || ""; wrapMode: Text.WordWrap; color: Theme.warn
-                   font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
+                   font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
             GhostButton { visible: !!d.action; compact: true; text: d.action ? d.action.label : ""
                           onClicked: row.actionTriggered(d.id, d.action.id) }
         }
@@ -50,6 +51,7 @@ Item {
             anchors.right: parent.right; anchors.rightMargin: 20; anchors.verticalCenter: parent.verticalCenter
             width: 232; height: 36
             Toggle {
+                controllerFocusTarget: card
                 visible: d.control === "switch"
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                 accent: row.accent
@@ -57,6 +59,7 @@ Item {
                 onToggled: (v) => row.valueSet(d.id, v ? "1" : "0")
             }
             Select {
+                controllerFocusTarget: card
                 visible: d.control === "combo"
                 accent: row.accent
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
@@ -70,6 +73,7 @@ Item {
                 anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
                 spacing: 10
                 LevelSlider {
+                    controllerFocusTarget: card
                     id: slide
                     anchors.verticalCenter: parent.verticalCenter
                     accent: row.accent
@@ -81,8 +85,8 @@ Item {
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     width: 72; horizontalAlignment: Text.AlignRight
-                    text: slide.pressed ? slide.value.toFixed(d.decimals || 0) + (d.unit ? (d.unit === "MB" ? " " : "") + d.unit : "") : (d.valueText || "")
-                    color: Theme.text; font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.DemiBold
+                    text: slide.controllerEditing ? slide.controllerDraft.toFixed(d.decimals || 0) + (d.unit ? " " + d.unit : "") : slide.pressed ? slide.value.toFixed(d.decimals || 0) + (d.unit ? (d.unit === "MB" ? " " : "") + d.unit : "") : (d.valueText || "")
+                    color: Theme.text; font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.DemiBold
                     elide: Text.ElideLeft
                 }
             }

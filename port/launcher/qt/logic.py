@@ -113,7 +113,7 @@ _GROUP_OF = {
 
 def fix_items():
     """BPnn and A/B rows (the in-game menu options are not part of this screen)."""
-    return [i for i in backports_table.ITEMS if i.group in ('bp', 'ab')]
+    return [i for i in backports_table.ITEMS if i.group in ('bp', 'ab') and not i.hidden]
 
 
 def group_of(item):
@@ -228,6 +228,14 @@ def game_problem_text(t, problems):
     return t(key, detail=detail) if key in tlg_run.TEXT else detail
 
 
+def game_version_text(folder):
+    """'1.07 · CUSA00223' from the game folder's param.sfo (APP_VER, TITLE_ID); '?' for what it cannot read."""
+    version = tlg_run.mod_patches.game_app_version(folder) if folder else None
+    if version and version[:1] == '0':
+        version = version[1:]
+    return f"{version or '?'} · {tlg_run.game_title(folder) or '?'}"
+
+
 def game_state(settings, problems=None):
     """('none'|'ok'|'bad', problems without 'not_built', port_built)."""
     folder = settings.get('game_dir') or ''
@@ -257,26 +265,18 @@ def compute_chips(settings, t, gpu='checking', pad=None, problems=None, states=N
     elif state == 'bad':
         chips.append((t('chip_game_bad', problem=game_problem_text(t, tlg_run.blocking(game_problems))), 'bad'))
     else:
-        chips.append((t('chip_game_ok', version='1.07'), 'ok'))
+        # Warnings (game starts, something is off) show in yellow with a short text; otherwise the
+        # update and edition read from the folder's param.sfo, not a fixed "1.07".
+        warnings = [p for p in game_problems if p[0] in tlg_run.WARNINGS]
+        if warnings:
+            key, detail = warnings[0]
+            chips.append((t('chip_game_warn_' + key, detail=detail), 'warn'))
+        else:
+            chips.append((t('chip_game_ok', version=game_version_text(settings.get('game_dir') or '')), 'ok'))
     if not built:
         chips.append((t('chip_port_missing'), 'bad'))
-    states = tlg_run.experimental_states(settings) if states is None else states
-    n = backports_table.changes(states)
-    chips.append((t('chip_profile_rec') if n == 0 else t('chip_profile_custom', n=n), 'ok' if n == 0 else 'warn'))
-    if cache_bytes is None and not measure_cache:
-        chips.append((t('chip_cache_checking'), 'ok'))
-    elif cache_bytes is None:
-        try:
-            cache_bytes = tlg_run.shader_cache_size(settings)
-        except Exception:
-            cache_bytes = 0
-    if cache_bytes is None:
-        pass
-    elif cache_bytes:
-        chips.append((t('chip_cache', size=shader_cache.human_size(cache_bytes)), 'warn' if cache_bytes > 2 ** 30 else 'ok'))
-    else:
-        chips.append((t('chip_cache_empty'), 'ok'))
-    chips.append((t('chip_pad', name=pad) if pad else t('chip_pad_none'), 'ok' if pad else 'off'))
+    # 2026-11-22: the profile and shader cache chips are gone (they told the player nothing to act on);
+    # the detected controller shows on the Controller guides page instead.
     ready = state == 'ok' and built
     return [{'text': text, 'level': level} for text, level in chips], ready
 

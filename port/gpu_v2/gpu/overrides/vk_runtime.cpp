@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "common/perf_stats.h"
@@ -35,6 +36,63 @@ bool BarrierPool() {
     }();
     return enabled;
 }
+
+// ISS_BARRIER_TRACE=1 (diagnostics, off by default): which code flushes barriers, how often, and
+// how many flushes only happened because a write hit the unified heap, whose reads are not
+// tracked (IsBufferAccessed then always reports a hazard). Reported every 5 s; callers are
+// offsets in the executable (symbolize like ISS_PASS_BREAK_TRACE).
+struct BarrierTrace {
+    u64 flushes{}, memory{}, image_only{}, unified_forced{}, report_ns{};
+    bool pending_unified{};
+    std::unordered_map<u64, u64> callers;
+};
+bool BarrierTraceEnabled() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_BARRIER_TRACE");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
+BarrierTrace barrier_trace;
+
+// ISS_GUEST_SYNC_BARRIERS=1 (opt-in): see Runtime::FlushHazards.
+bool GuestSyncBarriers() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_GUEST_SYNC_BARRIERS");
+        const bool on = p && p[0] == '1';
+        std::fprintf(stderr, "PORT_TUNING guest_sync_barriers=%d\n", on ? 1 : 0);
+        return on;
+    }();
+    return enabled;
+}
+// ISS_GUEST_SYNC_IMAGES=1 (opt-in, with ISS_GUEST_SYNC_BARRIERS=1): an image barrier that keeps
+// the layout (only the access changes, e.g. a feedback-loop render target sampled by one draw and
+// drawn to by the next) becomes part of the pending memory barrier, so it waits for the guest's
+// synchronization like the buffer hazards. Layout changes and transfers keep their image barrier.
+bool GuestSyncImages() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_GUEST_SYNC_IMAGES");
+        const bool on = p && p[0] == '1' && GuestSyncBarriers();
+        std::fprintf(stderr, "PORT_TUNING guest_sync_images=%d\n", on ? 1 : 0);
+        return on;
+    }();
+    return enabled;
+}
+u64 guest_sync_folded{};
+struct GuestSyncStats {
+    u64 calls{}, sync{}, image{}, transfer{}, skipped{}, report_ns{};
+};
+GuestSyncStats guest_sync_stats;
+#ifdef _WIN32
+extern "C" char __ImageBase;
+u64 TraceImageBase() {
+    return reinterpret_cast<u64>(&__ImageBase);
+}
+#else
+u64 TraceImageBase() {
+    return 0;
+}
+#endif
 } // namespace
 
 bool Runtime::LazyReadList::Lazy() {
@@ -168,9 +226,80 @@ void Runtime::TickFrame() {
     staging_pool.TickFrame();
 }
 
-void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
-                         std::span<const vk::BufferCopy> copies) {
+[[gnu::noinline]] void Runtime::CopyBuffer(const VideoCore::Buffer* src,
+                                           const VideoCore::Buffer* dst,
+                                           std::span<const vk::BufferCopy> copies) {
     AssertCpRecordingLane();
+    // ISS_COPY_TRACE=1 (diagnostics, off by default): which code copies buffers while a render
+    // pass is open (each one ends the pass). Reported every 5 s, callers as executable offsets.
+    static const char copy_trace_mode = [] {
+        const char* p = std::getenv("ISS_COPY_TRACE");
+        return p && (p[0] == '1' || p[0] == '2') ? p[0] : '0';
+    }();
+    const bool copy_trace = copy_trace_mode == '1';
+    // ISS_COPY_TRACE=2 (diagnostics): every copy by caller and source memory type, with bytes.
+    if (copy_trace_mode == '2') {
+        struct Entry { u64 copies{}, bytes{}, largest{}; };
+        static std::unordered_map<u64, Entry> callers;
+        static u64 report_ns{};
+        const u64 key = (reinterpret_cast<u64>(__builtin_return_address(0)) - TraceImageBase()) |
+                        (u64{static_cast<u32>(src->mem_type)} << 56) |
+                        (u64{static_cast<u32>(dst->mem_type)} << 60);
+        auto& entry = callers[key];
+        ++entry.copies;
+        for (const auto& copy : copies) {
+            entry.bytes += copy.size;
+            entry.largest = std::max<u64>(entry.largest, copy.size);
+        }
+        const u64 now = Common::Perf::NowNs();
+        if (now - report_ns >= 5'000'000'000ULL) {
+            const double seconds = report_ns ? double(now - report_ns) / 1e9 : 5.0;
+            std::vector<std::pair<u64, Entry>> top(callers.begin(), callers.end());
+            std::sort(top.begin(), top.end(),
+                      [](const auto& a, const auto& b) { return a.second.bytes > b.second.bytes; });
+            for (size_t i = 0; i < top.size() && i < 10; ++i) {
+                const auto& [k, e] = top[i];
+                std::fprintf(stderr,
+                             "COPY_TRACE2 caller=+0x%llx src_mem=%u dst_mem=%u %.0f copies/s %.1f MB/s "
+                             "largest %.1f KB\n",
+                             (unsigned long long)(k & ((u64{1} << 56) - 1)),
+                             unsigned((k >> 56) & 0xF), unsigned(k >> 60), e.copies / seconds,
+                             e.bytes / 1048576.0 / seconds, e.largest / 1024.0);
+            }
+            callers.clear();
+            report_ns = now;
+        }
+    }
+    if (copy_trace) {
+        static std::unordered_map<u64, std::pair<u64, u64>> callers;
+        static u64 total{}, in_pass{}, report_ns{};
+        ++total;
+        if (scheduler.IsRendering()) {
+            ++in_pass;
+            auto& entry =
+                callers[reinterpret_cast<u64>(__builtin_return_address(0)) - TraceImageBase()];
+            ++entry.first;
+            for (const auto& copy : copies) entry.second += copy.size;
+        }
+        const u64 now = Common::Perf::NowNs();
+        if (now - report_ns >= 5'000'000'000ULL) {
+            const double seconds = report_ns ? double(now - report_ns) / 1e9 : 5.0;
+            std::vector<std::pair<u64, std::pair<u64, u64>>> top(callers.begin(), callers.end());
+            std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+                return a.second.first > b.second.first;
+            });
+            std::fprintf(stderr, "COPY_TRACE copies/s=%.0f in_pass/s=%.0f image_base=0x%llx\n",
+                         total / seconds, in_pass / seconds, (unsigned long long)TraceImageBase());
+            for (size_t i = 0; i < top.size() && i < 8; ++i) {
+                std::fprintf(stderr, "COPY_TRACE caller=+0x%llx %.0f/s %.0f KB/s\n",
+                             (unsigned long long)top[i].first, top[i].second.first / seconds,
+                             top[i].second.second / 1024.0 / seconds);
+            }
+            callers.clear();
+            total = in_pass = 0;
+            report_ns = now;
+        }
+    }
     scheduler.EndRendering();
 
     bool needs_flush{};
@@ -268,6 +397,28 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
     const auto old_access = image->backing->state.access_mask;
     const bool was_partial = !image->backing->subresource_states.empty();
     image->GetBarriers(image_barriers, dst_layout, dst_access, dst_stage, subres_range);
+    const bool emitted = image_barriers.size() != prev_num_barriers;
+    if (emitted && GuestSyncImages()) {
+        constexpr vk::AccessFlags2 transfer_access =
+            vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite |
+            vk::AccessFlagBits2::eHostRead | vk::AccessFlagBits2::eHostWrite;
+        constexpr vk::AccessFlags2 write_access =
+            vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eColorAttachmentWrite |
+            vk::AccessFlagBits2::eDepthStencilAttachmentWrite | vk::AccessFlagBits2::eMemoryWrite;
+        size_t keep = prev_num_barriers;
+        for (size_t i = prev_num_barriers; i < image_barriers.size(); ++i) {
+            const auto& b = image_barriers[i];
+            if (b.oldLayout == b.newLayout && b.oldLayout != vk::ImageLayout::eUndefined &&
+                !((b.srcAccessMask | b.dstAccessMask) & transfer_access)) {
+                memory_barrier.srcStageMask |= b.srcStageMask;
+                memory_barrier.srcAccessMask |= b.srcAccessMask & write_access;
+                ++guest_sync_folded;
+            } else {
+                image_barriers[keep++] = b;
+            }
+        }
+        image_barriers.resize(keep);
+    }
     // ISS_BARRIER_LOG=1 (diagnosis): per guest frame, the image transitions that emitted
     // barriers, grouped by image shape and layout change; frames with over 1800 are printed.
     static const bool barrier_log = [] {
@@ -282,7 +433,17 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
         std::scoped_lock lock{log_mutex};
         const u64 frame = Common::Perf::GuestFrameCounter().load();
         if (frame != group_frame) {
-            if (frame_total > 1800 && printed.fetch_add(1) < 60) {
+            // ISS_BARRIER_LOG_MIN=<n>: print frames with more than n barriers (default 1800).
+            static const u64 log_min = [] {
+                const char* p = std::getenv("ISS_BARRIER_LOG_MIN");
+                return p && *p ? u64(std::strtoull(p, nullptr, 10)) : u64{1800};
+            }();
+            // ISS_BARRIER_LOG_SKIP=<n>: ignore the first n guest frames (loading screens).
+            static const u64 log_skip = [] {
+                const char* p = std::getenv("ISS_BARRIER_LOG_SKIP");
+                return p && *p ? u64(std::strtoull(p, nullptr, 10)) : u64{0};
+            }();
+            if (frame_total > log_min && group_frame > log_skip && printed.fetch_add(1) < 60) {
                 std::vector<std::pair<std::string, std::pair<u64, u64>>> top(groups.begin(),
                                                                              groups.end());
                 std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) {
@@ -315,7 +476,7 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
         ++g.first;
         g.second += emitted;
     }
-    if (image_barriers.size() != prev_num_barriers) {
+    if (emitted) {
         ++hazard_seq;
         // Compute phases: a pending image barrier is flushed by the next hazard.
         if (iss::phase::g_owner.load(std::memory_order_relaxed) == this) {
@@ -872,6 +1033,9 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
                                bool check_read_access) {
     if (handle == untracked_reads && check_read_access && handle) {
         // ISS_UNIFIED_MEMORY: its reads are not recorded; a write orders after all of them.
+        if (BarrierTraceEnabled()) {
+            barrier_trace.pending_unified = true;
+        }
         return true;
     }
     MakeCurrent(handle);
@@ -882,9 +1046,86 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
     return has_access;
 }
 
+namespace {
+/// UploadOverlapProbe state: last use tick per (buffer, 1 MB block), command processor thread.
+struct UploadOverlap {
+    static constexpr u64 BlockShift = 16; // 64 KB blocks (a 1 MB first run gave the same split)
+    std::unordered_map<u64, u64> last_use;
+    // Bytes and uploads by when the destination was last used: never, finished, submitted and
+    // still running, in the session being recorded (before or since the last barrier).
+    std::array<u64, 5> bytes{}, uploads{};
+    u64 report_ns{};
+    static u64 Key(const VideoCore::Buffer* handle, u64 block) {
+        return reinterpret_cast<u64>(handle) * 0x9E3779B97F4A7C15ull ^ block;
+    }
+};
+UploadOverlap& Overlap() {
+    static UploadOverlap state;
+    return state;
+}
+} // namespace
+
+bool Runtime::UploadOverlapProbe() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_UPLOAD_OVERLAP_PROBE");
+        return p && p[0] == '1';
+    }();
+    return enabled;
+}
+
+u64 Runtime::LastUseTick(const VideoCore::Buffer* handle, u64 offset, u64 size) const {
+    auto& o = Overlap();
+    u64 tick = 0;
+    if (size == 0) return 0;
+    for (u64 b = offset >> UploadOverlap::BlockShift; b <= (offset + size - 1) >> UploadOverlap::BlockShift; ++b) {
+        if (const auto it = o.last_use.find(UploadOverlap::Key(handle, b)); it != o.last_use.end()) {
+            tick = std::max(tick, it->second);
+        }
+    }
+    return tick;
+}
+
+void Runtime::NoteUploadOverlap(const VideoCore::Buffer* handle, u64 offset, u64 size) {
+    auto& o = Overlap();
+    const u64 tick = LastUseTick(handle, offset, size);
+    const u64 current = scheduler.CurrentTick();
+    size_t kind;
+    if (tick == 0) kind = 0;
+    else if (tick >= current) kind = IsBufferAccessed(handle, offset, size, true) ? 4 : 3;
+    else if (scheduler.IsFree(tick)) kind = 1;
+    else kind = 2;
+    o.bytes[kind] += size;
+    ++o.uploads[kind];
+    const u64 now = Common::Perf::NowNs();
+    if (now - o.report_ns >= 5'000'000'000ULL) {
+        const double seconds = o.report_ns ? double(now - o.report_ns) / 1e9 : 5.0;
+        const auto mb = [&](size_t k) { return o.bytes[k] / 1048576.0 / seconds; };
+        const auto n = [&](size_t k) { return o.uploads[k] / seconds; };
+        std::fprintf(stderr,
+                     "UPLOAD_OVERLAP MB/s (uploads/s): never_used %.1f (%.0f) finished %.1f (%.0f) "
+                     "in_flight %.1f (%.0f) this_session_before_barrier %.1f (%.0f) "
+                     "since_last_barrier %.1f (%.0f) blocks %zu\n",
+                     mb(0), n(0), mb(1), n(1), mb(2), n(2), mb(3), n(3), mb(4), n(4),
+                     o.last_use.size());
+        o.bytes = {};
+        o.uploads = {};
+        o.report_ns = now;
+    }
+}
+
 void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
                            vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access) {
     AssertCpRecordingLane();
+    if (UploadOverlapProbe() && handle && size != 0 &&
+        !(src_access & vk::AccessFlagBits2::eTransferWrite)) {
+        // A GPU use of the range (read, or a GPU write other than the upload copies themselves).
+        auto& o = Overlap();
+        const u64 tick = scheduler.CurrentTick();
+        const u64 last = std::min(offset + size - 1, offset + (u64{4} << 30));
+        for (u64 b = offset >> UploadOverlap::BlockShift; b <= last >> UploadOverlap::BlockShift; ++b) {
+            o.last_use[UploadOverlap::Key(handle, b)] = tick;
+        }
+    }
     if (handle == untracked_reads && handle &&
         !(src_access & (vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite |
                         vk::AccessFlagBits2::eMemoryWrite |
@@ -932,8 +1173,99 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
     memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
 }
 
-void Runtime::FlushBarriers() {
+void Runtime::FlushHazards() {
+    if (!GuestSyncBarriers()) {
+        FlushBarriers();
+        return;
+    }
+    // The port's own transfers (uploads, copies, readbacks, fills) and image layout transitions
+    // are not covered by the guest's synchronization: they always flush as before.
+    constexpr vk::PipelineStageFlags2 transfer_stages =
+        vk::PipelineStageFlagBits2::eCopy | vk::PipelineStageFlagBits2::eClear |
+        vk::PipelineStageFlagBits2::eResolve | vk::PipelineStageFlagBits2::eBlit |
+        vk::PipelineStageFlagBits2::eAllTransfer | vk::PipelineStageFlagBits2::eHost;
+    constexpr vk::AccessFlags2 transfer_writes = vk::AccessFlagBits2::eTransferWrite |
+                                                 vk::AccessFlagBits2::eHostWrite |
+                                                 vk::AccessFlagBits2::eMemoryWrite;
+    auto& st = guest_sync_stats;
+    ++st.calls;
+    const bool image = !image_barriers.empty();
+    const bool transfer = (memory_barrier.srcStageMask & transfer_stages) ||
+                          (memory_barrier.srcAccessMask & transfer_writes);
+    if (guest_sync_pending || image || transfer) {
+        st.sync += guest_sync_pending;
+        st.image += !guest_sync_pending && image;
+        st.transfer += !guest_sync_pending && !image && transfer;
+        FlushBarriers();
+    } else {
+        ++st.skipped;
+    }
+    const u64 now = Common::Perf::NowNs();
+    if (now - st.report_ns >= 5'000'000'000ULL) {
+        const double seconds = st.report_ns ? double(now - st.report_ns) / 1e9 : 5.0;
+        std::fprintf(stderr,
+                     "GUEST_SYNC hazards/s=%.0f flushed_after_sync/s=%.0f image/s=%.0f "
+                     "transfer/s=%.0f skipped/s=%.0f images_folded/s=%.0f\n",
+                     st.calls / seconds, st.sync / seconds, st.image / seconds,
+                     st.transfer / seconds, st.skipped / seconds, guest_sync_folded / seconds);
+        guest_sync_folded = 0;
+        st = {};
+        st.report_ns = now;
+    }
+}
+
+bool Runtime::MergeRenderTargetBarriers() {
+    static const bool enabled = [] {
+        const char* p = std::getenv("ISS_MERGE_RT_BARRIERS");
+        const bool on = p && p[0] == '1';
+        std::fprintf(stderr, "PORT_TUNING merge_rt_barriers=%d\n", on);
+        return on;
+    }();
+    return enabled;
+}
+
+bool Runtime::HasPendingImageBarrier(const VideoCore::Image* image) const {
+    const vk::Image handle = const_cast<VideoCore::Image*>(image)->GetImage();
+    for (const auto& b : image_barriers) {
+        if (b.image == handle) return true;
+    }
+    return false;
+}
+
+[[gnu::noinline]] void Runtime::FlushBarriers() {
     AssertCpRecordingLane();
+    if (BarrierTraceEnabled() && (memory_barrier.srcStageMask || !image_barriers.empty())) {
+        auto& t = barrier_trace;
+        ++t.flushes;
+        if (memory_barrier.srcStageMask) {
+            ++t.memory;
+        } else {
+            ++t.image_only;
+        }
+        if (std::exchange(t.pending_unified, false)) {
+            ++t.unified_forced;
+        }
+        ++t.callers[reinterpret_cast<u64>(__builtin_return_address(0)) - TraceImageBase()];
+        const u64 now = Common::Perf::NowNs();
+        if (now - t.report_ns >= 5'000'000'000ULL) {
+            const double seconds = t.report_ns ? double(now - t.report_ns) / 1e9 : 5.0;
+            std::vector<std::pair<u64, u64>> top(t.callers.begin(), t.callers.end());
+            std::sort(top.begin(), top.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+            std::fprintf(stderr,
+                         "BARRIER_TRACE flushes/s=%.0f memory/s=%.0f image_only/s=%.0f "
+                         "unified_forced/s=%.0f image_base=0x%llx\n",
+                         t.flushes / seconds, t.memory / seconds, t.image_only / seconds,
+                         t.unified_forced / seconds, (unsigned long long)TraceImageBase());
+            for (size_t i = 0; i < top.size() && i < 12; ++i) {
+                std::fprintf(stderr, "BARRIER_TRACE caller=+0x%llx %.0f/s\n",
+                             (unsigned long long)top[i].first, top[i].second / seconds);
+            }
+            t.flushes = t.memory = t.image_only = t.unified_forced = 0;
+            t.callers.clear();
+            t.report_ns = now;
+        }
+    }
     vk::DependencyInfo dep_info{};
 
     if (memory_barrier.srcStageMask) {
@@ -949,6 +1281,7 @@ void Runtime::FlushBarriers() {
         return;
     }
     ++flush_seq;
+    guest_sync_pending = false;
     if (dep_info.memoryBarrierCount) {
         Common::Perf::Add(Common::Perf::BufferBarrierFlushes);
     }

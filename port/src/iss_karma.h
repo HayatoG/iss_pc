@@ -78,6 +78,11 @@ static inline unsigned iss_karma_bridge_ex(unsigned char *p, uintptr_t helper,
         const unsigned char args[]={0x48,0x8d,0x4c,0x24,0x20,0x4c,0x89,0xe2,
             0x4c,0x8b,0x83,0xd0,0,0,0};
         memcpy(p+n,args,sizeof(args));n+=sizeof(args);
+    }else if(shard_args==7){
+        /* Direct camera, First Light 1.04: editable saved YMM0, camera-data original RBX,
+         * context R12 (still live here). */
+        const unsigned char args[]={0x48,0x8d,0x4c,0x24,0x20,0x48,0x8b,0x53,0x58,0x4d,0x89,0xe0};
+        memcpy(p+n,args,sizeof(args));n+=sizeof(args);
     }else if(shard_args==6){
         /* Native dimension stores: original R13 and editable saved GPRs. */
         const unsigned char args[]={0x48,0x8b,0x4b,0x10,0x48,0x89,0xda};

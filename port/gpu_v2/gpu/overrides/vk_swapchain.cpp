@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <string>
 #include <cstdlib>
 #include <limits>
 #include "common/assert.h"
@@ -22,9 +23,12 @@
 #include <windows.h>
 #include <vulkan/vulkan_win32.h>
 #endif
+#include <array>
+#include <atomic>
 
 namespace Vulkan {
 extern bool g_iss_full_screen_exclusive;
+extern std::atomic<u64> g_iss_gpu_busy_ns; // vk_scheduler.cpp: GPU busy time since the last report
 
 // Adapted from axylpup/shadPS4 second-son-v1.1, 5e96c249 + f6f32614:
 // mark the drain point under queue-submit serialization, wait OUTSIDE that
@@ -72,6 +76,11 @@ void Swapchain::ReleaseExclusive(){
 bool Swapchain::SyncExclusiveState(){
     const bool wanted=window.WantsExclusive();
     if(wanted!=exclusive_requested)needs_recreation=true;
+    // Adaptive VSync toggled in the menu: the present mode is chosen at swapchain creation.
+    static bool relaxed_seen=TlgSettings::Get().vsync_relaxed.load(std::memory_order_relaxed);
+    if(const bool relaxed=TlgSettings::Get().vsync_relaxed.load(std::memory_order_relaxed);relaxed!=relaxed_seen){
+        relaxed_seen=relaxed;needs_recreation=true;
+    }
     if(!window.CanPresent()){
         ReleaseExclusive();return false;
     }
@@ -305,6 +314,14 @@ bool Swapchain::AcquireNextImage() {
         s.over1 += waited > 1'000'000;
         s.over5 += waited > 5'000'000;
         s.over10 += waited > 10'000'000;
+        // Time between shown frames in 1 ms steps (the last step: 200 ms or more), for the slowest
+        // frames of the window (2026-11-24, launcher "Your last session"): one counter per frame.
+        static std::array<u32, 201> pace{};
+        static u64 last_shown = 0;
+        if (last_shown && start > last_shown) {
+            ++pace[std::min<u64>((start - last_shown) / 1'000'000, pace.size() - 1)];
+        }
+        last_shown = start;
         if (fenced - s.window_start >= 15'000'000'000ull) {
             std::fprintf(stdout,
                          "PRESENT_ACQUIRE fence=%d count=%llu call_ms=%.3f fence_avg_ms=%.3f "
@@ -314,6 +331,41 @@ bool Swapchain::AcquireNextImage() {
                          double(s.fence_ns) / 1e6 / double(s.count), double(s.fence_max) / 1e6,
                          (unsigned long long)s.over1, (unsigned long long)s.over5,
                          (unsigned long long)s.over10);
+            // The graphics card's own time per shown frame in the same window (GPU timestamps,
+            // gpu_profile >= 1): the launcher compares it with the frame time to tell whether the
+            // card or the processor held the frame rate back (2026-11-24).
+            if (const u64 busy = g_iss_gpu_busy_ns.exchange(0, std::memory_order_relaxed)) {
+                const double window_ns = double(fenced - s.window_start);
+                std::fprintf(stdout, "GPU_FRAME_MS avg=%.2f busy_pct=%.1f frames=%llu\n",
+                             double(busy) / 1e6 / double(s.count),
+                             window_ns > 0 ? 100.0 * double(busy) / window_ns : 0.0,
+                             (unsigned long long)s.count);
+            }
+            {   // The slowest 1% of frame times, and the frames over 33 / 50 ms (hitches).
+                u64 total = 0, over33 = 0, over50 = 0;
+                for (size_t ms = 0; ms < pace.size(); ++ms) {
+                    total += pace[ms];
+                    over33 += ms >= 33 ? pace[ms] : 0;
+                    over50 += ms >= 50 ? pace[ms] : 0;
+                }
+                u64 p99 = 0;
+                for (size_t ms = pace.size(), seen = 0; total && ms-- > 0;) {
+                    seen += pace[ms];
+                    if (seen * 100 >= total) { p99 = ms + 1; break; }
+                }
+                std::fprintf(stdout, "FRAME_PACE p99_ms=%llu over33=%llu over50=%llu frames=%llu\n",
+                             (unsigned long long)p99, (unsigned long long)over33,
+                             (unsigned long long)over50, (unsigned long long)total);
+                pace.fill(0);
+                // The options in force in this window (they change live from the F1 menu).
+                const auto& t = TlgSettings::Get();
+                std::fprintf(stdout, "SESSION_SETTINGS lod_scale=%.2f quality_floor=%d fps_limit=%d "
+                             "render_resolution=%d\n",
+                             double(t.lod_scale.load(std::memory_order_relaxed)),
+                             t.quality_floor.load(std::memory_order_relaxed),
+                             t.fps_limit.load(std::memory_order_relaxed),
+                             t.render_resolution.load(std::memory_order_relaxed));
+            }
             std::fflush(stdout);
             s = AcquireStats{};
             s.window_start = fenced;
@@ -379,6 +431,17 @@ void Swapchain::FindPresentFormat() {
             return format == SURFACE_FORMAT_HDR;
         }) != formats.end();
     // Also make sure that user allowed us to use HDR
+    {
+        // HDR diagnosis (2026-11-19): whether the display offers HDR10 (Windows HDR on) and
+        // whether BB_HDR=1 allows it; the game's own HDR option is selectable only when both are.
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            std::fprintf(stderr, "HDR: display offers HDR10 (BT.2020 PQ)=%d, BB_HDR allows it=%d -> game sees HDR=%d\n",
+                         int(supports_hdr), int(EmulatorSettings.IsHdrAllowed()),
+                         int(supports_hdr && EmulatorSettings.IsHdrAllowed()));
+        }
+    }
     supports_hdr &= EmulatorSettings.IsHdrAllowed();
 
     // If there is a single undefined surface format, the device doesn't care, so we'll just use
@@ -414,13 +477,40 @@ void Swapchain::FindPresentMode() {
         return;
     }
 
-    const auto requested_mode = EmulatorSettings.GetPresentMode();
+    // Which modes this display offers (2026-11-05: an RX 560 XT log only said Mailbox was missing).
+    static bool modes_logged = false;
+    if (!modes_logged) {
+        modes_logged = true;
+        std::string list;
+        for (const auto mode : modes) list += (list.empty() ? "" : ", ") + vk::to_string(mode);
+        std::fprintf(stderr, "PRESENT_MODES supported: %s\n", list.c_str());
+    }
+
+    // TLG_PRESENT_MODE (explicit) wins; otherwise the menu's Adaptive VSync picks FifoRelaxed.
+    const char* explicit_mode = std::getenv("TLG_PRESENT_MODE");
+    const auto requested_mode =
+        (!explicit_mode || !*explicit_mode) &&
+                TlgSettings::Get().vsync_relaxed.load(std::memory_order_relaxed)
+            ? std::string("FifoRelaxed")
+            : EmulatorSettings.GetPresentMode();
+    static std::string last_requested;
+    if (requested_mode != last_requested) {
+        last_requested = requested_mode;
+        std::fprintf(stderr, "PRESENT_MODE requested: %s%s\n", requested_mode.c_str(),
+                     explicit_mode && *explicit_mode ? " (TLG_PRESENT_MODE)" : "");
+    }
     if (requested_mode == "Mailbox") {
         present_mode = vk::PresentModeKHR::eMailbox;
     } else if (requested_mode == "Fifo") {
         present_mode = vk::PresentModeKHR::eFifo;
     } else if (requested_mode == "Immediate") {
         present_mode = vk::PresentModeKHR::eImmediate;
+    } else if (requested_mode == "FifoRelaxed") {
+        // TLG_PRESENT_MODE=FifoRelaxed (opt-in): vsync while frames are on time, a late frame is
+        // shown at once (may tear) instead of waiting a whole extra refresh. For GPUs without
+        // Mailbox that run near 30/60 FPS: plain Fifo turns a 34 ms frame into 50 ms (30 -> 20
+        // FPS steps). Falls back to Fifo below where the display does not offer it.
+        present_mode = vk::PresentModeKHR::eFifoRelaxed;
     } else {
         LOG_ERROR(Render_Vulkan, "Unknown present mode {}, defaulting to Mailbox.",
                   EmulatorSettings.GetPresentMode());

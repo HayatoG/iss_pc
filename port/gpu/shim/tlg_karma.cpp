@@ -1,8 +1,10 @@
 #include "../../src/iss_karma.h"
 #include "imgui.h"
+#include "overlay_design.h"
 #include "tlg_karma_backup.h"
 #include "tlg_karma_profile_names.h"
 #include "tlg_karma_recovery.h"
+#include "tlg_karma_save_title.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -16,6 +18,10 @@
 #include <vector>
 
 extern "C" const char *runtime_file_user_dir(void);
+// probe.c, once at game start: the save folder of an EU 1.07 game (US keeps CUSA00223).
+extern "C" void tlg_karma_set_save_title(const char *title){
+    if(title&&*title&&std::strlen(title)<16&&!std::strchr(title,'/')&&!std::strchr(title,'\\')&&!std::strstr(title,".."))KarmaSaveTitle::Ref()=title;
+}
 namespace {
 std::atomic<bool> backing_up{false};
 std::mutex message_lock;
@@ -24,7 +30,7 @@ std::vector<KarmaRecovery::Candidate> recovery_candidates;
 void Message(std::string text){std::lock_guard guard(message_lock);message=std::move(text);}
 void BackupProfile(const std::filesystem::path& root,const std::filesystem::path& destination){
     namespace fs=std::filesystem;
-    TlgKarmaBackup(root/"savedata"/"1"/"CUSA00223",destination/"savedata");
+    TlgKarmaBackup(root/"savedata"/"1"/KarmaSaveTitle::Get(),destination/"savedata");
     for(const auto* name:{"karma-original","karma-saves-v2","karma-profile-names","karma-profile-archive"}){
         if(!fs::exists(root/name))continue;
         bool has_file=false;for(const auto& entry:fs::recursive_directory_iterator(root/name))if(entry.is_regular_file()){has_file=true;break;}
@@ -45,7 +51,7 @@ void PrepareCapture(std::string name,bool replace){
         if(!KarmaProfileNames::Valid(name))throw std::runtime_error("Enter a name of 1-80 bytes without surrounding spaces or control characters");
         BackupProfile(root,NewBackup(root,replace?"replace-reset-point":"capture-reset-point"));
         if(!iss_karma_profile_request_capture(token.c_str(),name.c_str(),replace))throw std::runtime_error("Save changed or capture is unavailable; save and reload first");
-        Message("Backup verified. Close Insert to capture this reset point in gameplay.");
+        Message("Backup verified. Close the menu (F1) to capture this reset point in gameplay.");
     }catch(const std::exception& e){Message(std::string("Capture cancelled: ")+e.what());}backing_up=false;}).detach();
 }
 void ScanRecovery(){
@@ -90,12 +96,19 @@ void Prepare(int mode){
 }
 void TlgKarmaMenu(){
     IssKarmaStatus s{};runtime_karma_status(&s);
-    ImGui::TextUnformatted("Karma Switcher");
-    ImGui::Separator();
-    ImGui::TextWrapped("Choose one karma branch at Level 5. Purchase upgrades normally in the Powers menu. The exact shard shortfall for both branches of earned powers is added. Switching takes effect when gameplay resumes.");
+#ifdef TLG_OVERLAY_PREVIEW
+    s.supported=1; s.ready=1; s.enabled=1; s.can_reset=1; s.side=1; s.rank=5; s.score=1200; s.shards=36; s.remaining_cost=72;
+#endif
+    OverlayDesign::Hint("Switch karma at Level 5. Changes apply when gameplay resumes.");
     if(!s.supported){ImGui::TextWrapped("Unavailable: %s",runtime_karma_compatibility_reason());return;}
-    const bool bound=iss_karma_binding_ready()!=0;
+    const bool bound=
+#ifdef TLG_OVERLAY_PREVIEW
+        true;
+#else
+        iss_karma_binding_ready()!=0;
+#endif
     if(!bound)ImGui::TextWrapped("Karma changes blocked: %s",iss_karma_binding_problem());
+    OverlayDesign::Section("Reset profile");
     static char profile_name[81]="My reset point";static std::string last_token;
     const std::string token=iss_karma_profile_token();
     if(token!=last_token){last_token=token;const char* stored=iss_karma_profile_name();std::snprintf(profile_name,sizeof(profile_name),"%s",*stored?stored:"My reset point");}
@@ -113,7 +126,8 @@ void TlgKarmaMenu(){
     ImGui::BeginDisabled(backing_up.load()||pending_capture||!iss_karma_profile_can_replace()||s.mode!=0);
     if(ImGui::Button("Archive and replace reset point")){replacing=true;acknowledged=false;ImGui::OpenPopup("Capture reset point");}
     ImGui::EndDisabled();
-    ImGui::TextWrapped("For a new reset point, save your current progress and reload it first. Stop the selected Karma mode before capturing. Names are labels; they never choose which save or values Reset uses.");
+    if (ImGui::CollapsingHeader("Reset-point help"))
+        OverlayDesign::Hint("Save and reload before capturing. Stop the selected Karma mode first. Profile names are labels; Reset always uses the loaded save's own tracking.");
     if(ImGui::BeginPopupModal("Capture reset point",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){
         ImGui::Text("Profile: %s",profile_name);
         ImGui::Text("Current: %s Level %d, %.1f karma, %d shards",s.side==1?"Good":"Evil",s.rank,s.score,s.shards);
@@ -143,37 +157,43 @@ void TlgKarmaMenu(){
         if(ImGui::Button("Restore selected as new manual slot"))RestoreRecovery(candidates[selected_recovery]);
         ImGui::EndDisabled();ImGui::EndDisabled();
     }
-    ImGui::Separator();
+    OverlayDesign::Section("Karma mode");
     bool enabled=s.enabled!=0;
     if(ImGui::Checkbox("Enable Karma Switcher",&enabled))runtime_karma_set_enabled(enabled);
-    ImGui::TextWrapped("Unchecking stops the maximum-karma hold and disables switching. Reset remains available. Re-enabling does not select a mode automatically. This checkbox applies to this session.");
-    ImGui::Text("Current: %s | Level %d | %.1f",s.side==1?"Good":"Evil",s.rank,s.score);
-    ImGui::Text("Unspent shards: %d | Remaining upgrade cost (both branches): %d",s.shards,s.remaining_cost);
-    ImGui::Text("Unused bonus shards: %d",s.bonus_shards);
+    if (ImGui::IsItemHovered() || ImGui::IsItemFocused()) ImGui::SetTooltip("Disabling stops the maximum-karma hold. Reset remains available. Applies to this session.");
+    if (ImGui::BeginTable("karma_summary", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_RowBg)) {
+        ImGui::TableNextColumn(); ImGui::Text("Current: %s · Level %d",s.side==1?"Good":"Evil",s.rank);
+        ImGui::TableNextColumn(); ImGui::Text("Unspent shards: %d",s.shards);
+        ImGui::TableNextColumn(); ImGui::Text("Karma: %.1f",s.score);
+        ImGui::TableNextColumn(); ImGui::Text("Upgrade cost: %d",s.remaining_cost);
+        ImGui::EndTable();
+    }
     if(s.shard_error)ImGui::TextWrapped("Shard tracking mismatch or storage failure. Currency changes blocked; Reset will keep your shard balance unchanged.");
-    ImGui::Text("Assisted purchases to undo: %d",s.rollback_count);
     if(s.rollback_error)ImGui::TextWrapped("Purchase journal error. Progression rollback is blocked; your verified backups remain available.");
     ImGui::Text("Selected mode: %s",s.mode==1?"True Hero":s.mode==2?"Infamous":"Unchanged");
     ImGui::BeginDisabled(!bound || !s.ready || s.pending || backing_up.load()||pending_capture);
     ImGui::BeginDisabled(!enabled);
-    if(ImGui::Button("True Hero"))Prepare(1);
+    if(ImGui::Button("True Hero", ImVec2(ImGui::GetFontSize()*7,0)))Prepare(1);
     ImGui::SameLine();
-    if(ImGui::Button("Infamous"))Prepare(2);
+    if(ImGui::Button("Infamous", ImVec2(ImGui::GetFontSize()*7,0)))Prepare(2);
     ImGui::EndDisabled();
     ImGui::BeginDisabled(!s.can_reset);
     ImGui::SameLine();
-    if(ImGui::Button("Reset karma"))Prepare(3);
+    if(ImGui::Button("Reset karma", ImVec2(ImGui::GetFontSize()*7,0)))Prepare(3);
     ImGui::EndDisabled();
     ImGui::EndDisabled();
     if(s.can_reset)ImGui::Text("Reset target: %s | Level %d | %.1f",s.original_side==1?"Good":"Evil",s.original_rank,s.original_score);
-    ImGui::TextWrapped("Original karma is saved to disk before your first switch and survives restarts and altered saves. Reset undoes recorded purchases made with bonus shards or pre-boost karma restrictions, refunds their natural-shard portion, and removes unused bonus shards. Missions, collectibles and story power families are not rewound.");
-    ImGui::TextWrapped("Tracking is bound to the loaded save contents. Loading another save stops the selected mode and loads that save's own tracking. Legacy profile-wide baselines are never adopted automatically.");
     if(s.error==4)ImGui::TextWrapped("Original snapshot could not be read or safely stored. Switching is blocked to protect it.");
     if(s.error==8)ImGui::TextWrapped("Progress changed before the first boost. Save to a new slot and reload it before creating this save's baseline.");
     if(!s.ready)ImGui::TextDisabled("Load a save and enter gameplay first.");
     if(s.error)ImGui::TextWrapped("Switch could not complete (%d). Your backup remains available.",s.error);
     {std::lock_guard guard(message_lock);ImGui::TextWrapped("%s",message.c_str());}
     ImGui::Spacing();
-    ImGui::TextWrapped("A verified backup is made before each switch, in karma-backups inside your data folder. Story progress and collectibles are not edited. Normal autosaves may record karma, shard balance and purchased upgrades.");
-    ImGui::TextDisabled("The selected mode keeps karma at maximum for this session.");
+    OverlayDesign::Hint("Every switch is backed up. Normal saves can record your changes.");
+    if (ImGui::CollapsingHeader("How switching and reset work")) {
+        ImGui::TextWrapped("The selected mode holds maximum karma for this session. Purchase upgrades normally in the Powers menu; only the required shard shortfall is added.");
+        ImGui::TextWrapped("Reset undoes tracked assisted purchases and removes unused bonus shards. Missions, collectibles and story powers are not rewound. Each loaded save uses its own reset tracking.");
+        ImGui::Text("Unused bonus shards: %d · Assisted purchases: %d", s.bonus_shards, s.rollback_count);
+        ImGui::TextWrapped("Verified backups are kept in karma-backups inside your data folder. Story progress and collectibles are not edited.");
+    }
 }

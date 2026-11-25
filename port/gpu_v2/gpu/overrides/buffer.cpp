@@ -24,6 +24,8 @@ extern u32 family;
 extern u32 graphics; ///< The graphics family (sharing list with family).
 /// ISS_READBACK_FAMILY: the readback queue's compute-only family (~0 when none or with family).
 extern u32 readback_family;
+/// ISS_UPLOAD_QUEUE: the copy engine's transfer-only family (~0 when off).
+extern u32 upload_family;
 /// Family of the command pool being created (set around the compute scheduler's creation).
 }
 
@@ -104,10 +106,14 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
     // ISS_READBACK_FAMILY: the readback queue copies them from a compute-only family too.
     const u32 other = iss::asc_family::family != ~0u ? iss::asc_family::family
                                                       : iss::asc_family::readback_family;
-    std::array<u32, 2> families{iss::asc_family::graphics, other};
-    if (other != ~0u) {
+    // ISS_UPLOAD_QUEUE: the copy engine reads staging buffers and writes the upload ring too.
+    std::array<u32, 3> families{iss::asc_family::graphics, 0, 0};
+    u32 num_families = 1;
+    if (other != ~0u) families[num_families++] = other;
+    if (iss::asc_family::upload_family != ~0u) families[num_families++] = iss::asc_family::upload_family;
+    if (num_families > 1) {
         buffer_ci.sharingMode = vk::SharingMode::eConcurrent;
-        buffer_ci.queueFamilyIndexCount = 2;
+        buffer_ci.queueFamilyIndexCount = num_families;
         buffer_ci.pQueueFamilyIndices = families.data();
     }
     const bool with_bda = bool(buffer_ci.usage & vk::BufferUsageFlagBits::eShaderDeviceAddress);

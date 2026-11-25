@@ -458,6 +458,12 @@ public:
     void DispatchDirect();
     void DispatchIndirect(VAddr address, u32 offset, u32 size);
 
+    /// ISS_GUEST_SYNC_BARRIERS: the guest asked the GPU to wait (or a native path recorded work
+    /// whose packets the command processor did not see); the next hazard flushes.
+    void NoteGuestSync() noexcept;
+    /// ISS_ASC_NATIVE_QUEUE diagnostics: counters and where both queues are (LongWaitWatch).
+    std::string AscDebugState(bool query_gpu = false);
+
     /// The command processor translates the commands of one of the guest's asynchronous compute
     /// queues (asc_queue: their dispatches, copies and fills run on the compute queue).
     void SetAsyncCompute(bool active) noexcept {
@@ -573,6 +579,8 @@ public:
     // each compute submission); compute work waits for graphics work only where the guest's
     // queue waits for a graphics label, or after its own work that ran on the graphics queue.
     [[nodiscard]] bool AscQueueEnabled() const noexcept;
+    /// ISS_ASC_COPIES (default on, =0 off): a compute ring's DMA copies and fills on the compute queue.
+    [[nodiscard]] bool AscCopiesOnCompute() const noexcept;
     /// The compute ring (vqid) whose packets the command processor is running.
     void AscSetVqid(u32 vqid) noexcept { asc_vqid = vqid; }
     /// Work of compute ring vqid about to be recorded on the graphics queue: after its compute

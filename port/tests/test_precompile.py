@@ -90,8 +90,12 @@ class ParseProgress(unittest.TestCase):
 
 
 class Decision(PrecompileBase):
-    def test_off(self):
-        self.assertEqual('off', precompile.decide({**self.settings, 'precompile_shaders': False})[0])
+    def test_an_old_saved_off_is_ignored(self):
+        # 2026-11-23: always on (the switch is gone; without the list the game ran choppy). A settings
+        # file that still says off gets the same decision as one that says on.
+        self.assertEqual(precompile.decide({**self.settings, 'precompile_shaders': True})[0],
+                         precompile.decide({**self.settings, 'precompile_shaders': False})[0])
+        self.assertNotEqual('off', precompile.decide({**self.settings, 'precompile_shaders': False})[0])
 
     def test_no_game_folder(self):
         self.assertEqual('nogame', precompile.decide({**self.settings, 'game_dir': str(self.game / 'nope')})[0])
@@ -202,13 +206,13 @@ class Writing(PrecompileBase):
         self.assertEqual('cancelled', runner.run(self.settings, log=lambda line: None))
         self.assertFalse(self.jobs.exists())
 
-    def test_option_off_deletes_the_files_and_generates_nothing(self):
+    def test_an_old_saved_off_keeps_the_list(self):
+        # 2026-11-23: the switch is gone and always on, so a settings file that still says off no
+        # longer deletes the shader list: it stays current.
         self.run_once()
-        self.index.write_bytes(b'idx')
         outcome, _ = self.run_once({**self.settings, 'precompile_shaders': False})
-        self.assertEqual('off', outcome)
-        self.assertEqual(1, len(self.calls))
-        self.assertFalse(self.jobs.exists() or self.meta.exists() or self.index.exists())
+        self.assertNotEqual('off', outcome)
+        self.assertTrue(self.jobs.exists() and self.meta.exists())
 
 
 class NeverBlocksThePlayer(PrecompileBase):
@@ -268,20 +272,12 @@ class QtScreens(PrecompileBase):
         backend = Backend(settings=data, probes=probes)
         return backend, Graphics(backend, {'vram': lambda: 6144, 'clear': lambda: (0, [])})
 
-    def test_option_row_toggles_the_setting(self):
-        backend, graphics = self.make()
-        row = graphics.model.get('s:precompile_shaders')
-        self.assertTrue(row['on'])
-        self.assertEqual('Compile shaders on the first start', row['label'])
-        graphics.setValue('s:precompile_shaders', '0')
-        self.assertFalse(backend.settings['precompile_shaders'])
-        self.assertTrue(graphics.model.get('s:precompile_shaders')['changed'])
-
-    def test_option_texts_in_portuguese(self):
-        backend, graphics = self.make(ui_language='pt_BR')
-        self.assertEqual('Compilar shaders na primeira abertura', graphics.model.get('s:precompile_shaders')['label'])
-        strings = json.loads((ROOT / 'launcher' / 'qt' / 'i18n' / 'strings.json').read_text(encoding='utf-8'))
-        self.assertTrue(strings['gfx_what_precompile_shaders']['pt'])
+    def test_no_switch_on_the_graphics_screen(self):
+        # 2026-11-23: compiling the shader list is always on; the Graphics screen has no row for it
+        # in either language.
+        for language in ('en_US', 'pt_BR'):
+            _backend, graphics = self.make(ui_language=language)
+            self.assertIsNone(graphics.model.get('s:precompile_shaders'), language)
 
     def test_progress_text_and_bar(self):
         backend, _ = self.make()

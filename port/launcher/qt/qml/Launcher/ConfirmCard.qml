@@ -9,7 +9,7 @@ Rectangle {
     visible: !!d.open
     color: Qt.rgba(0, 0, 0, 0.62)
     MouseArea { anchors.fill: parent }   // blocks clicks behind the card
-    Rectangle {
+    PolishCard {
         id: box
         anchors.centerIn: parent
         width: Math.min(600, parent.width - 72)
@@ -22,7 +22,7 @@ Rectangle {
                    font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 800 }); font.pixelSize: 28; font.weight: Font.ExtraBold
                    font.capitalization: Font.AllUppercase; font.letterSpacing: 1.4 }
             Text { width: parent.width; text: d.body || ""; color: Theme.textSoft; wrapMode: Text.WordWrap
-                   font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
+                   font.family: Theme.fontText; font.pixelSize: 15; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
             Column {
                 visible: !!d.lines && d.lines.length > 0
                 width: parent.width; spacing: 4
@@ -30,9 +30,9 @@ Rectangle {
                     model: (d.lines || []).slice(0, 8)
                     Row {
                         width: parent.width; spacing: 8
-                        Text { text: "•"; color: Theme.ok; font.family: Theme.fontText; font.pixelSize: 13 }
+                        Text { text: "•"; color: Theme.ok; font.family: Theme.fontText; font.pixelSize: 14 }
                         Text { width: parent.width - 18; text: modelData; color: Theme.textMuted; wrapMode: Text.WordWrap
-                               font.family: Theme.fontText; font.pixelSize: 13 }
+                               font.family: Theme.fontText; font.pixelSize: 14 }
                     }
                 }
             }

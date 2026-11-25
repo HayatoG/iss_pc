@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <set>
 #include <string_view>
+#include <cstdio>
 namespace IssTrophies {
 struct StoryTask {uint8_t state;int16_t name,parent;uint16_t scope;float time;};
 // Read-only version-123 save prefix, checked against the US 1.07 serializer
@@ -104,6 +105,22 @@ inline std::vector<int> RecoverStoryTasks(const std::map<std::string,StoryTask>&
         if(complete("task_msn_cbc_started_good")&&incomplete("task_msn_cbc_started_evil"))recovered.push_back(10);
         if(complete("task_msn_cbc_started_evil")&&incomplete("task_msn_cbc_started_good"))recovered.push_back(11);
     }
+    // Story endings (2026-11-06): the credits mission of one ending complete, the other not.
+    if(complete("msn_credits_good")&&incomplete("msn_credits_evil"))recovered.push_back(12);
+    if(complete("msn_credits_evil")&&incomplete("msn_credits_good"))recovered.push_back(13);
+    // District Showdowns msn_shdn_01..13: winning a district's showdown is what liberates it,
+    // so the same counts give the showdown trophies (33-35) and the liberation ones (36-38).
+    int showdowns=0,won=0;
+    for(int i=1;i<=13;i++){
+        char name[16];std::snprintf(name,sizeof(name),"msn_shdn_%02d",i);
+        auto it=tasks.find(name);if(it==tasks.end()||it->second.state==255)continue;
+        showdowns++;if(it->second.state==3)won++;
+    }
+    if(showdowns==13){
+        if(won>=1){recovered.push_back(33);recovered.push_back(36);}
+        if(won>=7){recovered.push_back(34);recovered.push_back(37);}
+        if(won==13){recovered.push_back(35);recovered.push_back(38);}
+    }
     return recovered;
 }
 inline std::vector<int> RecoverSavedCounters(const std::array<int32_t,10>& values){
@@ -142,6 +159,15 @@ inline std::vector<int> RecoveredTrophies(std::span<const unsigned char> data,bo
     auto result=RecoverStoryTasks(tasks);auto extra=RecoverSavedCounters(counters);
     result.insert(result.end(),extra.begin(),extra.end());
     if(collectibles){auto more=RecoverCollectibles(collected);result.insert(result.end(),more.begin(),more.end());}
+    // Karma rank (2026-11-06): the save header holds score +0x4, side +0x10 (1 Good, 0 Evil) and
+    // rank +0x14 (0..5), the fields the Karma switcher reads (tlg_karma_save_session.h). Rank 5 on
+    // a side is that side's rank-five trophy: 23 True Hero, 24 Infamous.
+    float score;int32_t side,rank;
+    std::memcpy(&score,data.data()+4,4);std::memcpy(&side,data.data()+0x10,4);std::memcpy(&rank,data.data()+0x14,4);
+    if(std::isfinite(score)&&std::fabs(score)<=4300.01f&&rank==5){
+        if(side==1&&score>0)result.push_back(23);
+        if(side==0&&score<0)result.push_back(24);
+    }
     std::sort(result.begin(),result.end());return result;
 }
 }

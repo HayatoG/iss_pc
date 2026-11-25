@@ -21,6 +21,7 @@
 #include <objidl.h>
 namespace Gdiplus { using std::min; using std::max; }
 #include <gdiplus.h>
+#include "startup_loading.h"
 #pragma comment(lib, "gdiplus.lib")
 #endif
 #include <SDL3/SDL.h>
@@ -398,6 +399,9 @@ bool WindowSDL::PollEvents() {
         }
         if (TlgOverlay::HandleEvent(event) || HandleMouse(event)) {
             if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+                std::fprintf(stderr, "PORT_CLOSE_EVENT type=%s (overlay/mouse handled)\n",
+                             event.type == SDL_EVENT_QUIT ? "quit" : "window_close_requested");
+                std::fflush(stderr);
                 is_open = false;
             }
             continue;
@@ -426,9 +430,25 @@ bool WindowSDL::PollEvents() {
             break;
         }
         case SDL_EVENT_QUIT:
-        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED: {
+            // Why the window closes: QUIT alone comes from the console (Ctrl+C/Break), a signal
+            // or the end of the Windows session; CLOSE_REQUESTED from WM_CLOSE (Alt+F4, the title
+            // bar or taskbar, or another program). The window in front tells which program.
+            const auto flags = SDL_GetWindowFlags(window);
+            char front[256] = "?";
+#ifdef _WIN32
+            if (HWND fg = GetForegroundWindow()) {
+                GetWindowTextA(fg, front, sizeof(front));
+            }
+#endif
+            std::fprintf(stderr, "PORT_CLOSE_EVENT type=%s mod=0x%x focused=%d front=\"%s\"\n",
+                         event.type == SDL_EVENT_QUIT ? "quit" : "window_close_requested",
+                         unsigned(SDL_GetModState()), (flags & SDL_WINDOW_INPUT_FOCUS) ? 1 : 0,
+                         front);
+            std::fflush(stderr);
             is_open = false;
             break;
+        }
         default:
             break;
         }
@@ -519,7 +539,7 @@ void WindowSDL::DrawLoading(int phase,unsigned done,unsigned total){
             const double scale=std::max(w/iw,h/ih);
             const REAL dw=REAL(iw*scale),dh=REAL(ih*scale);
             g.DrawImage(art.image.get(),RectF((w-dw)/2,(h-dh)/2,dw,dh));
-            SolidBrush dim(Color(200,11,14,20));
+            SolidBrush dim(Color(100,14,17,14));
             g.FillRectangle(&dim,0,0,w,h);
         }
         art.scaled_w=w;art.scaled_h=h;
@@ -529,62 +549,13 @@ void WindowSDL::DrawLoading(int phase,unsigned done,unsigned total){
     static ULONGLONG eta_start=0;
     static unsigned eta_from=0;
     if(phase!=eta_phase){eta_phase=phase;eta_start=GetTickCount64();eta_from=done;}
-    const wchar_t* title=
-        phase==5?L2(L"Indexing the game's shaders...",L"Indexando os shaders do jogo..."):
-        phase==4?L2(L"Compiling compute shaders...",L"Compilando shaders de compute..."):
-        phase==1?L2(L"Loading shader cache...",L"Carregando o cache de shaders..."):
-        phase==0?L2(L"Starting...",L"Iniciando..."):
-                 L2(L"Preparing graphics...",L"Preparando os gráficos...");
-    const bool first_run=phase==4||phase==5;
-    const wchar_t* note=first_run
-        ?L2(L"Only on the first start on this computer and after updates: then the game runs without compiling shaders.",
-            L"Só na primeira abertura neste computador e depois de atualizações: depois o jogo roda sem compilar shaders.")
-        :L2(L"The first start after an update takes longer.",L"A primeira abertura depois de uma atualização demora mais.");
     Bitmap frame(w,h,PixelFormat32bppPARGB);
     {
         Graphics g(&frame);
         g.DrawImage(art.scaled.get(),0,0,w,h);
-        g.SetSmoothingMode(SmoothingModeAntiAlias);
-        g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
-        // The overlay's block: 40% of the width, centred; ImGui's dark style colours.
-        const REAL bw=REAL(w)*0.40f,x=(REAL(w)-bw)/2;
-        const REAL base=std::max<REAL>(13.f,REAL(h)*0.018f);
-        FontFamily family(L"Segoe UI");
-        Font big(&family,base*1.6f,FontStyleRegular,UnitPixel),font(&family,base,FontStyleRegular,UnitPixel);
-        SolidBrush text(Color(255,255,255,255)),dim_text(Color(255,128,128,128));
-        const REAL bar_h=base*1.55f;
-        REAL y=REAL(h)*0.5f-base*4.0f;
-        g.DrawString(title,-1,&big,PointF(x,y),&text);
-        y+=base*2.4f;
-        if(total){
-            SolidBrush frame_bg(Color(138,41,74,122)),fill(Color(255,230,179,0));
-            g.FillRectangle(&frame_bg,x,y,bw,bar_h);
-            const REAL part=bw*REAL(std::min(done,total))/REAL(total);
-            if(part>0)g.FillRectangle(&fill,x,y,part,bar_h);
-            wchar_t count[64];
-            swprintf(count,64,L"%u / %u (%u%%)",done,total,unsigned(static_cast<unsigned long long>(std::min(done,total))*100/total));
-            StringFormat centre;centre.SetAlignment(StringAlignmentCenter);centre.SetLineAlignment(StringAlignmentCenter);
-            g.DrawString(count,-1,&font,RectF(x,y,bw,bar_h),&centre,&text);
-            y+=bar_h+base*0.6f;
-            const ULONGLONG ms=GetTickCount64()-eta_start;
-            if(first_run&&done>eta_from&&done<total&&ms>3000){
-                const unsigned left=unsigned(double(ms)/1000.0*double(total-done)/double(done-eta_from))+1;
-                wchar_t eta[64];
-                swprintf(eta,64,L2(L"About %u:%02u left",L"Faltam cerca de %u:%02u"),left/60,left%60);
-                g.DrawString(eta,-1,&font,PointF(x,y),&text);
-                y+=base*1.5f;
-            }
-        }else{
-            // Unknown length: a segment sweeping across the bar.
-            SolidBrush frame_bg(Color(138,41,74,122)),fill(Color(255,230,179,0));
-            g.FillRectangle(&frame_bg,x,y,bw,bar_h*0.35f);
-            const double t=double(GetTickCount64()%1600)/1600.0;
-            const REAL seg=bw*0.25f,sx=x+REAL(t)*(bw+seg)-seg;
-            const REAL left=std::max(x,sx),right=std::min(x+bw,sx+seg);
-            if(right>left)g.FillRectangle(&fill,left,y,right-left,bar_h*0.35f);
-            y+=bar_h*0.35f+base*0.8f;
-        }
-        g.DrawString(note,-1,&font,RectF(x,y,bw,base*4.0f),nullptr,&dim_text);
+        const char *app=std::getenv("TLG_APP_NAME");
+        const bool first_light=app&&std::strstr(app,"First Light");
+        StartupLoading::Draw(g,w,h,phase,done,total,double(GetTickCount64()-eta_start)/1000.,eta_from,Portuguese(),first_light,GetTickCount64());
     }
     HDC dc=GetDC(hwnd);
     if(dc){

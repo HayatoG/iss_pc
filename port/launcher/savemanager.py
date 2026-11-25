@@ -219,7 +219,7 @@ def slot_paths(user_dir, slot_id):
     uid, _, name = str(slot_id).partition('/')
     if not UID_RE.match(uid) or not SLOT_RE.match(name):
         raise SaveError('save_bad_slot', slot_id)
-    game = Path(user_dir) / 'savedata' / uid / SERIAL
+    game = Path(user_dir) / 'savedata' / uid / userdata.serial()
     return game / name, game / (name + '.sce_sys')
 
 
@@ -413,7 +413,7 @@ class Plan:
 
 
 def _classify(parts):
-    """(uid, slot, is_sys, rel parts) of savedata/<uid>/CUSA00223/<slot>[.sce_sys]/<file>, tolerating
+    """(uid, slot, is_sys, rel parts) of savedata/<uid>/<serial>/<slot>[.sce_sys]/<file>, tolerating
     up to two wrapper folders in front; None for anything else."""
     for lead in range(0, 3):
         rest = parts[lead:]
@@ -421,7 +421,7 @@ def _classify(parts):
             uid, serial, slotdir = rest[1], rest[2], rest[3]
             is_sys = slotdir.endswith('.sce_sys')
             slot = slotdir[:-8] if is_sys else slotdir
-            if serial == SERIAL and UID_RE.match(uid) and SLOT_RE.match(slot):
+            if serial == userdata.serial() and UID_RE.match(uid) and SLOT_RE.match(slot):
                 return uid, slot, is_sys, rest[4:]
     return None
 
@@ -567,7 +567,7 @@ def import_plan(user_dir, plan, replace=(), target_uid=None, running=None):
                 zf.close()
         for (uid, slot), sid, entry in todo:
             tuid = sid.split('/', 1)[0]
-            game = user_dir / 'savedata' / tuid / SERIAL
+            game = user_dir / 'savedata' / tuid / userdata.serial()
             game.mkdir(parents=True, exist_ok=True)
             replaced = []
             try:
@@ -613,7 +613,7 @@ def export_zip(user_dir, dest, slot_ids=None):
                 for base in (folder, sys_dir):
                     for p in sorted(base.rglob('*')) if base.is_dir() else []:
                         if p.is_file():
-                            arc = '/'.join(('savedata', s['user'], SERIAL, base.name, *p.relative_to(base).parts))
+                            arc = '/'.join(('savedata', s['user'], userdata.serial(), base.name, *p.relative_to(base).parts))
                             zf.write(p, arc)
         os.replace(tmp, dest)
     except OSError as error:

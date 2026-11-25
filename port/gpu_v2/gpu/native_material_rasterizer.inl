@@ -202,6 +202,24 @@ static u64 MaterialHash(const GraphicsPipeline& pipeline) {
     return h.Digest();
 }
 
+// Erases a few entries of a table being dropped: at most 4 per millisecond of the command
+// processor (each frees a template, sometimes its dynamic state too: the heap decommits, ~9 us
+// each), so 131072 take ~30 s.
+template <typename Map>
+static void DropSome(Map& dying) {
+    if (dying.empty()) return;
+    static u64 window_ms = 0;
+    static u32 used = 0;
+    const u64 now = u64(std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count());
+    if (now != window_ms) {
+        window_ms = now;
+        used = 0;
+    }
+    for (; used < 4 && !dying.empty(); ++used) dying.erase(dying.begin());
+}
+
 static void Refresh(const GraphicsPipeline& pipeline) {
     for (const auto* stage : pipeline.GetStages())
         if (stage) const_cast<Shader::Info*>(stage)->RefreshFlatBuf();
@@ -245,6 +263,8 @@ struct Tables {
     std::shared_mutex mutex;
     std::unordered_map<u64, const GraphicsPipeline*> shapes; ///< state key -> first pipeline
     std::unordered_map<u64, std::shared_ptr<const Template>> templates;
+    /// A full table being dropped a few entries per learn (the command processor's only).
+    std::unordered_map<u64, std::shared_ptr<const Template>> dying;
     std::unordered_map<u64, std::shared_ptr<const DynamicState>> dynamics; ///< by state bytes
 };
 // The dynamic state values (the bind cache, last, left out).
@@ -394,7 +414,8 @@ bool Rasterizer::NativeMaterialBind(const NativeMaterialTemplate& t) {
             continue;
         }
         const u64 size =
-            VideoCore::ClampHugeRead(memory->ClampRangeSize(sharp.base_address, sharp.GetSize()), desc.is_written);
+            TraceHugeRead("native-material", stage, slot.desc, sharp.base_address,
+                          memory->ClampRangeSize(sharp.base_address, sharp.GetSize()), desc.is_written);
         bool known_unwritten = false;
         const auto [buffer, offset] =
             buffer_cache.ObtainBuffer(sharp.base_address, u32(size), false, desc.is_formatted,
@@ -520,7 +541,33 @@ void Rasterizer::NativeMaterialLearn(u64 state_key, const GraphicsPipeline* pipe
     t->key = Mix(state_key, MaterialHash(*shape));
     {
         std::unique_lock lock{tables.mutex};
-        if (tables.templates.size() >= 131072) tables.templates.clear();
+        // (Not while the previous table is still being dropped: the table grows a while.)
+        // ISS_NATIVE_MATERIAL_CAP (2026-11-14, default 65536, was 131072; 16384 cost ~11 fps of 82
+        // from relearning after each wipe): measured ~11 KB of RAM
+        // per template and ~500 learned a second while moving, the old cap filled in ~4 minutes
+        // to ~1.4 GB (twice that while the previous table was dropped): RAM climbing all session,
+        // out of memory on 16 GB PCs with integrated graphics (iss_pc#837).
+        static const size_t material_cap = [] {
+            const char* p = std::getenv("ISS_NATIVE_MATERIAL_CAP");
+            const unsigned long long v = p && *p ? std::strtoull(p, nullptr, 10) : 65536;
+            return size_t(std::clamp<unsigned long long>(v, 1024, 131072));
+        }();
+        // Over the cap while the previous table is still being dropped (2026-11-14: dropping, 4
+        // per ms, fell behind ~600 learns a second and the table reached 56k of a 16k cap; not
+        // learning meanwhile cost ~8-11 fps of 82): every learn then also erases two dropped
+        // entries (~9 us each), so the old table empties twice as fast as the new one grows and
+        // both together stay about one cap of RAM while learning never stops.
+        if (tables.templates.size() + tables.dying.size() >= material_cap)
+            for (int k = 0; k < 2 && !tables.dying.empty(); ++k) tables.dying.erase(tables.dying.begin());
+        if (tables.templates.size() >= material_cap && tables.dying.empty()) {
+            // Freeing 131072 templates at once stalled the command processor ~400 ms (a frame
+            // freeze after ~35 min of play). A thread of its own freeing them was far worse: it
+            // held the process heap ~40 s against the command processor relearning (3 fps,
+            // 2026-11-02). They are dropped a few per millisecond instead (128 per learn still
+            // froze 1.1 s: right after the wipe a learn comes every few microseconds).
+            tables.dying.swap(tables.templates);
+        }
+        NativeMaterial::DropSome(tables.dying);
         const auto& live = scheduler.GetDynamicState();
         const u64 dynamic_hash = XXH3_64bits(&live, DynamicBytes);
         auto& shared = tables.dynamics[dynamic_hash];

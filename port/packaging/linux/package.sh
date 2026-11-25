@@ -61,8 +61,16 @@ cp -r patches "$dest/"
 # The shader list generator (scripts/build_jobs.py imports it from ../tools): plain files, like scripts/.
 mkdir -p "$dest/tools"
 cp -r tools/xpps "$dest/tools/"
+mkdir -p "$dest/tools/verify"
+cp tools/verify/*-107-art.json "$dest/tools/verify/"
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
 cp LICENSE packaging/README-player.md packaging/recomplauncher.json "$dest/"
+if [[ -f ${CMAKE_PREFIX_PATH:-}/share/licenses/opus/COPYING ]]; then
+    cp "$CMAKE_PREFIX_PATH/share/licenses/opus/COPYING" "$dest/LICENSE-opus.txt"
+fi
+if [[ -f /usr/share/doc/libsbc1/copyright ]]; then
+    cp /usr/share/doc/libsbc1/copyright "$dest/LICENSE-libsbc.txt"
+fi
 # The release name (vYYYY.MM.DD-<commit>, as the CI publishes it): the launcher shows it and compares it with the latest release.
 if [[ -n ${GITHUB_SHA:-} ]]; then printf 'v%s-%s\n' "$(date -u +%Y.%m.%d)" "${GITHUB_SHA::7}" > "$dest/VERSION"; fi
 cp packaging/linux/install_desktop.sh packaging/port.env "$dest/"

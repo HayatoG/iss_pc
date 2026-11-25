@@ -49,9 +49,13 @@ class KeyboardTableTests(unittest.TestCase):
         mine = {button: scancode for button, scancode, _ in padsettings.KEYBOARD_BUTTONS}
         self.assertEqual(self.c_key_map(), mine)
 
-    def test_fixed_keys_exist_in_runtime_pad_c(self):
+    def test_default_movement_and_fixed_graffiti_keys_exist_in_runtime_pad_c(self):
         text = RUNTIME_PAD.read_text(encoding='utf-8')
-        for scancode in ('W', 'A', 'S', 'D', 'LEFT', 'RIGHT', 'UP', 'DOWN', 'T', 'G', 'Y'):
+        defaults = {'W': 'LS_UP', 'A': 'LS_LEFT', 'S': 'LS_DOWN', 'D': 'LS_RIGHT',
+                    'LEFT': 'RS_LEFT', 'RIGHT': 'RS_RIGHT', 'UP': 'RS_UP', 'DOWN': 'RS_DOWN'}
+        for scancode, binding in defaults.items():
+            self.assertIn(f'{{SDL_SCANCODE_{scancode},{binding}}}', text)
+        for scancode in ('T', 'G', 'Y'):
             self.assertIn(f'SDL_SCANCODE_{scancode}]', text, scancode)
 
     def test_ps4_button_names_are_the_ones_apply_button_map_reads(self):
@@ -260,8 +264,11 @@ VkPhysicalDeviceMemoryProperties:
             for item_id, value in items.items():       # a value the table accepts (not silently dropped)
                 item = gfxlogic.item_by_id(item_id)
                 self.assertIn(value, [item.default] + [c[0] for c in item.choices] + ['0', '1'], item_id)
-        self.assertEqual(('rec1', 'current', 'amd', 'rx580', 'seco', 'apolar_amd', 'apolar_rtx', 'apolar_gtx',
-                          'renderer_v2_8gb', 'renderer_v2_12gb', 'renderer_v2', 'renderer_v2_native', 'performance', 'balanced', 'quality', 'ps4'),
+        # 2026-11-23: 'personal' (Renderer V2 - Custom Personal Graphics) replaced the 8 GB preset and
+        # comes first; 'maxed' (Maxed Out - Strong PC's) joined the main presets.
+        self.assertEqual(('personal', 'rec1', 'current', 'amd', 'rx580', 'seco', 'apolar_amd', 'apolar_rtx',
+                          'apolar_gtx', 'renderer_v2_12gb', 'renderer_v2', 'renderer_v2_native',
+                          'performance', 'balanced', 'quality', 'maxed', 'ps4'),
                          tuple(p[0] for p in gfxlogic.PRESETS))
 
     def test_apolar_profiles_are_complete_and_credit_the_contributor(self):
@@ -295,12 +302,14 @@ VkPhysicalDeviceMemoryProperties:
             self.assertIsNone(stored[key], key)
         self.assertIsNone(stored['BP06'])      # on is the default
         self.assertIsNone(stored['menu:fps_limit'])
-        for preset_id in ('performance', 'balanced', 'quality', 'ps4'):
-            plain_settings, plain_items = gfxlogic.preset_targets(preset_id)
-            self.assertEqual({'vsync'}, set(plain_settings), preset_id)
-            self.assertNotIn('menu:lod_scale', plain_items)
-            self.assertNotIn('BP07', plain_items)
-        # the plain presets do not reach its keys, so it is only recognised when they all match
+        # 2026-11-23: the main presets are tuned full presets with the same GPU setup and BP07 on;
+        # 'current' differs from them by its renderer choice.
+        for preset_id in gfxlogic.TUNED_IDS:
+            tuned_settings, tuned_items = gfxlogic.preset_targets(preset_id)
+            self.assertEqual(('2', False, True), (tuned_settings['gpu_readbacks'], tuned_settings['eager_readback'],
+                                                  tuned_settings['write_merge']), preset_id)
+            self.assertEqual('1', tuned_items['BP07'], preset_id)
+            # (TLG_RENDERER differs by platform: renderer v2 is stored where it is not the default.)
         base_settings, base_items = gfxlogic.preset_targets('balanced')
         self.assertEqual('balanced', gfxlogic.matching_preset(base_settings, base_items))
         self.assertEqual('current', gfxlogic.matching_preset(settings, stored))
@@ -330,17 +339,25 @@ VkPhysicalDeviceMemoryProperties:
         self.assertEqual('current', gfxlogic.matching_preset(s, dict(st, TLG_BLOCK1D='1', TLG_BC_TINY='1', TLG_NO_MSAA='1')))
 
     def test_balanced_is_the_default_and_ps4_is_30fps_without_fsr(self):
+        self.assertEqual('balanced', gfxlogic.DEFAULT_PRESET)
         settings, stored = gfxlogic.preset_targets('balanced')
-        self.assertEqual({'vsync': True}, settings)
-        self.assertTrue(all(v is None for v in stored.values()))
-        for preset_id in ('performance', 'balanced', 'quality', 'ps4'):  # background shader compile is never undone by a preset
+        self.assertTrue(settings['vsync'])
+        self.assertIsNone(stored['menu:fps_limit'])   # 60, the default
+        self.assertEqual('0', stored['menu:rcas'])    # native: no sharpening
+        for preset_id in gfxlogic.TUNED_IDS:          # no upscaler and no automatic quality in any of them
             _, items = gfxlogic.preset_targets(preset_id)
             self.assertIsNone(items['TLG_ASYNC_SHADERS'], preset_id)
+            self.assertIsNone(items['menu:fsr1'], preset_id)
+            self.assertIsNone(items['menu:quality_target_fps'], preset_id)
         _, ps4 = gfxlogic.preset_targets('ps4')
         self.assertEqual('30', ps4['menu:fps_limit'])
-        self.assertIsNone(ps4['menu:fsr1'])           # off is the default
         self.assertEqual('0', ps4['menu:rcas'])       # sharpening is on by default: off is stored
-        self.assertEqual({'vsync': False}, gfxlogic.preset_targets('performance')[0])
+        performance, perf_items = gfxlogic.preset_targets('performance')
+        self.assertFalse(performance['vsync'])
+        self.assertEqual('0', perf_items['menu:fps_limit'])
+        maxed, maxed_items = gfxlogic.preset_targets('maxed')
+        self.assertFalse(maxed['vsync'])
+        self.assertEqual(('0', '4'), (maxed_items['menu:fps_limit'], maxed_items['menu:lod_scale']))
 
     def test_view_presets(self):
         _, rec1 = gfxlogic.preset_targets('rec1')
@@ -361,9 +378,20 @@ VkPhysicalDeviceMemoryProperties:
 
     def test_every_preset_matches_itself_only(self):
         for preset_id, _, _ in gfxlogic.PRESETS:
+            if preset_id == gfxlogic.PERSONAL_ID:
+                continue
             settings, stored = gfxlogic.preset_targets(preset_id)
-            self.assertEqual(preset_id, gfxlogic.matching_preset(settings, stored))
+            match = gfxlogic.matching_preset(settings, stored)
+            if preset_id == 'renderer_v2_native':
+                # Hidden experimental preset: the tuned Balanced sets the same values and is checked
+                # first (2026-11-23), so it shows as Balanced.
+                self.assertEqual('balanced', match)
+                continue
+            self.assertEqual(preset_id, match)
         self.assertIsNone(gfxlogic.matching_preset({'vsync': True}, {'menu:fps_limit': '60'}))
+        # The personal preset is whatever the player set while it is selected (2026-11-23).
+        self.assertEqual(gfxlogic.PERSONAL_ID,
+                         gfxlogic.matching_preset({'graphics_mode': gfxlogic.PERSONAL_ID}, {'menu:fps_limit': '60'}))
 
 
 class StringsTests(unittest.TestCase):
@@ -419,7 +447,11 @@ class StringsTests(unittest.TestCase):
     def test_main_loads_both_screens(self):
         main = (QT / 'qml' / 'Launcher' / 'Main.qml').read_text(encoding='utf-8')
         self.assertIn('GraphicsPage', main)
-        self.assertIn('ControlsPage', main)
+        # 2026-11-23: the Controls tab is ControlsHub (controller settings + Controller guides),
+        # which holds ControlsPage.
+        self.assertIn('ControlsHub', main)
+        hub = (QT / 'qml' / 'Launcher' / 'ControlsHub.qml').read_text(encoding='utf-8')
+        self.assertIn('ControlsPage', hub)
 
 
 @unittest.skipUnless(HAVE_QT, 'PySide6 not installed')
@@ -456,22 +488,27 @@ class ControllerTests(unittest.TestCase):
     # -- Graphics --------------------------------------------------------------------------------------
     def test_rows_cover_the_launcher_video_box_and_the_menu_tabs(self):
         ids = [r['id'] for r in self.graphics.model.rows if r['kind'] == 'item']
-        for rid in ('s:display_mode', 's:vsync', 's:show_fps', 's:gpu_readbacks', 's:eager_readback',
-                    's:write_merge', 's:vram_budget_mb', 'menu:fsr1', 'menu:rcas', 'menu:rcas_strength',
-                    'menu:fps_limit', 'menu:frames_queued', 'TLG_ASYNC_SHADERS', 'TLG_DEFERRED_READBACK',
-                    'TLG_STALE_READBACK', 'TLG_BACKGROUND_WARMUP', 'TLG_BARRIER_MERGE', 'menu:overlay_corner'):
+        for rid in ('s:display_mode', 's:vsync', 's:allow_hdr', 's:gpu_readbacks', 's:vram_auto',
+                    's:vram_budget_mb', 'menu:rcas', 'menu:rcas_strength', 'menu:frames_queued',
+                    'menu:quality_floor', 'TLG_RENDERER', 'TLG_NATIVE_PASSES', 'TLG_BARRIER_MERGE',
+                    'n:output', 'n:internal'):
             self.assertIn(rid, ids)
+        # 2026-11-23: the GPU loading switches are fixed (infamous_run.LOCKED_GPU_ENV) and the
+        # shader precompile is always on: none of them is a row any more.
+        for rid in ('TLG_ASYNC_SHADERS', 'TLG_DEFERRED_READBACK', 'TLG_STALE_READBACK',
+                    'TLG_BACKGROUND_WARMUP', 's:eager_readback', 's:write_merge', 's:precompile_shaders'):
+            self.assertNotIn(rid, ids)
         self.assertEqual(len(ids), len(set(ids)))
         for row in self.graphics.model.rows:
             if row['kind'] == 'item':
-                self.assertTrue(row['tags'][0]['text'] in ('in game', 'restarts the game'), row['id'])
+                self.assertTrue(row['tags'][0]['text'] in ('in game', 'needs game restart'), row['id'])
 
     def test_live_and_restart_tags_follow_the_table(self):
         row = self.graphics.model.get
-        self.assertEqual('in game', row('menu:fps_limit')['tags'][0]['text'])
-        self.assertEqual('restarts the game', row('s:vram_budget_mb')['tags'][0]['text'])
-        self.assertEqual('restarts the game', row('TLG_STALE_READBACK')['tags'][0]['text'])
-        self.assertEqual('in game', row('TLG_ASYNC_SHADERS')['tags'][0]['text'])
+        self.assertEqual('in game', row('menu:rcas')['tags'][0]['text'])
+        self.assertEqual('in game', row('menu:quality_floor')['tags'][0]['text'])
+        self.assertEqual('needs game restart', row('s:vram_budget_mb')['tags'][0]['text'])
+        self.assertEqual('needs game restart', row('TLG_BARRIER_MERGE')['tags'][0]['text'])
 
     def test_settings_json_rows_write_the_same_keys_as_the_tk_launcher(self):
         self.graphics.setValue('s:display_mode', 'Borderless')
@@ -487,15 +524,16 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(1, self.graphics.model.get('s:display_mode')['index'])
 
     def test_menu_rows_go_through_the_fixes_path_into_tlg_ini(self):
-        self.graphics.setValue('menu:fps_limit', '60')
+        # The frame rate limit is set on the Play tab now; its row value still goes through here.
+        self.graphics.setValue('menu:fps_limit', '120')
         self.graphics.setValue('menu:rcas_strength', '40')
-        self.assertIn('fps_limit=60', self.ini_text())
+        self.assertIn('fps_limit=120', self.ini_text())
         self.assertIn('rcas_strength=40', self.ini_text())
-        self.assertEqual('60', self.backend.fix_states['menu:fps_limit'])
-        self.graphics.setValue('menu:fps_limit', '0')           # back to the default: the key goes
+        self.assertEqual('120', self.backend.fix_states['menu:fps_limit'])
+        self.graphics.setValue('menu:fps_limit', '60')          # back to the default (60, as the game): the key goes
         self.assertNotIn('fps_limit', self.ini_text())
-        row = self.graphics.model.get('menu:fps_limit')
-        self.assertEqual('0', row['options'][row['index']]['value'])
+        self.graphics.setValue('menu:fps_limit', '0')           # unlimited is stored (it is not the default)
+        self.assertIn('fps_limit=0', self.ini_text())
 
     def test_output_and_internal_resolution_write_the_game_keys(self):
         self.assertEqual(['n:output', 'n:internal'], [r['id'] for r in self.graphics.model.rows[1:3]])
@@ -515,9 +553,9 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(50, native_resolution.read(logic.tlg_run.read_ini(self.ini))[1])
 
     def test_a_row_changed_on_the_fixes_screen_shows_here(self):
-        self.backend.setFix('TLG_STALE_READBACK', '1')
-        self.assertTrue(self.graphics.model.get('TLG_STALE_READBACK')['on'])
-        self.assertTrue(self.graphics.model.get('TLG_STALE_READBACK')['changed'])
+        self.backend.setFix('TLG_BARRIER_MERGE', '1')
+        self.assertTrue(self.graphics.model.get('TLG_BARRIER_MERGE')['on'])
+        self.assertTrue(self.graphics.model.get('TLG_BARRIER_MERGE')['changed'])
 
     def test_rx580_toggle_shares_and_persists_the_advanced_setting(self):
         item_id = 'TLG_BARRIER_MERGE'
@@ -545,19 +583,22 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(self.graphics.model.get('menu:rcas_strength')['disabled'])
 
     def test_presets_apply_and_are_recognised(self):
-        self.assertEqual('Current preset: Balanced', self.graphics.presetText)
+        # 2026-11-23: the main presets are tuned renderer v2 presets (no sharpening, BP07 on).
         self.graphics.applyPreset('ps4')
         self.assertIn('fps_limit=30', self.ini_text())
         self.assertIn('rcas=0', self.ini_text())
+        self.assertIn('bp07=1', self.ini_text())
         self.assertEqual('Current preset: True to PS4', self.graphics.presetText)
         self.assertEqual(['ps4'], [p['id'] for p in self.graphics.presets if p['active']])
-        self.graphics.applyPreset('performance')               # undoes what the PS4 one set
-        self.assertNotIn('fps_limit', self.ini_text())
-        self.assertIn('frames_queued=2', self.ini_text())
+        self.graphics.applyPreset('performance')               # no frame cap, no VSync
+        self.assertIn('fps_limit=0', self.ini_text())
         self.assertFalse(self.saved_settings()['vsync'])
-        self.graphics.applyPreset('balanced')
+        self.assertEqual('Current preset: Performance', self.graphics.presetText)
+        self.graphics.applyPreset('balanced')                  # undoes what Performance set
         self.assertTrue(self.saved_settings()['vsync'])
-        self.assertNotIn('frames_queued', self.ini_text())
+        self.assertNotIn('fps_limit', self.ini_text())         # 60, the default
+        self.assertNotIn('quality_floor', self.ini_text())
+        self.assertEqual('Current preset: Balanced', self.graphics.presetText)
         self.graphics.setValue('menu:fps_limit', '120')
         self.assertIn('custom', self.graphics.presetText)
 
@@ -575,8 +616,9 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('current', self.graphics.presetText.lower())
         self.graphics.applyPreset('balanced')
         ini = self.ini_text()
-        self.assertNotIn('rcas=0', ini)               # balanced: sharpening back to its default (on)
+        self.assertIn('rcas=0', ini)                  # 2026-11-23: Balanced is native, no sharpening either
         self.assertIn('bp07=1', ini)
+        self.assertNotIn('renderer=1', ini)           # but it undoes the older compatibility renderer choice
 
     def test_applying_a_full_preset_sends_a_changed_draw_distance_back_to_native(self):
         for preset in ('current', 'amd'):
@@ -605,12 +647,11 @@ class ControllerTests(unittest.TestCase):
         self.graphics.setValue('s:display_mode', 'Fullscreen')
         self.graphics.setValue('s:vram_budget_mb', '4000')
         self.graphics.setValue('menu:overlay_corner', '3')
-        self.backend.setFix('BP06', '0')
         self.graphics.applyPreset('ps4')
         saved = self.saved_settings()
         self.assertEqual(('Fullscreen', 4000), (saved['display_mode'], saved['vram_budget_mb']))
         self.assertIn('overlay_corner=3', self.ini_text())
-        self.assertIn('bp06=0', self.ini_text())
+        # 2026-11-23: the main presets are full presets, so fixes such as BP06 are theirs to set.
 
     def test_vram_line_and_suggestion(self):
         self.backend._gpu = ('NVIDIA GeForce RTX 2060', '1.4')
@@ -637,9 +678,11 @@ class ControllerTests(unittest.TestCase):
     def test_portuguese_texts(self):
         self.backend.settings['ui_language'] = 'pt_BR'
         self.backend.setLang('pt_BR')
+        self.graphics.applyPreset('balanced')
         self.assertEqual('Predefinição atual: Equilibrado', self.graphics.presetText)
-        self.assertEqual('no jogo', self.graphics.model.get('menu:fps_limit')['tags'][0]['text'])
-        self.assertIn('Sem limite', self.graphics.model.get('menu:fps_limit')['options'][-1]['label'])
+        self.assertEqual('no jogo', self.graphics.model.get('menu:rcas')['tags'][0]['text'])
+        # The frame rate limit is on the Play tab now (2026-11-23): its choices come from the backend.
+        self.assertTrue(any('Sem limite' in o['label'] for o in self.backend.fpsLimitOptions))
 
     def test_clear_cache_asks_first_and_never_while_playing(self):
         self.assertTrue(self.graphics.canClear)

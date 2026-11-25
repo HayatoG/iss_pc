@@ -669,6 +669,8 @@ void Rasterizer::NativeShadowAfterDraw(u32 draw) {
 }
 
 u32 Rasterizer::NativeShadowExecute(const iss::native_shadow::Batch& b) {
+    // ISS_GUEST_SYNC_BARRIERS: packets of this native range were not seen by the command processor.
+    SCOPE_EXIT { NoteGuestSync(); };
     const iss::cp_path::Scope cp_path_scope{iss::cp_path::ShadowNative};
     using namespace NativeShadow;
     LastRejectedShape() = ~0u;

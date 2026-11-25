@@ -18,11 +18,26 @@ static float read_float(const void *p,unsigned offset){float v;memcpy(&v,(const 
 static void release_follow(void){
     if(follow_owned){if(*no_follow==1)*no_follow=follow_before;follow_owned=0;}
 }
+static unsigned data_limits=0x1c0,context_limits=0x1c0;
 void runtime_mouse_aim_attach(uintptr_t base){
     no_follow=(unsigned char*)(base+0xe16c40u);
     atomic_store(&attached,base);
 }
+void runtime_mouse_aim_attach_at(uintptr_t follow,unsigned data_offset,unsigned context_offset){
+    no_follow=(unsigned char*)follow;data_limits=data_offset;context_limits=context_offset;
+    atomic_store(&attached,follow);
+}
 int runtime_mouse_aim_installed(void){return atomic_load(&attached)!=0;}
+/* The player camera update (the hooked site) runs every gameplay frame and stops in
+ * cutscenes and menus: -1 = hook not installed, 0 = idle for over 400 ms, 1 = running. */
+static atomic_uint camera_calls;
+/* How many times the player camera update has run (cutscene framing compares it frame to frame). */
+unsigned runtime_mouse_aim_camera_calls(void){return atomic_load(&camera_calls);}
+int runtime_mouse_aim_camera_live(void){
+    if(!atomic_load(&attached))return -1;
+    uint64_t last=atomic_load(&last_camera),now=mouse_aim_test_now();
+    return last && now>=last && now-last<=400000u;
+}
 /* Called by the existing pad sampler, including capture loss. No double
  * application through the mouse-to-stick path once this hook is installed. */
 int runtime_mouse_aim_motion(float dx,float dy,float sensitivity,int invert_y,int active){
@@ -50,6 +65,7 @@ int runtime_mouse_aim_motion(float dx,float dy,float sensitivity,int invert_y,in
 }
 void __attribute__((ms_abi)) runtime_mouse_aim_camera(float *angles,const void *data,const void *context){
     uint64_t now=mouse_aim_test_now();
+    atomic_fetch_add(&camera_calls,1);
     uint64_t previous=atomic_exchange(&last_camera,now);
     uint64_t motion=atomic_load(&last_motion);
     uint64_t bits=atomic_exchange(&pending,0);
@@ -58,8 +74,8 @@ void __attribute__((ms_abi)) runtime_mouse_aim_camera(float *angles,const void *
     if(!previous || now-previous>250000u || !motion || now-motion>250000u || !bits)return;
     if(!data || !context)return;
     float delta[2];memcpy(delta,&bits,8);
-    float dl=read_float(data,0x1c0),du=read_float(data,0x1c4);
-    float cl=read_float(context,0x1c0),cu=read_float(context,0x1c4);
+    float dl=read_float(data,data_limits),du=read_float(data,data_limits+4);
+    float cl=read_float(context,context_limits),cu=read_float(context,context_limits+4);
     int applied=iss_mouse_apply(angles,delta[0],delta[1],dl,du,cl,cu);
     if(camera_reports++<8)fprintf(stderr,
         "Direct mouse consume applied=%d delta=%.5g,%.5g limits=%.5g,%.5g/%.5g,%.5g angles=%.5g,%.5g\n",

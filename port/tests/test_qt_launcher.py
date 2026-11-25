@@ -75,8 +75,12 @@ class ChipTests(unittest.TestCase):
         kw.setdefault('states', {})
         kw.setdefault('problems', [])
         kw.setdefault('cache_bytes', 0)
-        settings = dict(settings, game_dir=kw.pop('game_dir', '/some/game'))
-        return logic.compute_chips(settings, logic.Translator(settings), **kw)
+        with tempfile.TemporaryDirectory() as root:
+            sfo = Path(root) / 'sce_sys' / 'param.sfo'
+            sfo.parent.mkdir()
+            sfo.write_bytes(make_sfo({'APP_VER': '01.07', 'TITLE_ID': 'CUSA00223'}))
+            settings = dict(settings, game_dir=kw.pop('game_dir', root))
+            return logic.compute_chips(settings, logic.Translator(settings), **kw)
 
     def test_everything_ready(self):
         chips, ready = self.chips(gpu=('NVIDIA GeForce RTX 2060', '1.3'), pad='DualSense',
@@ -84,10 +88,10 @@ class ChipTests(unittest.TestCase):
         self.assertTrue(ready)
         texts = [c['text'] for c in chips]
         self.assertIn('NVIDIA GeForce RTX 2060 · Vulkan 1.3', texts)
-        self.assertIn('Pasta do jogo OK · update 1.07', texts)
-        self.assertIn('Perfil: Recomendado', texts)
-        self.assertIn('Controle: DualSense', texts)
-        self.assertTrue(any(t.startswith('Cache de shaders: 218') for t in texts))
+        self.assertIn('Pasta do jogo OK · update 1.07 · CUSA00223', texts)
+        # 2026-11-22: only the GPU and game folder chips remain (the profile and shader cache chips
+        # told the player nothing to act on; the controller shows on the Controller guides page).
+        self.assertEqual(2, len(texts))
         self.assertTrue(all(c['level'] == 'ok' for c in chips))
 
     def test_missing_game_folder_blocks(self):
@@ -105,18 +109,20 @@ class ChipTests(unittest.TestCase):
         chips, ready = self.chips(problems=[('not_built', '/x/tlg-probe')])
         self.assertFalse(ready)
         texts = [c['text'] for c in chips]
-        self.assertIn('Pasta do jogo OK · update 1.07', texts)
+        self.assertIn('Pasta do jogo OK · update 1.07 · CUSA00223', texts)
         self.assertIn('Port não compilado (rode o build.sh)', texts)
 
-    def test_profile_counts_changes_like_the_tk_window(self):
-        chips, _ = self.chips(states={'BP06': '1', 'BP01': '0'})
-        self.assertIn('Perfil: personalizado (2 mudanças)', [c['text'] for c in chips])
+    def test_changed_fixes_add_no_chip(self):
+        # 2026-11-22: no profile chip; the Graphics screen shows the current preset instead.
+        plain, _ = self.chips()
+        changed, _ = self.chips(states={'BP06': '1', 'BP01': '0'})
+        self.assertEqual([c['text'] for c in plain], [c['text'] for c in changed])
 
     def test_english(self):
         chips, _ = self.chips(EN, gpu=('GPU', ''), pad=None)
         texts = [c['text'] for c in chips]
-        self.assertIn('Game folder OK · update 1.07', texts)
-        self.assertIn('No controller detected', texts)
+        self.assertIn('Game folder OK · update 1.07 · CUSA00223', texts)
+        self.assertFalse(any('controller' in t.lower() for t in texts))
 
 
 class ProbeParsingTests(unittest.TestCase):
@@ -206,7 +212,11 @@ class FixGroupTests(unittest.TestCase):
     def test_all_twelve_backports_and_the_ab_switches_are_listed(self):
         ids = {i.id for i in logic.fix_items()}
         self.assertTrue({f'BP{n:02d}' for n in range(1, 13)} <= ids)
-        self.assertTrue({i.id for i in logic.backports_table.DIAGNOSTICS} <= ids)
+        visible = {i.id for i in logic.backports_table.DIAGNOSTICS if not i.hidden}
+        self.assertTrue(visible <= ids, visible - ids)
+        # 2026-11-23: the GPU loading switches are fixed (infamous_run.LOCKED_GPU_ENV) and not shown.
+        hidden = {i.id for i in logic.backports_table.DIAGNOSTICS if i.hidden}
+        self.assertFalse(hidden & ids, hidden & ids)
 
     def test_risky_and_broken_items_are_experimental(self):
         for item in logic.fix_items():

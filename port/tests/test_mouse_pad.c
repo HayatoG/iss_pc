@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include "../src/runtime_pad.c"
+#include "test_pad_audio_stubs.h"
 /* No power-switch backend in this mouse/touchpad test. */
 int runtime_power_wheel_gameplay(void){return 1;}
 void runtime_power_wheel_status(IssPowerWheelStatus *out){memset(out,0,sizeof(*out));}

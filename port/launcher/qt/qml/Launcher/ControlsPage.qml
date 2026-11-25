@@ -9,7 +9,7 @@ Item {
     property bool guidesShown: false     // set by Main when the Controller guides screen exists
     signal openGuides()
 
-    component Card: Rectangle {
+    component Card: PolishCard {
         default property alias content: inner.data
         width: parent.width; height: inner.implicitHeight + 36
         radius: 14; color: Theme.card; border.width: 1; border.color: Theme.cardLine
@@ -36,7 +36,7 @@ Item {
             Text { text: Theme.tr("ctl_title"); color: "#fff"; font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 800 }); font.pixelSize: 42
                    font.weight: Font.ExtraBold; font.capitalization: Font.AllUppercase; font.letterSpacing: 2.1 }
             Text { width: parent.width; text: Theme.tr("ctl_intro"); wrapMode: Text.WordWrap; color: Theme.textDim
-                   font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
+                   font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
 
             // ---- controller --------------------------------------------------------------------
             SectionTitle { text: Theme.tr("ctl_sec_pad"); accent: page.accent }
@@ -48,9 +48,9 @@ Item {
                     Tag { text: PadControls.padKindText; tone: PadControls.padFound ? "good" : "info"; visible: PadControls.padFound; anchors.verticalCenter: parent.verticalCenter }
                 }
                 Text { visible: !PadControls.padFound; width: parent.width; text: PadControls.padKindText; wrapMode: Text.WordWrap; color: Theme.textDim
-                       font.family: Theme.fontText; font.pixelSize: 13 }
+                       font.family: Theme.fontText; font.pixelSize: 14 }
                 Text { visible: text !== ""; width: parent.width; text: PadControls.padHint; wrapMode: Text.WordWrap; color: Theme.textDim
-                       font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
+                       font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.3; lineHeightMode: Text.ProportionalHeight }
             }
             Column {
                 width: parent.width; spacing: 2
@@ -64,7 +64,7 @@ Item {
             SectionTitle { text: Theme.tr("ctl_sec_sensor"); accent: page.accent }
             Card {
                 Text { width: parent.width; text: Theme.tr("ctl_sensor_body"); wrapMode: Text.WordWrap; color: Theme.textSoft
-                       font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.4; lineHeightMode: Text.ProportionalHeight }
+                       font.family: Theme.fontText; font.pixelSize: 15; lineHeight: 1.4; lineHeightMode: Text.ProportionalHeight }
                 GhostButton { visible: page.guidesShown; compact: true; text: Theme.tr("ctl_open_guides"); onClicked: page.openGuides() }
             }
 
@@ -72,7 +72,7 @@ Item {
             SectionTitle { text: Theme.tr("ctl_sec_mouse"); accent: page.accent }
             Card {
                 Text { width: parent.width; text: Theme.tr("ctl_mouse_intro"); wrapMode: Text.WordWrap; color: Theme.textSoft
-                       font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.4; lineHeightMode: Text.ProportionalHeight }
+                       font.family: Theme.fontText; font.pixelSize: 15; lineHeight: 1.4; lineHeightMode: Text.ProportionalHeight }
                 Row {
                     spacing: 12
                     Tag { text: Theme.tr(PadControls.mouseEnabled ? "ctl_mouse_state_on" : "ctl_mouse_state_off")
@@ -93,7 +93,7 @@ Item {
             // ---- mouse as touchpad ---------------------------------------------------------------------
             SectionTitle { text: Theme.tr("ctl_sec_touch"); accent: page.accent }
             Text { width: parent.width; text: Theme.tr("ctl_touch_intro"); wrapMode: Text.WordWrap; color: Theme.textDim
-                   font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
+                   font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
             Column {
                 width: parent.width; spacing: 2
                 Repeater {
@@ -105,19 +105,20 @@ Item {
             // ---- keyboard ----------------------------------------------------------------------------------
             SectionTitle { text: Theme.tr("ctl_sec_keys"); accent: page.accent }
             Text { width: parent.width; text: Theme.tr("ctl_keys_intro"); wrapMode: Text.WordWrap; color: Theme.textDim
-                   font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
+                   font.family: Theme.fontText; font.pixelSize: 14; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
             Flow {
                 id: keys
                 width: parent.width; spacing: 8
                 Repeater {
                     model: PadControls.keyRows
-                    Rectangle {
+                    PolishCard {
                         width: (keys.width - keys.spacing) / 2; height: 44; radius: 10
                         color: Theme.card; border.width: 1
                         border.color: modelData.changed ? Qt.rgba(page.accent.r, page.accent.g, page.accent.b, 0.7) : Theme.cardLine
-                        Text { x: 14; width: parent.width - keyChip.width - 40; anchors.verticalCenter: parent.verticalCenter
+                        PadGlyph { id: glyphIcon; x: 10; anchors.verticalCenter: parent.verticalCenter; glyph: modelData.glyph || "" }
+                        Text { x: glyphIcon.x + glyphIcon.width + 10; width: parent.width - keyChip.width - x - 30; anchors.verticalCenter: parent.verticalCenter
                                text: modelData.name; color: Theme.text; elide: Text.ElideRight
-                               font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.DemiBold }
+                               font.family: Theme.fontText; font.pixelSize: 15; font.weight: Font.DemiBold }
                         Row {
                             anchors.right: parent.right; anchors.rightMargin: 12; anchors.verticalCenter: parent.verticalCenter; spacing: 8
                             Tag { visible: modelData.changed; text: Theme.tr("ctl_remapped"); tone: "warn"; anchors.verticalCenter: parent.verticalCenter }
@@ -126,7 +127,7 @@ Item {
                                 width: keyText.implicitWidth + 20; height: 28; radius: 6
                                 color: "#1d2027"; border.width: 1; border.color: "#3a404b"
                                 Text { id: keyText; anchors.centerIn: parent; text: modelData.keys; color: "#fff"
-                                       font.family: Theme.fontText; font.pixelSize: 13; font.weight: Font.Bold }
+                                       font.family: Theme.fontText; font.pixelSize: 14; font.weight: Font.Bold }
                             }
                         }
                     }
@@ -138,14 +139,14 @@ Item {
                 Text { text: Theme.tr("keymap_title"); color: Theme.textMuted; font.family: Theme.fontDisplay; font.variableAxes: ({ "wght": 700 })
                        font.pixelSize: 18; font.weight: Font.Bold; font.capitalization: Font.AllUppercase; font.letterSpacing: 0.9 }
                 Text { width: parent.width; text: Theme.tr("keymap_intro"); wrapMode: Text.WordWrap; color: Theme.textDim
-                       font.family: Theme.fontText; font.pixelSize: 12; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
+                       font.family: Theme.fontText; font.pixelSize: 13; lineHeight: 1.35; lineHeightMode: Text.ProportionalHeight }
                 TextField {
                     id: field
                     width: parent.width; height: 40
                     placeholderText: Theme.tr("keymap_placeholder")
                     placeholderTextColor: Theme.textFaint
                     color: "#fff"; selectByMouse: true
-                    font.family: Theme.fontText; font.pixelSize: 14
+                    font.family: Theme.fontText; font.pixelSize: 15
                     leftPadding: 12; rightPadding: 12
                     background: Rectangle { radius: 8; color: Theme.ghost; border.width: 1
                                             border.color: !PadControls.draftValid ? Theme.bad : field.activeFocus ? page.accent : Theme.ghostLine }

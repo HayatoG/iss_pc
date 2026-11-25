@@ -1,32 +1,14 @@
 {
-  "_comment": "Known problems by hardware, shown on the Support screen (local table, nothing is fetched). match: every condition named must hold. os: windows|linux. vendor: NVIDIA|AMD|Intel. gpu: regexes on the Vulkan device name. driver: regex on 'driverName driverInfo'. vram_gb_max / vram_gb_min: device-local memory in GiB (discrete GPUs). issues: GitHub issue numbers.",
+  "_comment": "Known problems by hardware, shown on the Support screen (local table, nothing is fetched). match: every condition named must hold. os: windows|linux. vendor: NVIDIA|AMD|Intel. gpu: regexes on the Vulkan device name. driver: regex on 'driverName driverInfo'. vram_gb_max / vram_gb_min: device-local memory in GiB (discrete GPUs). issues: GitHub issue numbers. 2026-11-23: removed 'ampere-windows' (RTX 30 flickering lights and smoke: came from reading GPU results ahead, now always off) and 'vram-4gb' (texture memory running out on 4 GB cards: the automatic VRAM budget and the automatic night lighting size now fit small cards).",
   "issues": [
     {
       "id": "polaris-windows",
       "match": {"os": ["windows"], "vendor": ["AMD"], "gpu": ["\\bRX\\s*(4[4-9]0|5[4-9]0)\\b", "Polaris", "Radeon\\s*\\(?(TM)?\\)?\\s*5[4-9]0\\b"]},
       "title": {"en": "AMD RX 580 / Polaris on Windows: crash in amdvlk64.dll", "pt": "AMD RX 580 / Polaris no Windows: crash em amdvlk64.dll"},
       "what": {
-        "en": "The game can close with a crash at amdvlk64.dll+0xebbbb. Try the switch BP09 (\"1D as 2D\", ISS_BP09=1) in Fixes > Experimental, and update the AMD driver to the latest version.",
-        "pt": "O jogo pode fechar com crash em amdvlk64.dll+0xebbbb. Tente a chave BP09 (\"1D como 2D\", ISS_BP09=1) em Correções > Experimental e atualize o driver da AMD para o mais recente."},
+        "en": "The game can close with a crash at amdvlk64.dll+0xebbbb. Update the AMD driver to the latest version. If it still happens, turn on Advanced settings (bottom left) and try the switch BP09 (\"1D as 2D\") on the Fixes tab.",
+        "pt": "O jogo pode fechar com crash em amdvlk64.dll+0xebbbb. Atualize o driver da AMD para o mais recente. Se continuar, ligue Configurações avançadas (embaixo à esquerda) e tente a chave BP09 (\"1D como 2D\") na aba Correções."},
       "issues": [49, 65, 67]
-    },
-    {
-      "id": "ampere-windows",
-      "match": {"os": ["windows"], "vendor": ["NVIDIA"], "gpu": ["\\bRTX\\s*30[5-9]0\\b", "\\bRTX\\s*A[2-6]000\\b"]},
-      "title": {"en": "NVIDIA RTX 30 (Ampere) on Windows: flickering lights and smoke", "pt": "NVIDIA RTX 30 (Ampere) no Windows: luzes e fumaça piscando"},
-      "what": {
-        "en": "Lights and smoke may flicker. Use Fixes > Recommended (the Recommended profile) and play two sessions in a row: the first one after an update recompiles the shaders.",
-        "pt": "Luzes e fumaça podem piscar. Use Correções > Recomendado (o perfil Recomendado) e jogue duas sessões seguidas: a primeira depois de atualizar recompila os shaders."},
-      "issues": []
-    },
-    {
-      "id": "vram-4gb",
-      "match": {"vram_gb_max": 4.5},
-      "title": {"en": "GPU with 4 GB of VRAM: texture memory runs out", "pt": "GPU com 4 GB de VRAM: a memória de textura estoura"},
-      "what": {
-        "en": "Texture memory can run out. Lower the resolution (Graphics) and keep the VRAM budget below your card's memory.",
-        "pt": "A memória de textura pode estourar. Baixe a resolução (Gráficos) e mantenha o orçamento de VRAM abaixo da memória da placa."},
-      "issues": [72, 75]
     },
     {
       "id": "maxwell-quadro",

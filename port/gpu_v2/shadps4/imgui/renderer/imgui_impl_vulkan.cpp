@@ -18,6 +18,12 @@
 
 namespace ImGui::Vulkan {
 
+// The descriptor pool must not be used by two threads at once (Vulkan external synchronization):
+// the command processor recreates the game's frames (AddTexture/RemoveTexture, on an HDR switch or
+// a resize) while the present thread uploads the overlay's textures. 2026-11-20: a crash inside the
+// NVIDIA driver in allocateDescriptorSets right after switching to HDR.
+static std::mutex descriptor_pool_mutex;
+
 struct RenderBuffer {
     vk::DeviceMemory buffer_memory{};
     vk::DeviceSize buffer_size{};
@@ -188,8 +194,14 @@ static uint32_t glsl_shader_frag_spv[] = {
 // Backend data stored in io.BackendRendererUserData to allow support for multiple Dear ImGui
 // contexts It is STRONGLY preferred that you use docking branch with multi-viewports (== single
 // Dear ImGui context + multiple windows) instead of multiple Dear ImGui contexts.
+// The backend of the context Init ran in (2026-11-20). It used to be read from the CURRENT ImGui
+// context, which is one global: this port's F1 overlay (tlg_overlay.cpp) switches it to its own
+// context while it draws on the present thread, and when the command processor recreated a game
+// frame at that moment (AddTexture after an HDR switch) it read the overlay backend's data as this
+// one's: a bogus descriptor pool and a crash in the driver (read at 0x180).
+static VkData* g_backend_data = nullptr;
 static VkData* GetBackendData() {
-    return ImGui::GetCurrentContext() ? (VkData*)ImGui::GetIO().BackendRendererUserData : nullptr;
+    return g_backend_data;
 }
 
 static uint32_t FindMemoryType(vk::MemoryPropertyFlags properties, uint32_t type_bits) {
@@ -294,6 +306,7 @@ ImTextureID AddTexture(vk::ImageView image_view, vk::ImageLayout image_layout,
             .descriptorSetCount = 1,
             .pSetLayouts = &bd->descriptor_set_layout,
         };
+        std::scoped_lock pool_lock{descriptor_pool_mutex};
         descriptor_set = CheckVkResult(v.device.allocateDescriptorSets(alloc_info)).front();
     }
 
@@ -483,7 +496,10 @@ void RemoveTexture(ImTextureID texture) {
     IM_ASSERT(texture != nullptr);
     VkData* bd = GetBackendData();
     const InitInfo& v = bd->init_info;
-    CheckVkErr(v.device.freeDescriptorSets(bd->descriptor_pool, {texture->descriptor_set}));
+    {
+        std::scoped_lock pool_lock{descriptor_pool_mutex};
+        CheckVkErr(v.device.freeDescriptorSets(bd->descriptor_pool, {texture->descriptor_set}));
+    }
     delete texture;
 }
 
@@ -1240,6 +1256,7 @@ bool Init(InitInfo info) {
     // Setup backend capabilities flags
     auto* bd = IM_NEW(VkData)(info);
     io.BackendRendererUserData = (void*)bd;
+    g_backend_data = bd;
     io.BackendRendererName = "imgui_impl_vulkan_shadps4";
     // We can honor the ImDrawCmd::VtxOffset field, allowing for large meshes.
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
@@ -1261,6 +1278,7 @@ void Shutdown() {
     io.BackendRendererUserData = nullptr;
     io.BackendFlags &=
         ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures);
+    g_backend_data = nullptr;
     IM_DELETE(bd);
 }
 

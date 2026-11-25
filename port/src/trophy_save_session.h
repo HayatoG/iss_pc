@@ -69,6 +69,13 @@ public:
             // The guarded player-progression reset observer clears this state
             // before New Game; ordinary loaded versions bind through full reads.
             auto next=bound?progress:Load(Path(key),fingerprint,48,key);next.save_identity=key;
+            // Every save the game writes is checked too (2026-11-06): anything its progress already
+            // proves counts, even if the game never reported it while playing.
+            if(recover){
+                std::vector<int> ids;
+                try{ids=RecoveredTrophies(t.bytes,recoverCollectibles);}catch(const std::exception& e){recovery_problem=e.what();}
+                for(int id:ids)if(!next.earned.contains(id)){next.earned[id]=int64_t(std::time(nullptr));next.recovered.insert(id);}
+            }
             Save(Path(key),next);progress=std::move(next);bound=true;
         }
     }

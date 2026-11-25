@@ -18,7 +18,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mod_patches
 
-TITLE_IDS = {'CUSA00223'}
+# Cheat files scoped with <ID> to either edition: EU 1.07 (CUSA00004) runs the US 1.07 executable
+# byte for byte, and a mask line only writes where its exact pattern is found, so files made for
+# one edition apply to the other.
+TITLE_IDS = {'CUSA00223', 'CUSA00004'}
 SELF_MAGIC = b'O\x15=\x1d'
 BUILTIN_MODS = (Path(__file__).resolve().parent.parent / 'patches' / 'iss_builtin_intro.xml',)
 

@@ -79,7 +79,32 @@ public:
     bool IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
                           bool check_read_access = false);
 
+    /// ISS_UPLOAD_OVERLAP_PROBE=1 (diagnostics, UPLOAD-QUEUE-PLAN.md step 0): the scheduler tick
+    /// of the last GPU use recorded for a buffer range (1 MB blocks), 0 when never used, and the
+    /// classification of an upload into it by when that use ran.
+    static bool UploadOverlapProbe();
+    u64 LastUseTick(const VideoCore::Buffer* handle, u64 offset, u64 size) const;
+    void NoteUploadOverlap(const VideoCore::Buffer* handle, u64 offset, u64 size);
+
     void FlushBarriers();
+
+    /// ISS_MERGE_RT_BARRIERS=1 (off by default): a render target that is also bound as a texture
+    /// flushes the pending barriers before its feedback-loop transition only when one of them is
+    /// for this same image (two barriers of one image in one batch are unordered). Otherwise its
+    /// transition joins the pending batch, flushed once before the pass.
+    static bool MergeRenderTargetBarriers();
+    [[nodiscard]] bool HasPendingImageBarrier(const VideoCore::Image* image) const;
+
+    /// The barrier a guest draw or dispatch needs for the hazards its bindings found. With
+    /// ISS_GUEST_SYNC_BARRIERS=1 it is only flushed when the guest asked the GPU to wait since the
+    /// last flush (NoteGuestSync), or when the hazards involve the port's own transfers or image
+    /// layouts; otherwise it stays pending, as the guest's own GPU would not have waited there.
+    void FlushHazards();
+    /// A guest wait/cache action (ACQUIRE_MEM, EOS/EOP, RELEASE_MEM, WAIT_REG_MEM, EVENT_WRITE)
+    /// or work recorded by a native path: the next hazard flushes.
+    void NoteGuestSync() noexcept {
+        guest_sync_pending = true;
+    }
 
     /// ISS_UNIFIED_MEMORY: the imported heap's buffer, whose reads are not recorded as ranges
     /// (a write to it is then always ordered after a barrier, see IsBufferAccessed).
@@ -143,6 +168,7 @@ private:
     vk::MemoryBarrier2 memory_barrier{};
     u64 hazard_seq{1};
     u64 flush_seq{1};
+    bool guest_sync_pending{true};
 };
 
 } // namespace Vulkan

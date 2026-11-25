@@ -102,8 +102,12 @@ class RoundTripTests(Base):
         item = gfxlogic.item_by_id('TLG_BARRIER_MERGE')
         self.assertEqual(item.default, '0')
         self.assertEqual(item.tab, 'image')
+        # 2026-11-23: Balanced (the default preset) is a tuned renderer v2 preset that also sets
+        # sharpening and BP07, so untouched defaults are no longer Balanced by themselves: apply it.
+        gfxlogic.apply_targets(settings, states, gfxlogic.preset_targets(gfxlogic.DEFAULT_PRESET))
         self.assertEqual(gfxlogic.matching_preset(settings, states), gfxlogic.DEFAULT_PRESET)
-        self.assertEqual(backports_table.environment(states), {})
+        self.assertIsNone(states['TLG_BARRIER_MERGE'])
+        self.assertNotIn('ISS_BARRIER_MERGE', backports_table.environment(states))
 
         gfxlogic.apply_targets(settings, states, gfxlogic.preset_targets('rx580'))
         self.assertEqual(states['TLG_BARRIER_MERGE'], '1')

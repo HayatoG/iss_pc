@@ -43,9 +43,9 @@ namespace iss { extern std::atomic<unsigned> g_preload_entries, g_preload_total;
 // boost.asio needs Winsock 2 before <windows.h> pulls in the old WinSock.h.
 #ifdef _WIN32
 #include <winsock2.h>
-#endif
 #include <windows.h>
 #include <tlhelp32.h>
+#endif
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <xxhash.h>
@@ -291,6 +291,8 @@ void SetOutputDir(const std::filesystem::path&,const std::string&){}
 bool IsRenderDocLoaded(){return false;}
 void RequestScreenshot(ScreenshotRequest request){if(request==ScreenshotRequest::GameOnly)++screenshot_requests;else if(request==ScreenshotRequest::WithOverlays)++overlay_screenshot_requests;}
 u32 ConsumeGameOnlyScreenshotRequests(){return screenshot_requests.exchange(0);}
+// For the game-side runtime (C): one game-only screenshot (diagnostics, e.g. ISS_CUTSCENE_SHOT).
+extern "C" void tlggpu_request_screenshot(void){++screenshot_requests;++overlay_screenshot_requests;}
 u32 ConsumeWithOverlaysScreenshotRequests(){return overlay_screenshot_requests.exchange(0);}
 ScreenshotRequests ConsumeScreenshotRequests(){return {ConsumeGameOnlyScreenshotRequests(),ConsumeWithOverlaysScreenshotRequests()};}
 }
@@ -386,6 +388,7 @@ extern "C" void IssPreciseSleepUs(unsigned us){
 // loaded and relocated, before the guest threads start.
 extern "C" void iss_gpu_install_image(uint64_t image_base){
     host.image_base=image_base;
+    Common::Perf::GetTuning().relaxed_image_base.store(image_base,std::memory_order_release);
     // The executing image (as native/engine_draw.cpp patches it), not a backing view.
     if(iss::native_shadow::Enabled())
         iss::native_shadow::Install(host.image_base,reinterpret_cast<const unsigned char*>(host.image_base+0x43D590));
@@ -443,6 +446,19 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
     std::fprintf(stderr,"PORT_TUNING large_read_memo=%d\n",descriptor_fast);
     const bool occlusion=[] {const char *p=std::getenv("ISS_REAL_OCCLUSION");return p&&p[0]=='1';}();
     tuning.real_occlusion=occlusion;
+    // ISS_LDS_MULTI=0/1 (default 0): compute workgroups larger than a GCN wave get LDS barriers
+    // (as the classic renderer's TLG_LDS_MULTI). Not needed for the night lighting (that was the
+    // huge read clamp, ISS_HUGE_READ_WINDOW_MB) nor the smoke (ISS_WAVE_BARRIERS), and it costs
+    // ~9 fps (standing A/B 2026-11-04: 85.4 vs 94.3), so it stays off.
+    const bool lds_multi=[] {const char *p=std::getenv("ISS_LDS_MULTI");return p&&p[0]=='1';}();
+    tuning.lds_barriers_multi_wave=lds_multi;
+    std::fprintf(stderr,"PORT_TUNING lds_barriers_multi_wave=%d\n",lds_multi);
+    // ISS_WAVE_BARRIERS=0/1 (default 0): compute workgroups split across host subgroups get a
+    // barrier after the buffer stores of their uniform loops (GPU particle sorting within a
+    // wave). For the flickering smoke test (2026-11-04).
+    const bool wave_barriers=[] {const char *p=std::getenv("ISS_WAVE_BARRIERS");return p&&p[0]=='1';}();
+    tuning.wave_memory_barriers=wave_barriers;
+    std::fprintf(stderr,"PORT_TUNING wave_memory_barriers=%d\n",wave_barriers);
     const char *readback_setting=std::getenv("ISS_READBACK_WINDOW_KB");
     const long readback_kb=readback_setting?std::strtol(readback_setting,nullptr,10):512;
     tuning.readback_window_bytes=(readback_kb==64||readback_kb==128)?u64(readback_kb)*1024:512*1024;
@@ -460,7 +476,13 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
     const bool upload_worker=[] {const char *p=std::getenv("ISS_UPLOAD_WORKER");return p&&p[0]=='1';}();
     Common::Perf::GetTuning().async_uploads=upload_worker;
     std::fprintf(stderr,"PORT_TUNING async_uploads=%d async_pipelines=0\n",upload_worker);
-    if(const char *p=std::getenv("ISS_GPU_PROFILE");p&&(p[0]=='1'||p[0]=='2'))Common::Perf::GetTuning().gpu_profile=p[0]-'0';
+    // 3: also GPU time per render pass (Scheduler::ProfilePassBegin), by target size.
+    // 4: also GPU time per (render pass, fragment shader) and the GPU time outside timed work.
+    // 2026-11-24: 1 by default (two GPU timestamps per submission, no log of its own): the GPU busy
+    // time behind GPU_FRAME_MS, which the launcher's "Your last session" reads. ISS_GPU_PROFILE=0 off.
+    {const char *p=std::getenv("ISS_GPU_PROFILE");
+     Common::Perf::GetTuning().gpu_profile=p&&p[0]>='0'&&p[0]<='4'?u32(p[0]-'0'):1u;
+     std::fprintf(stderr,"PORT_TUNING gpu_profile=%u\n",Common::Perf::GetTuning().gpu_profile.load());}
     {const char *p=std::getenv("ISS_COMPUTE_PHASES");iss::phase::g_enabled=p&&p[0]=='1';
      std::fprintf(stderr,"PORT_TUNING compute_phases=%d\n",iss::phase::Enabled()?1:0);}
     // ISS_TIMER_1MS=1 (off by default, the user's choice): 1 ms timer resolution for this
@@ -501,6 +523,8 @@ extern "C" int iss_gpu_initialize(const IssGpuCallbacks *callbacks){
             else if(name=="async_uploads")set(tuning.async_uploads,value);
             else if(name=="readback_write_discard")set(tuning.readback_write_discard,value);
             else if(name=="readback_write_merge")set(tuning.readback_write_merge,value);
+            else if(name=="readback_keep_ranges")set(tuning.readback_keep_ranges,value);
+            else if(name=="readback_prefetch")set(tuning.readback_prefetch,value);
             else if(name=="gpu_threads_priority")set(tuning.gpu_threads_priority,value);
             else if(name=="asc_yield_packets")set(tuning.asc_yield_packets,value);
             else if(name=="recorder_spin_us")set(tuning.recorder_spin_us,value);

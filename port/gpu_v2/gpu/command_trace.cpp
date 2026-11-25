@@ -18,6 +18,8 @@ namespace {
 struct Trace {
     FILE* file{};
     u64 first_ns{}, sequence{}, submit{}, start_submit{}, bytes{};
+    u64 next_trigger_check_ns{};
+    const char* trigger{};
     u32 frames{2};
     double delay_seconds{30};
     bool active{}, finished{};
@@ -30,11 +32,23 @@ struct Trace {
             delay_seconds = std::clamp(std::strtod(p, nullptr), 0.0, 300.0);
         if (const char* p = std::getenv("ISS_COMMAND_TRACE_FRAMES"))
             frames = std::clamp<u32>(std::strtoul(p, nullptr, 10), 1, 10);
+        trigger = std::getenv("ISS_COMMAND_TRACE_TRIGGER");
+        if (trigger && !*trigger) trigger = nullptr;
         file = std::fopen(path, "wb");
         if (!file) { finished = true; std::fprintf(stderr, "COMMAND_TRACE open failed\n"); return; }
         std::setvbuf(file, buffer.data(), _IOFBF, buffer.size());
         std::fprintf(file, "{\"event\":\"header\",\"version\":1,\"requested_submits\":%u,\"delay_seconds\":%.3f,\"meaning\":\"CPU translation order; declared ranges, not actual shader accesses\"}\n", frames, delay_seconds);
         first_ns = Common::Perf::NowNs();
+    }
+    bool ShouldStart() {
+        const u64 now = Common::Perf::NowNs();
+        if (!trigger) return double(now - first_ns) / 1e9 >= delay_seconds;
+        if (now < next_trigger_check_ns) return false;
+        next_trigger_check_ns = now + 100'000'000;
+        auto* signal = std::fopen(trigger, "rb");
+        if (!signal) return false;
+        std::fclose(signal);
+        return true;
     }
     ~Trace() { if (file) std::fclose(file); }
     void End(const char* why) {
@@ -65,7 +79,7 @@ void Submit() {
         s.Prefix("submit_end", -1); std::fputs("}\n", s.file);
         std::fflush(s.file);
         if (s.submit - s.start_submit >= s.frames) { s.End("complete"); return; }
-    } else if (double(Common::Perf::NowNs() - s.first_ns) / 1e9 >= s.delay_seconds) {
+    } else if (s.ShouldStart()) {
         s.start_submit = s.submit; s.active = true;
         s.Prefix("begin", -1); std::fputs("}\n", s.file);
         std::fprintf(stderr, "COMMAND_TRACE started, submit=%llu\n", s.submit);

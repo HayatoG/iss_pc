@@ -40,13 +40,42 @@ def eboot_segments(elf):
     return segments
 
 
+US_107_ELF_SHA256 = 'b3afd173a379f83e1e408e71fdef22b78f93092d332b79decd48a18a08bfc605'
+_verified_code = {}
+
+
+def verified_107_code(game):
+    """True when the folder's eboot is the 1.07 executable (identical in US CUSA00223 and EU
+    CUSA00004), byte for byte. Remembered while eboot.bin keeps its size and time."""
+    eboot = Path(game) / 'eboot.bin'
+    try:
+        stat = eboot.stat()
+    except OSError:
+        return False
+    key = (str(eboot), stat.st_size, stat.st_mtime_ns)
+    if key not in _verified_code:
+        try:
+            import hashlib
+            from infamous_patches import read_eboot_elf
+            elf = read_eboot_elf(game)
+            _verified_code[key] = elf is not None and hashlib.sha256(elf).hexdigest() == US_107_ELF_SHA256
+        except (OSError, ValueError, ImportError):
+            _verified_code[key] = False
+    return _verified_code[key]
+
+
 def game_app_version(game):
-    """APP_VER of the game folder's param.sfo ("01.03"), or None when it cannot be read."""
+    """APP_VER of the game folder's param.sfo ("01.03"), or None when it cannot be read.
+    Dumps often carry the base game's param.sfo (APP_VER 01.00, VERSION 01.07) beside the 1.07
+    eboot: when the eboot is verified 1.07 code, the version is 1.07 whatever the label says."""
     try:
         from prepare import sfo
-        return sfo((Path(game) / 'sce_sys/param.sfo').read_bytes()).get('APP_VER')
+        version = sfo((Path(game) / 'sce_sys/param.sfo').read_bytes()).get('APP_VER')
     except (OSError, ValueError, ImportError):
         return None
+    if version is not None and version != '01.07' and verified_107_code(game):
+        return '01.07'
+    return version
 
 
 def encode(line):
@@ -135,7 +164,14 @@ def _compile_mask(line, executable_segments):
         relative = int(line.get('Offset', '0'), 0)
     except ValueError:
         relative = int(line.get('Offset', '0'), 10)
-    offset = matches[0] + relative - EBOOT_BASE
+    # matches[0] is already an image offset. Offset is read two ways: GoldHEN cheat files give it
+    # relative to the match ("0" = the first byte of the match); files written for this port give
+    # EBOOT_BASE + that ("0x400000" = the first byte). An Offset under EBOOT_BASE (in either
+    # direction) is the GoldHEN form. Subtracting EBOOT_BASE from it, as before, wrote 4 MB too
+    # early, or skipped the mod when that fell before the eboot.
+    if abs(relative) >= EBOOT_BASE:
+        relative -= EBOOT_BASE
+    offset = matches[0] + relative
     return offset, encode({**line.attrib, 'Type': 'bytes'})
 
 

@@ -24,5 +24,7 @@ struct Heap {
 void Install(std::uint64_t image_base);
 /// Heap 0 and 1 in the order they were first seen; false when not installed.
 bool Read(Heap out[2]);
+/// The PC's physical RAM: available now and total (2026-11-14, the texture budget's RAM guard).
+bool SystemRam(std::uint64_t& available, std::uint64_t& total);
 
 } // namespace iss::heap_census
