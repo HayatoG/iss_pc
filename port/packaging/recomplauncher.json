@@ -1,0 +1,79 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "inFAMOUS Second Son",
+  "repo": "HayatoG/iss_pc",
+  "min": "0.90.0-beta.37",
+  "game": {
+    "kind": "folder",
+    "label": "Your own dump of inFAMOUS Second Son for PS4 (CUSA00223, US): the base game 1.00 with update 1.07 copied over it, in one folder with eboot.bin at its top.",
+    "check": { "file": "eboot.bin" }
+  },
+  "inputs": [
+    {
+      "id": "dlss",
+      "label": "NVIDIA DLSS",
+      "role": "runtime",
+      "shared": "nvidia.dlss",
+      "optional": true,
+      "destination": "out/nvngx_dlss.dll"
+    }
+  ],
+  "start": {
+    "program": ["inFAMOUS Second Son.exe", "inFAMOUS Second Son"],
+    "args": ["--play", "--game", "{game}"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "json",
+      "file": [{ "path": "{config}/infamous-launcher/settings.json" }]
+    }
+  ],
+  "folders": {
+    "logs": [{ "path": "{install}/out/logs" }]
+  },
+  "settings": [
+    {
+      "id": "window",
+      "label": "Window",
+      "help": "Windowed opens in a window. Borderless fills the screen and lets you switch apps quickly. Fullscreen gives the game the screen to itself.",
+      "choices": [
+        { "label": "Windowed", "set": { "display_mode": "\"Windowed\"" } },
+        { "label": "Borderless", "set": { "display_mode": "\"Borderless\"" } },
+        { "label": "Fullscreen", "set": { "display_mode": "\"Fullscreen\"" } }
+      ],
+      "defaults": { "display_mode": "\"Windowed\"" }
+    },
+    {
+      "id": "vsync",
+      "label": "V-Sync",
+      "help": "Waits for the screen's refresh so the picture doesn't tear. Off can feel more responsive.",
+      "choices": [
+        { "label": "On", "set": { "vsync": "true" } },
+        { "label": "Off", "set": { "vsync": "false" } }
+      ],
+      "defaults": { "vsync": "true" }
+    },
+    {
+      "id": "fps",
+      "label": "Show FPS",
+      "help": "The frame rate in a corner of the game.",
+      "choices": [
+        { "label": "Off", "set": { "show_fps": "false" } },
+        { "label": "On", "set": { "show_fps": "true" } }
+      ],
+      "defaults": { "show_fps": "false" }
+    },
+    {
+      "id": "deadzone",
+      "label": "Stick dead zone",
+      "help": "How far a stick has to move before the game reacts. Raise it if the camera drifts on its own.",
+      "slider": { "key": "stick_deadzone", "min": 0, "max": 40, "step": 1, "format": "%d" },
+      "defaults": { "stick_deadzone": "10" }
+    }
+  ],
+  "actions": [
+    { "id": "logs", "label": "Logs", "help": "The game's logs, newest last. Send one when you report a problem.", "open": "logs" }
+  ]
+}

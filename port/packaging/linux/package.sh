@@ -64,7 +64,7 @@ cp -r tools/xpps "$dest/tools/"
 mkdir -p "$dest/tools/verify"
 cp tools/verify/*-107-art.json "$dest/tools/verify/"
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
-cp LICENSE packaging/README-player.md "$dest/"
+cp LICENSE packaging/README-player.md packaging/recomplauncher.json "$dest/"
 if [[ -f ${CMAKE_PREFIX_PATH:-}/share/licenses/opus/COPYING ]]; then
     cp "$CMAKE_PREFIX_PATH/share/licenses/opus/COPYING" "$dest/LICENSE-opus.txt"
 fi
