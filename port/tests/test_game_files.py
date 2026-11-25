@@ -83,6 +83,34 @@ class GameLanguageTests(unittest.TestCase):
             os.environ.pop('ISS_LANGUAGE', None)
             self.assertEqual('5', run.build_env(dict(run.DEFAULT_SETTINGS, game_dir=str(self.game)))['ISS_LANGUAGE'])
 
+    def packs(self, *names):
+        for name in names:
+            write(self.game / 'art' / 'cache' / f'lang_{name}_text.xpps', b'')
+            write(self.game / 'art' / 'cache' / f'lang_{name}_text_p.xpps', b'')
+        write(self.game / 'art' / 'cache' / 'a1.xpps', b'')
+        run._inspected.clear()
+
+    def test_european_dump_without_language_chunks_uses_its_packs(self):
+        # CUSA00004 1.07: all 71 PlayGo chunks are for every language, so only art/cache can tell
+        self.chunks([ALL] * 71)
+        self.packs('british', 'danish', 'dutch', 'english', 'finnish', 'french', 'german', 'italian',
+                   'norwegian', 'polish', 'portuguese', 'russian', 'spanish', 'swedish', 'turkish')
+        self.assertEqual(['en', 'en_GB', 'pt_PT', 'es', 'fr', 'de', 'it', 'nl', 'pl', 'tr', 'ru', 'fi', 'sv',
+                          'da', 'no'], run.game_languages(self.game))
+        settings = {'game_dir': str(self.game), 'game_language': 'auto'}
+        self.assertEqual('es', run.resolve_game_language(settings, {'LANG': 'es_ES.UTF-8'}))  # not es_LA
+        self.assertEqual('es', run.resolve_game_language(settings, {'LANG': 'es_MX.UTF-8'}))  # closest variant
+        self.assertEqual('pt_PT', run.resolve_game_language(settings, {'LANG': 'pt_BR.UTF-8'}))
+
+    def test_us_dump_packs_are_its_own_variants(self):
+        self.packs('brazilian', 'english', 'french', 'latino')
+        self.assertEqual(['en', 'pt_BR', 'es_LA', 'fr_CA'], run.game_languages(self.game))
+
+    def test_language_chunks_win_over_packs(self):
+        self.chunks([ALL, lang_mask(1), lang_mask(8)])
+        self.packs('english', 'spanish')
+        self.assertEqual(['en', 'ru'], run.game_languages(self.game))
+
     def test_big_endian_masks(self):
         self.chunks([lang_mask(1), lang_mask(8)], big_endian=True)
         self.assertEqual(['en', 'ru'], run.game_languages(self.game))
