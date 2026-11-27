@@ -1,7 +1,7 @@
 # 4 GB NVIDIA Laptop Testing & Baseline Guide
 
 Tested hardware: **NVIDIA GeForce RTX 3050 Ti Laptop GPU (4 GB GDDR6, 60–75W TGP)**, Intel Core i7-11800H, 16 GB DDR4 RAM.  
-Game Version: **CUSA00223 (US) Update 01.07** on renderer v2 (`gpu_v2`).
+Game Version: **CUSA00223 (US) Update 01.07** on renderer v2 (`gpu_v2`), **Beta Build: `sunny-beta-2026.11.12` (`7398060+sunny-beta-20261112`)**.
 
 ---
 
@@ -38,10 +38,10 @@ adv_staging_keep_mb=256
 
 ---
 
-## 3. Observed RTX 3050 Ti (4 GB) Benchmark Baseline
+## 3. Observed RTX 3050 Ti (4 GB) Benchmark Baseline (`sunny-beta-2026.11.12`)
 
-| Scene | Early Beta (Unpatched Defaults) | Tuned 4 GB Baseline (720p, Memory-Capped) | Peak VRAM |
-| :--- | :--- | :--- | :--- |
-| **Akomish Beach (Prologue)** | ~25–30 FPS | **58–60 FPS** | ~1,650 MB |
-| **Lantern Vista / Bridge** | ~20–24 FPS | **52–55 FPS** | ~2,400 MB |
-| **Seattle City (Combat)** | Crash (`ErrorOutOfDeviceMemory`) | **55–60 FPS** | **3,433 MB** (`0 MB` spilled) |
+| Scene | Beta Build | Unpatched Defaults | Tuned 4 GB Baseline (720p, Memory-Capped) | Peak VRAM |
+| :--- | :--- | :--- | :--- | :--- |
+| **Akomish Beach (Prologue)** | `7398060+sunny-beta-20261112` | ~25–30 FPS | **58–60 FPS** | ~1,650 MB |
+| **Lantern Vista / Bridge** | `7398060+sunny-beta-20261112` | ~20–24 FPS | **52–55 FPS** | ~2,400 MB |
+| **Seattle City (Combat)** | `7398060+sunny-beta-20261112` | Crash (`ErrorOutOfDeviceMemory`) | **55–60 FPS** | **3,433 MB** (`0 MB` spilled) |
