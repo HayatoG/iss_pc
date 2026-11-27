@@ -338,17 +338,44 @@ def playgo_languages(path):
     return ids
 
 
+# The game's own language packs, art/cache/lang_<name>_text.xpps -> GAME_LANGUAGES key. 'french' is
+# Canadian French in the US edition (it has 'latino'/'brazilian') and French in the European one.
+_LANGUAGE_PACKS = {'english': 'en', 'british': 'en_GB', 'brazilian': 'pt_BR', 'portuguese': 'pt_PT',
+                   'latino': 'es_LA', 'spanish': 'es', 'french': 'fr', 'german': 'de', 'italian': 'it',
+                   'dutch': 'nl', 'polish': 'pl', 'turkish': 'tr', 'russian': 'ru', 'finnish': 'fi',
+                   'swedish': 'sv', 'danish': 'da', 'norwegian': 'no'}
+_LANGUAGE_PACK = re.compile(r'lang_([a-z]+)_text\.xpps')
+
+
+def pack_languages(cache_dir):
+    """GAME_LANGUAGES keys of the text packs in <game>/art/cache (lang_spanish_text.xpps...): what a
+    European dump has, whose PlayGo chunks are all for every language (CUSA00004)."""
+    names = {m.group(1) for m in map(_LANGUAGE_PACK.fullmatch, os.listdir(cache_dir)) if m}
+    keys = {_LANGUAGE_PACKS[name] for name in names if name in _LANGUAGE_PACKS}
+    if 'fr' in keys and names & {'latino', 'brazilian'}:
+        keys = (keys - {'fr'}) | {'fr_CA'}
+    return keys
+
+
 def game_languages(game_dir):
     """The GAME_LANGUAGES keys the game files have, in that order, from the PlayGo chunk languages
-    of <game>/sce_sys/playgo-chunk.dat; the CUSA00223 set when that cannot tell (no file: FTP dumps
-    do not expose it; or no language chunk). param.sfo is no help: its TITLE_xx keys are store titles."""
+    of <game>/sce_sys/playgo-chunk.dat, else from the language packs in <game>/art/cache (a European
+    dump's chunks are all for every language); the CUSA00223 set when neither can tell (FTP dumps
+    do not expose playgo-chunk.dat). param.sfo is no help: its TITLE_xx keys are store titles."""
     ids = set()
     if game_dir:
         try:
             ids = _cached(Path(game_dir) / 'sce_sys' / 'playgo-chunk.dat', 'languages', playgo_languages)
         except (OSError, ValueError, struct.error):
             pass
-    return [key for key, code in GAME_LANGUAGES.items() if code in ids] or list(_DEFAULT_LANGUAGES)
+    keys = [key for key, code in GAME_LANGUAGES.items() if code in ids]
+    if not keys and game_dir:
+        try:
+            packs = _cached(Path(game_dir) / 'art' / 'cache', 'language_packs', pack_languages)
+            keys = [key for key in GAME_LANGUAGES if key in packs]
+        except OSError:
+            pass
+    return keys or list(_DEFAULT_LANGUAGES)
 
 
 def game_language_choices(settings):
