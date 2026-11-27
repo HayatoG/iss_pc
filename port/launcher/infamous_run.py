@@ -120,20 +120,27 @@ def mods_config():
     return Path(os.environ.get('ISS_MODS_CONFIG') or user_dir() / 'mods.json')
 
 
-# Native runtime feature, stored with the existing Mods selections. This key is not
-# an XML patch: the runtime allocates a guarded trampoline before guest execution.
+# Native runtime features, stored with the existing Mods selections. These keys are not
+# XML patches: camera uses a guarded runtime trampoline; keyboard prompts overlay the
+# 512x512 icon atlas inside lang_*_text.xpps reads without modifying game files.
 CAMERA_MOD_KEY = 'native/camera-speed-1.5x'
 CAMERA_PITCH_MOD_KEY = 'native/camera-prevent-pitch-slowdown'
+KBD_PROMPTS_MOD_KEY = 'native/keyboard-button-prompts'
+KBD_PROMPTS_ATLAS = OUT_DIR / 'kbd_prompts_atlas.bin'
 
 
-def camera_mod_enabled():
+def _native_mod_enabled(key):
     try:
         config = json.loads(mods_config().read_text())
         return (isinstance(config, dict) and
-                CAMERA_MOD_KEY in config.get('enabled', []) and
-                CAMERA_MOD_KEY not in config.get('disabled', []))
+                key in config.get('enabled', []) and
+                key not in config.get('disabled', []))
     except (OSError, ValueError, TypeError):
         return False
+
+
+def camera_mod_enabled():
+    return _native_mod_enabled(CAMERA_MOD_KEY)
 
 
 def camera_mod_environment():
@@ -144,6 +151,54 @@ def camera_mod_environment():
 def camera_pitch_mod_enabled():
     # Both runtime features follow the single saved camera selection.
     return camera_mod_enabled()
+
+
+def kbd_prompts_mod_enabled():
+    return _native_mod_enabled(KBD_PROMPTS_MOD_KEY)
+
+
+def kbd_prompts_supported(game):
+    if not game:
+        return False
+    try:
+        import kbd_prompts
+        source, _ = kbd_prompts.find_lang_atlas_source(game)
+        return source is not None
+    except Exception:
+        return False
+
+
+def kbd_prompts_effective_config(settings):
+    """Returns (key_map, mouse_enabled) matching what runtime_pad.c will load."""
+    ini = read_ini(user_dir() / 'tlg.ini')
+    env_km = os.environ.get('ISS_KEY_MAP') or os.environ.get('TLG_KEY_MAP')
+    if env_km:
+        key_map = env_km
+    else:
+        key_map = padsettings.environment(settings).get('ISS_KEY_MAP') or ini.get('key_map', '')
+    env_mouse = os.environ.get('ISS_MOUSE')
+    if env_mouse is None:
+        env_mouse = os.environ.get('TLG_MOUSE')
+    if env_mouse is not None and str(env_mouse).strip() != '':
+        mouse_enabled = str(env_mouse).strip() != '0'
+    else:
+        mouse_enabled = padsettings.mouse_value(ini, 'mouse_enabled')
+    return key_map, mouse_enabled
+
+
+def prepare_kbd_prompts(settings, log=print):
+    """Generates out/kbd_prompts_atlas.bin when the Keyboard prompts mod is enabled."""
+    if not kbd_prompts_mod_enabled():
+        return None
+    game = settings.get('game_dir')
+    if not kbd_prompts_supported(game):
+        return None
+    import kbd_prompts
+    key_map, mouse_enabled = kbd_prompts_effective_config(settings)
+    msg = kbd_prompts.generate(game, KBD_PROMPTS_ATLAS, key_map=key_map, mouse_enabled=mouse_enabled)
+    if log:
+        log(msg)
+    return KBD_PROMPTS_ATLAS
 
 
 def camera_build_supported(game, app_version):
@@ -182,6 +237,13 @@ def list_mods(settings):
                      'Zoomed aiming and vertical limits remain unchanged. '
                      'Requires a verified CUSA00223/CUSA00004 1.07 build. Applies on the next game launch.',
                      camera_mod_enabled()))
+    if kbd_prompts_supported(settings['game_dir']):
+        rows.append((KBD_PROMPTS_MOD_KEY, 'Keyboard & Mouse button prompts',
+                     'Replaces PlayStation button icons in HUD, tutorials and menus with dynamic '
+                     'Keyboard & Mouse icons generated from your active keybinds (including custom '
+                     'key remaps). Works across all languages and US/EU builds without modifying '
+                     'game files. Applies on the next game launch.',
+                     kbd_prompts_mod_enabled()))
     return rows
 
 
@@ -867,6 +929,7 @@ def prepare(settings, log=print):
         for line in result.stdout.splitlines():
             log(line)
     isa_table(log)
+    prepare_kbd_prompts(settings, log=log)
     return modules
 
 
@@ -1108,10 +1171,23 @@ def build_env(settings, extra=None):
                 env[key] = value
     if extra:
         env.update(extra)
-    # The Mods checkbox is authoritative, including when an older session script
-    # leaves scale variables in the launcher's inherited environment.
+    # The Mods checkboxes are authoritative, including when an older session script
+    # leaves scale or prompt variables in the launcher's inherited environment.
     env.update(camera_mod_environment())
     env['ISS_CAMERA_PREVENT_PITCH_SLOWDOWN'] = '1' if camera_pitch_mod_enabled() else '0'
+    if kbd_prompts_mod_enabled():
+        try:
+            atlas = prepare_kbd_prompts(settings, log=None)
+        except Exception:
+            atlas = KBD_PROMPTS_ATLAS if KBD_PROMPTS_ATLAS.is_file() else None
+        if atlas and Path(atlas).is_file():
+            env['ISS_KBD_PROMPTS_ATLAS'] = str(atlas)
+        else:
+            env.pop('ISS_KBD_PROMPTS_ATLAS', None)
+            env.pop('TLG_KBD_PROMPTS_ATLAS', None)
+    else:
+        env.pop('ISS_KBD_PROMPTS_ATLAS', None)
+        env.pop('TLG_KBD_PROMPTS_ATLAS', None)
     return env
 
 
