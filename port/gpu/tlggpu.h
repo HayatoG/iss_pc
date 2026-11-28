@@ -43,7 +43,7 @@ typedef struct TlgSaveEntry {
 int tlggpu_save_list_begin(int kind, const TlgSaveEntry *entries, int count, int focus);
 int tlggpu_save_list_poll(void);
 /* A message the player answers. code: a system message type (1 no data ... 14 too large), 100 the
- * game's own text, 101 an error code (value). buttons: 0 OK, 1 yes/no, 3 OK/cancel, -1 the
+ * game's own text, 101 an error code (value), 102 a new-game confirmation. buttons: 0 OK, 1 yes/no, 3 OK/cancel, -1 the
  * code's own. entry: the save it is about, or NULL. begin: 0 when no window exists.
  * poll: -1 while open, 1 yes/OK, 2 no/cancel. */
 int tlggpu_save_message_begin(int kind, int code, uint64_t value, const char *text, int buttons,
